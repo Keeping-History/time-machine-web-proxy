@@ -861,11 +861,15 @@ const server = http.createServer(
 		}
 
 		// Unwrap nested proxy URLs — if the target is itself a TimeMachine URL,
-		// extract the real url param from it
+		// extract the real url param from it.
+		// Match on hostname rather than port: when behind a TLS terminator (e.g.
+		// Cloud Run) the public port (443) differs from the container port, so
+		// nested.port would be "" and a port comparison would never match.
 		if (targetUrl) {
 			try {
 				const nested = new URL(targetUrl);
-				if (nested.port === String(port) && nested.searchParams.has("url")) {
+				const proxyHostname = new URL(proxyBase).hostname;
+				if (nested.hostname === proxyHostname && nested.searchParams.has("url")) {
 					targetUrl = nested.searchParams.get("url");
 				}
 			} catch {
