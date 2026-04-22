@@ -16,8 +16,13 @@ const hostname = process.env.LISTENER || "0.0.0.0";
 const cacheDir: string = process.env.CACHE_DIR ?? "/app/cache";
 const cacheEnabled: boolean =
 	process.env.CACHE_ENABLED?.toLowerCase() !== "false";
-const allowedOrigin: string =
-	process.env.CORS_ORIGIN || "http://localhost:5173";
+const allowedOrigins: string[] = (process.env.CORS_ORIGIN || "http://localhost:5173")
+	.split(",")
+	.map((s) => s.trim())
+	.filter(Boolean);
+
+const isOriginAllowed = (origin: string): boolean =>
+	allowedOrigins.includes("*") || allowedOrigins.includes(origin);
 const archiveRatePerSec: number = Number(process.env.ARCHIVE_RATE_PER_SEC) || 2;
 const archiveBurst: number = Number(process.env.ARCHIVE_BURST) || 5;
 const archiveMaxRetries: number = Number(process.env.ARCHIVE_MAX_RETRIES) || 3;
@@ -44,7 +49,7 @@ console.log({
 		hostname,
 		cacheDir: cacheEnabled ? cacheDir : "disabled",
 		cacheEnabled,
-		allowedOrigin,
+		allowedOrigins,
 		archiveRatePerSec,
 		archiveBurst,
 		archiveMaxRetries,
@@ -809,8 +814,11 @@ const sendCached = async (
 const server = http.createServer(
 	async (req: IncomingMessage, res: ServerResponse) => {
 		const origin = req.headers.origin;
-		if (origin === allowedOrigin) {
-			res.setHeader("Access-Control-Allow-Origin", origin);
+		if (origin && isOriginAllowed(origin)) {
+			res.setHeader(
+				"Access-Control-Allow-Origin",
+				allowedOrigins.includes("*") ? "*" : origin,
+			);
 		}
 		res.setHeader("Access-Control-Allow-Methods", "GET, DELETE, OPTIONS");
 		res.setHeader("Access-Control-Allow-Headers", "Content-Type");

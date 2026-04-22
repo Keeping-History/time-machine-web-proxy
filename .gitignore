@@ -5,3 +5,4 @@ codealike.json
 tsconfig.tsbuildinfo
 node_modules
 /.env.prod
+.DS_Store
