@@ -82,7 +82,10 @@ function makeClient(
 	return { client, exactQueue, crawlQueue, exactEvents, logger };
 }
 
-const WAYBACK_URL = "https://web.archive.org/web/20200101000000/http://example.com/";
+// The client accepts the ORIGINAL target URL (the worker in TASK-007 builds
+// the Wayback request internally). The SSRF policy lives upstream in
+// TimeMachineService.validateTargetUrl — see ArchiveJobClient class doc.
+const TARGET_URL = "http://example.com/";
 const TIME = "20200101000000";
 
 const expectedExactJobId = (url: string, time: string): string =>
@@ -95,26 +98,26 @@ const expectedCrawlJobId = (host: string, time: string): string =>
 describe("ArchiveJobClient.enqueueExactAndWait", () => {
 	it("adds an 'exact' job and resolves once waitUntilFinished resolves", async () => {
 		const { client, exactQueue } = makeClient();
-		await expect(client.enqueueExactAndWait(WAYBACK_URL, TIME)).resolves.toBeUndefined();
+		await expect(client.enqueueExactAndWait(TARGET_URL, TIME)).resolves.toBeUndefined();
 		expect(exactQueue.add).toHaveBeenCalledTimes(1);
 		const [name, data] = exactQueue.add.mock.calls[0] as AddArgs;
 		expect(name).toBe("exact");
-		expect(data).toEqual({ url: WAYBACK_URL, time: TIME });
+		expect(data).toEqual({ url: TARGET_URL, time: TIME });
 	});
 
 	it("uses a deterministic jobId of form 'e-' + sha256(url|time).slice(0,16)", async () => {
 		const { client, exactQueue } = makeClient();
-		await client.enqueueExactAndWait(WAYBACK_URL, TIME);
+		await client.enqueueExactAndWait(TARGET_URL, TIME);
 		const [, , opts] = exactQueue.add.mock.calls[0] as AddArgs;
 		const jobId = opts.jobId as string;
 		expect(jobId).toMatch(/^e-[0-9a-f]{16}$/);
-		expect(jobId).toBe(expectedExactJobId(WAYBACK_URL, TIME));
+		expect(jobId).toBe(expectedExactJobId(TARGET_URL, TIME));
 	});
 
 	it("produces the SAME jobId for two identical (url, time) pairs (dedup)", async () => {
 		const { client, exactQueue } = makeClient();
-		await client.enqueueExactAndWait(WAYBACK_URL, TIME);
-		await client.enqueueExactAndWait(WAYBACK_URL, TIME);
+		await client.enqueueExactAndWait(TARGET_URL, TIME);
+		await client.enqueueExactAndWait(TARGET_URL, TIME);
 		expect(exactQueue.add).toHaveBeenCalledTimes(2);
 		const idA = (exactQueue.add.mock.calls[0] as AddArgs)[2].jobId;
 		const idB = (exactQueue.add.mock.calls[1] as AddArgs)[2].jobId;
@@ -123,8 +126,8 @@ describe("ArchiveJobClient.enqueueExactAndWait", () => {
 
 	it("produces a DIFFERENT jobId when time changes", async () => {
 		const { client, exactQueue } = makeClient();
-		await client.enqueueExactAndWait(WAYBACK_URL, TIME);
-		await client.enqueueExactAndWait(WAYBACK_URL, "20210101000000");
+		await client.enqueueExactAndWait(TARGET_URL, TIME);
+		await client.enqueueExactAndWait(TARGET_URL, "20210101000000");
 		const idA = (exactQueue.add.mock.calls[0] as AddArgs)[2].jobId;
 		const idB = (exactQueue.add.mock.calls[1] as AddArgs)[2].jobId;
 		expect(idA).not.toBe(idB);
@@ -132,11 +135,8 @@ describe("ArchiveJobClient.enqueueExactAndWait", () => {
 
 	it("produces a DIFFERENT jobId when url changes", async () => {
 		const { client, exactQueue } = makeClient();
-		await client.enqueueExactAndWait(WAYBACK_URL, TIME);
-		await client.enqueueExactAndWait(
-			"https://web.archive.org/web/20200101000000/http://other.com/",
-			TIME,
-		);
+		await client.enqueueExactAndWait(TARGET_URL, TIME);
+		await client.enqueueExactAndWait("http://other.com/", TIME);
 		const idA = (exactQueue.add.mock.calls[0] as AddArgs)[2].jobId;
 		const idB = (exactQueue.add.mock.calls[1] as AddArgs)[2].jobId;
 		expect(idA).not.toBe(idB);
@@ -144,7 +144,7 @@ describe("ArchiveJobClient.enqueueExactAndWait", () => {
 
 	it("passes the exact JobsOptions: attempts/backoff/removeOnComplete/removeOnFail", async () => {
 		const { client, exactQueue } = makeClient();
-		await client.enqueueExactAndWait(WAYBACK_URL, TIME);
+		await client.enqueueExactAndWait(TARGET_URL, TIME);
 		const [, , opts] = exactQueue.add.mock.calls[0] as AddArgs;
 		expect(opts.attempts).toBe(3);
 		expect(opts.backoff).toEqual({ type: "exponential", delay: 2000 });
@@ -161,34 +161,23 @@ describe("ArchiveJobClient.enqueueExactAndWait", () => {
 			add: jest.fn().mockResolvedValue(failingJob),
 		};
 		const { client } = makeClient({ exactQueue });
-		await expect(client.enqueueExactAndWait(WAYBACK_URL, TIME)).rejects.toThrow("job failed");
+		await expect(client.enqueueExactAndWait(TARGET_URL, TIME)).rejects.toThrow("job failed");
 	});
 
 	it("invokes waitUntilFinished with the exactEvents instance and the WAIT_TIMEOUT_MS (200_000)", async () => {
 		const job: FakeJob = makeFakeJob("e-xyz");
 		const exactQueue: FakeQueue = { add: jest.fn().mockResolvedValue(job) };
 		const { client, exactEvents } = makeClient({ exactQueue });
-		await client.enqueueExactAndWait(WAYBACK_URL, TIME);
+		await client.enqueueExactAndWait(TARGET_URL, TIME);
 		expect(job.waitUntilFinished).toHaveBeenCalledTimes(1);
 		expect(job.waitUntilFinished).toHaveBeenCalledWith(exactEvents, 200_000);
 	});
 
-	it("rejects non-Wayback URLs (SSRF guard) BEFORE calling exactQueue.add", async () => {
+	it("accepts http:// and https:// original target URLs (transport layer does not enforce policy)", async () => {
 		const { client, exactQueue } = makeClient();
-		const err = await client
-			.enqueueExactAndWait("https://evil.com/", TIME)
-			.catch((e: unknown) => e);
-		expect(err).toBeInstanceOf(Error);
-		expect((err as { status?: number }).status).toBe(400);
-		expect(exactQueue.add).not.toHaveBeenCalled();
-	});
-
-	it("rejects http:// (non-https) Wayback-looking URLs (SSRF guard)", async () => {
-		const { client, exactQueue } = makeClient();
-		await expect(
-			client.enqueueExactAndWait("http://web.archive.org/web/x/http://example.com/", TIME),
-		).rejects.toMatchObject({ status: 400 });
-		expect(exactQueue.add).not.toHaveBeenCalled();
+		await client.enqueueExactAndWait("http://example.com/", TIME);
+		await client.enqueueExactAndWait("https://example.com/", TIME);
+		expect(exactQueue.add).toHaveBeenCalledTimes(2);
 	});
 });
 

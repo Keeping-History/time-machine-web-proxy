@@ -1,186 +1,358 @@
+// Tests for src/services/proxy.ts (TASK-009 rewrite).
+//
+// ProxyService now depends on:
+//   - CacheService.lookup(url, time) → CacheHit | null
+//   - ArchiveJobClientPort (enqueueExactAndWait, enqueueDomainCrawl)
+//   - optional Redis (for the per-host 24h crawl budget)
+//   - global fetch (for CDX preflight)
+//
+// The pipeline:
+//   1. lookup → if MISS, enqueueExactAndWait → re-lookup → 502 if still empty
+//   2. read file from disk, apply HTML/CSS rewrites
+//   3. on HTML MISS only, fire-and-forget enqueueDomainCrawl
+//      gated by (a) whitelist, (b) Redis SET NX EX budget, (c) CDX page count
+
+import { promises as fs } from "node:fs";
 import pino from "pino";
-import type { WaybackClient } from "../../src/clients/wayback";
-import type { CacheEntry } from "../../src/models/cache";
-import type { CacheService } from "../../src/services/cache";
+import type { ArchiveJobClientPort } from "../../src/clients/archive-job-client";
+import type { Config } from "../../src/models/config";
+import type { CacheHit, CacheService } from "../../src/services/cache";
 import { ProxyService } from "../../src/services/proxy";
 
-const ARCHIVE_PREFIX = "https://web.archive.org/web";
-const PROXY_BASE = "http://localhost:8080";
+jest.mock("node:fs", () => ({
+	promises: {
+		readFile: jest.fn(),
+	},
+}));
+
 const TIME = "20200101000000";
-const TARGET_URL = "http://example.com/page";
-const ARCHIVE_URL = `${ARCHIVE_PREFIX}/${TIME}/${TARGET_URL}`;
+const TARGET_HTML_URL = "http://example.com/page";
+const TARGET_CSS_URL = "http://example.com/style.css";
+const TARGET_IMG_URL = "http://example.com/img.png";
 
 const logger = pino({ level: "silent" });
 
-const htmlEntry: CacheEntry = {
-	contentType: "text/html",
-	archiveUrl: ARCHIVE_URL,
-	archiveTime: TIME,
-	body: "<html><head></head><body>hello</body></html>",
-	isHtml: true,
-	isCss: false,
-};
+const baseConfig = {
+	proxyBase: "http://localhost:8080",
+	proxyPrefix: "",
+	whitelistHosts: "*",
+	crawlMaxCdxPages: 50,
+} as unknown as Config;
 
-const cssEntry: CacheEntry = {
-	contentType: "text/css",
-	archiveUrl: ARCHIVE_URL,
-	archiveTime: TIME,
-	body: "body { color: red; }",
-	isHtml: false,
-	isCss: true,
-};
+const makeCache = (lookupImpl?: jest.Mock): jest.Mocked<CacheService> =>
+	({
+		lookup: lookupImpl ?? jest.fn().mockResolvedValue(null),
+	}) as unknown as jest.Mocked<CacheService>;
 
-const makeService = (
-	cacheOverrides: Partial<Pick<CacheService, "get" | "put">> = {},
-	waybackOverrides: Partial<Pick<WaybackClient, "fetch">> = {},
-) => {
-	const cache = {
-		get: jest.fn().mockResolvedValue(null),
-		put: jest.fn().mockResolvedValue(undefined),
-		handleCacheClear: jest.fn(),
-		...cacheOverrides,
-	} as unknown as CacheService;
+const makeClient = (): jest.Mocked<ArchiveJobClientPort> => ({
+	enqueueExactAndWait: jest.fn().mockResolvedValue(undefined),
+	enqueueDomainCrawl: jest.fn().mockResolvedValue(undefined),
+});
 
-	const wayback = {
-		fetch: jest.fn().mockResolvedValue(new Response(null, { status: 200 })),
-		...waybackOverrides,
-	} as unknown as WaybackClient;
-
-	const svc = new ProxyService(cache, wayback, logger, {
-		proxyBase: PROXY_BASE,
-		archivePrefix: ARCHIVE_PREFIX,
-		proxyPrefix: "",
-	});
-
-	return {
-		svc,
-		cache: cache as jest.Mocked<CacheService>,
-		wayback: wayback as jest.Mocked<WaybackClient>,
+const makeRedis = (setReturn: "OK" | null = "OK") =>
+	({
+		set: jest.fn().mockResolvedValue(setReturn),
+	}) as unknown as {
+		set: jest.Mock<Promise<"OK" | null>, [string, string, string, number, string]>;
 	};
-};
 
-beforeEach(() => jest.resetAllMocks());
+const HTML_BODY =
+	'<html><head></head><body><a href="/web/20200101000000/http://example.com/x">x</a></body></html>';
+const CSS_BODY = "body{background:url(/web/20200101000000/http://example.com/bg.png)}";
+const BIN_BODY = Buffer.from([1, 2, 3]);
+
+const htmlHit: CacheHit = { absPath: "/cache/v2/.../index.html", contentType: "text/html" };
+const cssHit: CacheHit = { absPath: "/cache/v2/.../style.css", contentType: "text/css" };
+const binHit: CacheHit = { absPath: "/cache/v2/.../img.png", contentType: "image/png" };
+
+const mockedReadFile = fs.readFile as jest.MockedFunction<typeof fs.readFile>;
+const mockedFetch = jest.fn();
+
+beforeEach(() => {
+	jest.clearAllMocks();
+	(global as unknown as { fetch: jest.Mock }).fetch = mockedFetch;
+});
+
+// --- HIT path ---------------------------------------------------------------
 
 describe("ProxyService.fetch — cache HIT", () => {
-	it("returns cached HTML entry with cache=HIT without calling wayback", async () => {
-		const { svc, wayback } = makeService({ get: jest.fn().mockResolvedValue(htmlEntry) });
-		const result = await svc.fetch(TARGET_URL, TIME);
+	it("returns HTML with rewrites applied and cache=HIT; no job enqueued", async () => {
+		const cache = makeCache(jest.fn().mockResolvedValue(htmlHit));
+		const client = makeClient();
+		mockedReadFile.mockResolvedValue(Buffer.from(HTML_BODY));
+		const svc = new ProxyService(cache, client, logger, baseConfig);
+
+		const result = await svc.fetch(TARGET_HTML_URL, TIME);
+
 		expect(result.cache).toBe("HIT");
 		expect(result.contentType).toBe("text/html");
-		expect(wayback.fetch).not.toHaveBeenCalled();
+		expect(client.enqueueExactAndWait).not.toHaveBeenCalled();
+		expect(client.enqueueDomainCrawl).not.toHaveBeenCalled();
+		// rewriteArchiveLinks turns /web/.../http://... into proxyBase/?url=...
+		expect(String(result.body)).toContain("http://localhost:8080/?url=");
 	});
 
-	it("returns cached CSS entry with cache=HIT", async () => {
-		const { svc } = makeService({ get: jest.fn().mockResolvedValue(cssEntry) });
-		const result = await svc.fetch(TARGET_URL, TIME);
+	it("returns CSS with rewriteCssUrls applied; no job enqueued", async () => {
+		const cache = makeCache(jest.fn().mockResolvedValue(cssHit));
+		const client = makeClient();
+		mockedReadFile.mockResolvedValue(Buffer.from(CSS_BODY));
+		const svc = new ProxyService(cache, client, logger, baseConfig);
+
+		const result = await svc.fetch(TARGET_CSS_URL, TIME);
+
 		expect(result.cache).toBe("HIT");
 		expect(result.contentType).toBe("text/css");
+		expect(client.enqueueExactAndWait).not.toHaveBeenCalled();
+		expect(String(result.body)).toContain("http://localhost:8080/?url=");
 	});
 
-	it("returns cached binary as a Buffer", async () => {
-		const binaryEntry: CacheEntry = {
-			...cssEntry,
-			contentType: "image/png",
-			isCss: false,
-			body: Buffer.from([1, 2, 3]).toString("base64"),
-		};
-		const { svc } = makeService({ get: jest.fn().mockResolvedValue(binaryEntry) });
-		const result = await svc.fetch(TARGET_URL, TIME);
+	it("returns binary body as a raw Buffer (no rewrite)", async () => {
+		const cache = makeCache(jest.fn().mockResolvedValue(binHit));
+		const client = makeClient();
+		mockedReadFile.mockResolvedValue(BIN_BODY);
+		const svc = new ProxyService(cache, client, logger, baseConfig);
+
+		const result = await svc.fetch(TARGET_IMG_URL, TIME);
+
 		expect(result.cache).toBe("HIT");
+		expect(result.contentType).toBe("image/png");
 		expect(result.body).toBeInstanceOf(Buffer);
+		expect((result.body as Buffer).equals(BIN_BODY)).toBe(true);
 	});
 });
+
+// --- MISS path --------------------------------------------------------------
 
 describe("ProxyService.fetch — cache MISS", () => {
-	const _makeHtmlFetch = (body: string, url = ARCHIVE_URL) =>
-		new Response(body, {
-			status: 200,
-			headers: { "content-type": "text/html", "x-archive-orig-content-type": "text/html" },
-			url,
-		} as ResponseInit & { url: string });
+	it("enqueues exact job, re-lookups, returns MISS with HTML rewrites", async () => {
+		const lookup = jest
+			.fn<Promise<CacheHit | null>, [string, string]>()
+			.mockResolvedValueOnce(null)
+			.mockResolvedValueOnce(htmlHit);
+		const cache = makeCache(lookup);
+		const client = makeClient();
+		mockedReadFile.mockResolvedValue(Buffer.from(HTML_BODY));
+		// Non-whitelisted to skip crawl side-effect for this test
+		const svc = new ProxyService(cache, client, logger, {
+			...baseConfig,
+			whitelistHosts: "other.com",
+		});
 
-	it("fetches from archive, caches, and returns MISS on HTML", async () => {
-		const html = "<html><head></head><body>archive</body></html>";
-		const { svc, cache, wayback } = makeService();
-		wayback.fetch.mockResolvedValue(
-			new Response(html, { status: 200, headers: { "content-type": "text/html" } }),
-		);
-		const result = await svc.fetch(TARGET_URL, TIME);
+		const result = await svc.fetch(TARGET_HTML_URL, TIME);
+
 		expect(result.cache).toBe("MISS");
-		expect(cache.put).toHaveBeenCalledTimes(1);
-		const [putUrl, putTime, putEntry] = cache.put.mock.calls[0];
-		expect(putUrl).toBe(TARGET_URL);
-		expect(putTime).toBe(TIME);
-		expect(putEntry.isHtml).toBe(true);
+		expect(client.enqueueExactAndWait).toHaveBeenCalledWith(TARGET_HTML_URL, TIME);
+		expect(lookup).toHaveBeenCalledTimes(2);
+		expect(String(result.body)).toContain("http://localhost:8080/?url=");
 	});
 
-	it("fetches and caches CSS with isCss=true", async () => {
-		const { svc, cache, wayback } = makeService();
-		wayback.fetch.mockResolvedValue(
-			new Response("body{}", { status: 200, headers: { "content-type": "text/css" } }),
-		);
-		const result = await svc.fetch(TARGET_URL, TIME);
-		expect(result.cache).toBe("MISS");
-		const [, , putEntry] = cache.put.mock.calls[0];
-		expect(putEntry.isCss).toBe(true);
+	it("throws Error{status:502} when cache is still empty after job completes", async () => {
+		const lookup = jest.fn().mockResolvedValue(null);
+		const cache = makeCache(lookup);
+		const client = makeClient();
+		const svc = new ProxyService(cache, client, logger, baseConfig);
+
+		await expect(svc.fetch(TARGET_HTML_URL, TIME)).rejects.toMatchObject({ status: 502 });
+		expect(client.enqueueExactAndWait).toHaveBeenCalledTimes(1);
 	});
 
-	it("fetches binary and stores body as base64", async () => {
-		const { svc, cache, wayback } = makeService();
-		wayback.fetch.mockResolvedValue(
-			new Response(new Uint8Array([1, 2, 3]), {
-				status: 200,
-				headers: { "content-type": "image/png" },
-			}),
-		);
-		const result = await svc.fetch(TARGET_URL, TIME);
-		expect(result.cache).toBe("MISS");
-		const [, , putEntry] = cache.put.mock.calls[0];
-		expect(putEntry.isHtml).toBe(false);
-		expect(putEntry.isCss).toBe(false);
-		expect(result.body).toBeInstanceOf(Buffer);
-	});
+	it("propagates the job rejection when enqueueExactAndWait rejects", async () => {
+		const cache = makeCache(jest.fn().mockResolvedValue(null));
+		const client = makeClient();
+		client.enqueueExactAndWait.mockRejectedValue(new Error("job failed"));
+		const svc = new ProxyService(cache, client, logger, baseConfig);
 
-	it("throws with status 404 when archive returns x-ts:404 header", async () => {
-		const { svc, wayback } = makeService();
-		wayback.fetch.mockResolvedValue(
-			new Response(null, { status: 200, headers: { "x-ts": "404" } }),
-		);
-		await expect(svc.fetch(TARGET_URL, TIME)).rejects.toMatchObject({ status: 404 });
-	});
-
-	it("throws with archive status for non-ok responses", async () => {
-		const { svc, wayback } = makeService();
-		wayback.fetch.mockResolvedValue(new Response(null, { status: 503 }));
-		await expect(svc.fetch(TARGET_URL, TIME)).rejects.toMatchObject({ status: 503 });
+		await expect(svc.fetch(TARGET_HTML_URL, TIME)).rejects.toThrow("job failed");
 	});
 });
 
-describe("ProxyService.fetchAndCacheImage", () => {
-	it("returns true and does not fetch when already cached", async () => {
-		const imgEntry: CacheEntry = { ...cssEntry, contentType: "image/png" };
-		const { svc, wayback } = makeService({ get: jest.fn().mockResolvedValue(imgEntry) });
-		const result = await svc.fetchAndCacheImage("http://example.com/img.png", TIME);
-		expect(result).toBe(true);
-		expect(wayback.fetch).not.toHaveBeenCalled();
-	});
+// --- Domain crawl gating ----------------------------------------------------
 
-	it("fetches, caches, and returns true on success", async () => {
-		const { svc, cache, wayback } = makeService();
-		wayback.fetch.mockResolvedValue(
-			new Response(new Uint8Array([1, 2]), {
-				status: 200,
-				headers: { "content-type": "image/png" },
-			}),
+describe("ProxyService.fetch — domain crawl fire-and-forget", () => {
+	const cdxOk = (count = 10) =>
+		Promise.resolve({ ok: true, text: () => Promise.resolve(String(count)) });
+
+	it("fires enqueueDomainCrawl on HTML MISS when whitelist passes + CDX ok + budget free", async () => {
+		const lookup = jest
+			.fn<Promise<CacheHit | null>, [string, string]>()
+			.mockResolvedValueOnce(null)
+			.mockResolvedValueOnce(htmlHit);
+		const cache = makeCache(lookup);
+		const client = makeClient();
+		mockedReadFile.mockResolvedValue(Buffer.from(HTML_BODY));
+		mockedFetch.mockReturnValue(cdxOk(10));
+		const redis = makeRedis("OK");
+		const svc = new ProxyService(
+			cache,
+			client,
+			logger,
+			{ ...baseConfig, whitelistHosts: "example.com" },
+			redis as unknown as import("ioredis").default,
 		);
-		const result = await svc.fetchAndCacheImage("http://example.com/img.png", TIME);
-		expect(result).toBe(true);
-		expect(cache.put).toHaveBeenCalledTimes(1);
+
+		await svc.fetch(TARGET_HTML_URL, TIME);
+		// fire-and-forget — yield to the microtask queue so the void promise settles
+		await new Promise((r) => setImmediate(r));
+
+		expect(client.enqueueDomainCrawl).toHaveBeenCalledWith("example.com", TIME);
+		expect(redis.set).toHaveBeenCalledWith("tm:crawl:budget:example.com", "1", "EX", 86_400, "NX");
 	});
 
-	it("returns false when archive response is not ok", async () => {
-		const { svc, wayback } = makeService();
-		wayback.fetch.mockResolvedValue(new Response(null, { status: 404 }));
-		expect(await svc.fetchAndCacheImage("http://example.com/img.png", TIME)).toBe(false);
+	it("does NOT fire crawl on cache HIT", async () => {
+		const cache = makeCache(jest.fn().mockResolvedValue(htmlHit));
+		const client = makeClient();
+		mockedReadFile.mockResolvedValue(Buffer.from(HTML_BODY));
+		const svc = new ProxyService(cache, client, logger, baseConfig);
+
+		await svc.fetch(TARGET_HTML_URL, TIME);
+		await new Promise((r) => setImmediate(r));
+
+		expect(client.enqueueDomainCrawl).not.toHaveBeenCalled();
+	});
+
+	it("does NOT fire crawl on non-HTML MISS (e.g. CSS)", async () => {
+		const lookup = jest
+			.fn<Promise<CacheHit | null>, [string, string]>()
+			.mockResolvedValueOnce(null)
+			.mockResolvedValueOnce(cssHit);
+		const cache = makeCache(lookup);
+		const client = makeClient();
+		mockedReadFile.mockResolvedValue(Buffer.from(CSS_BODY));
+		mockedFetch.mockReturnValue(cdxOk(10));
+		const redis = makeRedis("OK");
+		const svc = new ProxyService(
+			cache,
+			client,
+			logger,
+			{ ...baseConfig, whitelistHosts: "example.com" },
+			redis as unknown as import("ioredis").default,
+		);
+
+		await svc.fetch(TARGET_CSS_URL, TIME);
+		await new Promise((r) => setImmediate(r));
+
+		expect(client.enqueueDomainCrawl).not.toHaveBeenCalled();
+	});
+
+	it("skips crawl when host is not whitelisted", async () => {
+		const lookup = jest
+			.fn<Promise<CacheHit | null>, [string, string]>()
+			.mockResolvedValueOnce(null)
+			.mockResolvedValueOnce(htmlHit);
+		const cache = makeCache(lookup);
+		const client = makeClient();
+		mockedReadFile.mockResolvedValue(Buffer.from(HTML_BODY));
+		const redis = makeRedis("OK");
+		const svc = new ProxyService(
+			cache,
+			client,
+			logger,
+			{ ...baseConfig, whitelistHosts: "other.com" },
+			redis as unknown as import("ioredis").default,
+		);
+
+		await svc.fetch(TARGET_HTML_URL, TIME);
+		await new Promise((r) => setImmediate(r));
+
+		expect(client.enqueueDomainCrawl).not.toHaveBeenCalled();
+		// Budget should not even be consumed when whitelist short-circuits first
+		expect(redis.set).not.toHaveBeenCalled();
+		// CDX should not be fetched either
+		expect(mockedFetch).not.toHaveBeenCalled();
+	});
+
+	it("skips crawl when CDX page count exceeds crawlMaxCdxPages", async () => {
+		const lookup = jest
+			.fn<Promise<CacheHit | null>, [string, string]>()
+			.mockResolvedValueOnce(null)
+			.mockResolvedValueOnce(htmlHit);
+		const cache = makeCache(lookup);
+		const client = makeClient();
+		mockedReadFile.mockResolvedValue(Buffer.from(HTML_BODY));
+		mockedFetch.mockReturnValue(cdxOk(9999));
+		const redis = makeRedis("OK");
+		const svc = new ProxyService(
+			cache,
+			client,
+			logger,
+			{ ...baseConfig, whitelistHosts: "example.com", crawlMaxCdxPages: 50 },
+			redis as unknown as import("ioredis").default,
+		);
+
+		await svc.fetch(TARGET_HTML_URL, TIME);
+		await new Promise((r) => setImmediate(r));
+
+		expect(client.enqueueDomainCrawl).not.toHaveBeenCalled();
+	});
+
+	it("skips crawl when Redis budget is already consumed (SET NX returns null)", async () => {
+		const lookup = jest
+			.fn<Promise<CacheHit | null>, [string, string]>()
+			.mockResolvedValueOnce(null)
+			.mockResolvedValueOnce(htmlHit);
+		const cache = makeCache(lookup);
+		const client = makeClient();
+		mockedReadFile.mockResolvedValue(Buffer.from(HTML_BODY));
+		mockedFetch.mockReturnValue(cdxOk(10));
+		const redis = makeRedis(null);
+		const svc = new ProxyService(
+			cache,
+			client,
+			logger,
+			{ ...baseConfig, whitelistHosts: "example.com" },
+			redis as unknown as import("ioredis").default,
+		);
+
+		await svc.fetch(TARGET_HTML_URL, TIME);
+		await new Promise((r) => setImmediate(r));
+
+		expect(client.enqueueDomainCrawl).not.toHaveBeenCalled();
+		// Should NOT have called CDX since budget short-circuits before
+		expect(mockedFetch).not.toHaveBeenCalled();
+	});
+
+	it("does NOT throw when CDX fetch errors — foreground request still succeeds", async () => {
+		const lookup = jest
+			.fn<Promise<CacheHit | null>, [string, string]>()
+			.mockResolvedValueOnce(null)
+			.mockResolvedValueOnce(htmlHit);
+		const cache = makeCache(lookup);
+		const client = makeClient();
+		mockedReadFile.mockResolvedValue(Buffer.from(HTML_BODY));
+		mockedFetch.mockRejectedValue(new Error("CDX network down"));
+		const redis = makeRedis("OK");
+		const svc = new ProxyService(
+			cache,
+			client,
+			logger,
+			{ ...baseConfig, whitelistHosts: "example.com" },
+			redis as unknown as import("ioredis").default,
+		);
+
+		const result = await svc.fetch(TARGET_HTML_URL, TIME);
+		await new Promise((r) => setImmediate(r));
+
+		expect(result.cache).toBe("MISS");
+		expect(client.enqueueDomainCrawl).not.toHaveBeenCalled();
+	});
+
+	it("works with no Redis (redis arg defaults to null) — budget check is skipped, CDX still runs", async () => {
+		const lookup = jest
+			.fn<Promise<CacheHit | null>, [string, string]>()
+			.mockResolvedValueOnce(null)
+			.mockResolvedValueOnce(htmlHit);
+		const cache = makeCache(lookup);
+		const client = makeClient();
+		mockedReadFile.mockResolvedValue(Buffer.from(HTML_BODY));
+		mockedFetch.mockReturnValue(cdxOk(5));
+		const svc = new ProxyService(cache, client, logger, {
+			...baseConfig,
+			whitelistHosts: "example.com",
+		});
+
+		await svc.fetch(TARGET_HTML_URL, TIME);
+		await new Promise((r) => setImmediate(r));
+
+		expect(client.enqueueDomainCrawl).toHaveBeenCalledWith("example.com", TIME);
 	});
 });

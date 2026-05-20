@@ -51,28 +51,14 @@ const CRAWL_JOB_OPTS = {
 const WAIT_TIMEOUT_MS = 200_000;
 
 /**
- * SSRF guard prefix. enqueueExactAndWait refuses URLs not starting with
- * this prefix.
- *
- * TODO(TASK-009): The plan's narrative says workers construct the Wayback
- * URL internally from the original target host, and the worker
- * (TASK-007) actually feeds the original URL through
- * `normalizeBaseUrlInput` — i.e., jobs carry ORIGINAL urls. Per
- * TASK-008 AC #6 the producer's SSRF check is literally "starts with
- * 'https://web.archive.org/'", which only holds if ProxyService is
- * later rewired to enqueue the rewritten Wayback URL. When ProxyService
- * lands in TASK-009 we may need to either accept original URLs here
- * and move the Wayback-prefix assertion to the HTTP boundary, or have
- * the producer compose the Wayback URL before enqueue.
+ * Narrow port that ProxyService depends on. The concrete BullMQ-backed
+ * implementation below satisfies this shape, and Dependencies (TASK-010)
+ * can swap in a real or stub instance without breaking ProxyService.
  */
-const WAYBACK_ARCHIVE_PREFIX = "https://web.archive.org/";
-
-interface StatusError extends Error {
-	status: number;
+export interface ArchiveJobClientPort {
+	enqueueExactAndWait(url: string, time: string): Promise<void>;
+	enqueueDomainCrawl(host: string, time: string): Promise<void>;
 }
-
-const ssrfError = (url: string): StatusError =>
-	Object.assign(new Error(`SSRF: refusing non-Wayback URL ${url}`), { status: 400 });
 
 /**
  * BullMQ producer for archive jobs.
@@ -81,8 +67,16 @@ const ssrfError = (url: string): StatusError =>
  *   download via `QueueEvents.waitUntilFinished`.
  * - `enqueueDomainCrawl` is FIRE-AND-FORGET — caller does not await
  *   completion; suppressed entirely when `domainCrawlEnabled` is false.
+ *
+ * SSRF policy: this is the transport/producer layer. It does NOT enforce
+ * URL policy. The caller (TimeMachineService.validateTargetUrl) is
+ * responsible for rejecting private/internal hosts and disallowed
+ * protocols BEFORE the URL ever reaches this client. Jobs carry the
+ * ORIGINAL target URL (the worker in TASK-007 feeds it through
+ * `normalizeBaseUrlInput`); attempting to enforce a Wayback-prefix here
+ * was the wrong shape — flagged and resolved in TASK-009.
  */
-export class ArchiveJobClient {
+export class ArchiveJobClient implements ArchiveJobClientPort {
 	constructor(
 		private readonly exactQueue: Queue<ExactUrlJob>,
 		private readonly crawlQueue: Queue<DomainCrawlJob>,
@@ -92,9 +86,6 @@ export class ArchiveJobClient {
 	) {}
 
 	async enqueueExactAndWait(url: string, time: string): Promise<void> {
-		if (!url.startsWith(WAYBACK_ARCHIVE_PREFIX)) {
-			throw ssrfError(url);
-		}
 		const jobId = exactJobId(url, time);
 		const job = await this.exactQueue.add("exact", { url, time }, { ...EXACT_JOB_OPTS, jobId });
 		this.logger.debug(
