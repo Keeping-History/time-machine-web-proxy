@@ -3,6 +3,7 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import { extname, join, resolve, sep } from "node:path";
 import { lookup as mimeLookup } from "mime-types";
 import type pino from "pino";
+import { normalizeBaseUrlInput } from "../lib/normalize-base-url";
 import type { Config } from "../models/config";
 
 const ROOT_VERSION = "v2";
@@ -25,7 +26,12 @@ export class CacheService {
 	async lookup(url: string, time: string): Promise<CacheHit | null> {
 		if (!this.config.cacheEnabled) return null;
 		const u = new URL(url);
-		const root = this.cacheDirForJob(time, u.hostname);
+		// Match the worker's host normalization (src/queue/archive-worker.ts:111
+		// uses base.bareHost from normalizeBaseUrlInput, which strips the `www.`
+		// prefix). Without this, every `www.<host>` URL misses on the read side
+		// even after a successful download, surfacing as a 502 to the user.
+		const { bareHost } = normalizeBaseUrlInput(url);
+		const root = this.cacheDirForJob(time, bareHost);
 		// Decode the pathname so percent-encoded traversal sequences (e.g. %2e%2e%2f)
 		// are normalized before path.resolve, allowing the startsWith guard below
 		// to catch them. URL's own pathname normalization only handles literal "..".
