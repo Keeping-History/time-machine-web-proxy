@@ -29,7 +29,7 @@ export class TimeMachineService {
 		private readonly onStop?: () => Promise<void>,
 	) {}
 
-	start(): void {
+	start(): Promise<void> {
 		this.server = http.createServer((req, res) => {
 			void this.httpHandler(req, res);
 		});
@@ -42,13 +42,19 @@ export class TimeMachineService {
 			process.on("SIGINT", this.signalHandler);
 		}
 
-		this.server.listen(this.config.port, this.config.hostname, () => {
-			this.logger.info(
-				`TimeMachine server listening on http://${this.config.hostname}:${this.config.port}`,
-			);
-			this.logger.info(
-				`TimeMachine WebSocket listening at ${this.config.hostname}:${this.config.port}/ws`,
-			);
+		// Resolve only once the underlying socket is actually bound, so callers
+		// that immediately stop() (notably tests) don't race the listen callback
+		// and leak a TCPSERVERWRAP handle.
+		return new Promise<void>((resolve) => {
+			this.server.listen(this.config.port, this.config.hostname, () => {
+				this.logger.info(
+					`TimeMachine server listening on http://${this.config.hostname}:${this.config.port}`,
+				);
+				this.logger.info(
+					`TimeMachine WebSocket listening at ${this.config.hostname}:${this.config.port}/ws`,
+				);
+				resolve();
+			});
 		});
 	}
 

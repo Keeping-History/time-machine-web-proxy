@@ -66,7 +66,7 @@ describe("TimeMachineService", () => {
 
 	it("start() creates a listening server and stop() closes it", async () => {
 		const svc = makeService();
-		svc.start();
+		await svc.start();
 		await svc.stop();
 	});
 });

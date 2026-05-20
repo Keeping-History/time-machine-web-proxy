@@ -14,7 +14,7 @@ function parseOutboundProxyChooser(raw: string | undefined): OutboundProxyChoose
 	const lowered = raw.trim().toLowerCase();
 	if (lowered === "sequential" || lowered === "random") return lowered;
 	throw new Error(
-		`OUTBOUND_PROXY_CHOOSER must be "Sequential" or "Random" (got "${raw}")`,
+		`OUTBOUND_PROXY_CHOOSER must be "sequential" or "random" (got "${raw}")`,
 	);
 }
 

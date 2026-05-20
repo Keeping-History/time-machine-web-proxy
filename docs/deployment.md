@@ -196,8 +196,9 @@ There are two authentication modes:
 
 `OUTBOUND_PROXY_URLS` is a CSV. Provide one URL for a single proxy, or two
 or more URLs to rotate per outbound request. `OUTBOUND_PROXY_CHOOSER`
-selects the rotation strategy (`Sequential` round-robin, the default, or
-`Random`) and is ignored when only one URL is configured.
+selects the rotation strategy (`sequential` round-robin, the default, or
+`random`); values are case-insensitive. Ignored when only one URL is
+configured.
 
 Example IP-auth setup, single proxy:
 
@@ -211,7 +212,7 @@ Example Basic-auth setup with rotation (the password ships via Secret Manager):
 
 ```
 OUTBOUND_PROXY_URLS=http://us-wa.proxymesh.com:31280,http://uk.proxymesh.com:31280,http://au.proxymesh.com:31280
-OUTBOUND_PROXY_CHOOSER=Random
+OUTBOUND_PROXY_CHOOSER=random
 OUTBOUND_PROXY_USERNAME=tm-prod
 OUTBOUND_PROXY_PASSWORD=<from-secret-manager>
 ```

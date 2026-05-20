@@ -192,7 +192,7 @@ describe("loadConfig", () => {
 	it("throws on unknown OUTBOUND_PROXY_CHOOSER value", () => {
 		process.env.OUTBOUND_PROXY_CHOOSER = "roundrobin";
 		expect(() => loadConfig()).toThrow(
-			/OUTBOUND_PROXY_CHOOSER must be "Sequential" or "Random"/,
+			/OUTBOUND_PROXY_CHOOSER must be "sequential" or "random"/,
 		);
 	});
 });
