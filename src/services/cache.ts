@@ -38,18 +38,35 @@ export class CacheService {
 		} catch {
 			throw Object.assign(new Error("Malformed URL pathname"), { status: 400 });
 		}
-		const rel = decoded === "/" || decoded.endsWith("/") ? `${decoded}index.html` : decoded;
-		const abs = resolve(root, `.${rel}`);
-		if (abs !== root && !abs.startsWith(root + sep)) {
+		const isDirStyle = decoded === "/" || decoded.endsWith("/");
+		const primaryRel = isDirStyle ? `${decoded}index.html` : decoded;
+		const primaryAbs = resolve(root, `.${primaryRel}`);
+		if (primaryAbs !== root && !primaryAbs.startsWith(root + sep)) {
 			throw Object.assign(new Error("Path traversal rejected"), { status: 400 });
 		}
 		try {
-			await fs.access(abs);
-			const contentType = mimeLookup(extname(abs)) || "application/octet-stream";
-			return { absPath: abs, contentType };
+			await fs.access(primaryAbs);
+			const contentType = mimeLookup(extname(primaryAbs)) || "application/octet-stream";
+			return { absPath: primaryAbs, contentType };
 		} catch {
-			return null;
+			/* fall through to directory-index fallback */
 		}
+		// Directory-index fallback: the Wayback downloader saves `http://host/mac`
+		// as `<root>/mac/index.html`. Without this probe, a request for `/mac`
+		// (no trailing slash) would miss even when the page is cached.
+		if (!isDirStyle) {
+			const fallbackAbs = resolve(root, `.${decoded}/index.html`);
+			if (fallbackAbs !== root && !fallbackAbs.startsWith(root + sep)) {
+				throw Object.assign(new Error("Path traversal rejected"), { status: 400 });
+			}
+			try {
+				await fs.access(fallbackAbs);
+				return { absPath: fallbackAbs, contentType: "text/html" };
+			} catch {
+				return null;
+			}
+		}
+		return null;
 	}
 
 	/**
