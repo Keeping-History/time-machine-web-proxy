@@ -52,9 +52,7 @@ export class ArchiveRequestQueue {
 		while (this.queue.length > 0 && this.active < this.maxConcurrent) {
 			this.refillTokens();
 			if (this.rateTokens < 1) {
-				const waitMs = Math.ceil(
-					((1 - this.rateTokens) / this.ratePerSec) * 1000,
-				);
+				const waitMs = Math.ceil(((1 - this.rateTokens) / this.ratePerSec) * 1000);
 				setTimeout(() => this.drain(), waitMs);
 				return;
 			}
@@ -87,8 +85,7 @@ export class ArchiveRequestQueue {
 		const now = Date.now();
 		this.rateTokens = Math.min(
 			this.burst,
-			this.rateTokens +
-				((now - this.rateLastRefill) / 1000) * this.ratePerSec,
+			this.rateTokens + ((now - this.rateLastRefill) / 1000) * this.ratePerSec,
 		);
 		this.rateLastRefill = now;
 	}

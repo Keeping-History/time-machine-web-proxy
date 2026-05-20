@@ -11,10 +11,8 @@ const RE_CSS_URL_ABSOLUTE =
 const RE_CSS_URL_RELATIVE =
 	/(url\s*\(\s*['"]?)\/web\/\d{1,14}[^/]*\/(https?:\/\/[^"')]*?)(['"]?\s*\))/gi;
 const RE_LEADING_WHITESPACE = /^[\s\t\r\n]+</i;
-const RE_WAYBACK_JS_HEAD =
-	/((?:<head[^>]*>))[\s\S]*?<!-- End Wayback Rewrite JS Include -->/i;
-const RE_WAYBACK_JS_HTML =
-	/((?:<html[^>]*>))[\s\S]*?<!-- End Wayback Rewrite JS Include -->/i;
+const RE_WAYBACK_JS_HEAD = /((?:<head[^>]*>))[\s\S]*?<!-- End Wayback Rewrite JS Include -->/i;
+const RE_WAYBACK_JS_HTML = /((?:<html[^>]*>))[\s\S]*?<!-- End Wayback Rewrite JS Include -->/i;
 const RE_WAYBACK_TOOLBAR =
 	/<!-- BEGIN WAYBACK TOOLBAR INSERT -->[\s\S]*?<!-- END WAYBACK TOOLBAR INSERT -->/gi;
 const RE_HEAD_TAG = /(<head[^>]*>)/i;
@@ -81,7 +79,12 @@ export const rewriteCssUrls = (css: string, proxyBase: string, time: string): st
 
 export const collectWaybackResourceUrls = (html: string): string[] => {
 	const urls = new Set<string>();
-	for (const re of [RE_IMG_SRC_ABSOLUTE, RE_IMG_SRC_RELATIVE, RE_CSS_URL_ABSOLUTE, RE_CSS_URL_RELATIVE]) {
+	for (const re of [
+		RE_IMG_SRC_ABSOLUTE,
+		RE_IMG_SRC_RELATIVE,
+		RE_CSS_URL_ABSOLUTE,
+		RE_CSS_URL_RELATIVE,
+	]) {
 		for (const match of html.matchAll(re)) urls.add(match[2]);
 	}
 	return [...urls];

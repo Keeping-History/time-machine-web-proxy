@@ -1,7 +1,7 @@
 import type pino from "pino";
+import type { ArchiveRequestQueue } from "../lib/queue";
+import { abortableSleep, type ShutdownController } from "../lib/shutdown";
 import type { Config } from "../models/config";
-import { ArchiveRequestQueue } from "../lib/queue";
-import { ShutdownController, abortableSleep } from "../lib/shutdown";
 
 export type ResourceType = "document" | "image" | "style";
 
@@ -81,9 +81,7 @@ export class WaybackClient {
 			if (isRetryable(err) && retriesLeft > 0) {
 				const step = this.config.archiveMaxRetries - retriesLeft;
 				const backoffMs =
-					WaybackClient.BACKOFF_STEPS_MS[
-						Math.min(step, WaybackClient.BACKOFF_STEPS_MS.length - 1)
-					];
+					WaybackClient.BACKOFF_STEPS_MS[Math.min(step, WaybackClient.BACKOFF_STEPS_MS.length - 1)];
 				this.logger.warn(
 					{ url, retriesLeft, backoffMs, error: err instanceof Error ? err.message : String(err) },
 					"[TimeMachine] Connection error, retrying after cooloff",

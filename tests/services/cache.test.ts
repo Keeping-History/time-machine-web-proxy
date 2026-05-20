@@ -10,8 +10,8 @@ jest.mock("node:fs", () => ({
 
 import { promises as fs } from "node:fs";
 import pino from "pino";
-import { CacheService } from "../../src/services/cache";
 import type { CacheEntry } from "../../src/models/cache";
+import { CacheService } from "../../src/services/cache";
 
 const logger = pino({ level: "silent" });
 
@@ -82,12 +82,22 @@ describe("CacheService.put", () => {
 });
 
 describe("CacheService.handleCacheClear", () => {
-	const makeReq = (query = "") => ({ url: `/_cache/clear${query}` }) as import("node:http").IncomingMessage;
+	const makeReq = (query = "") =>
+		({ url: `/_cache/clear${query}` }) as import("node:http").IncomingMessage;
 	const makeRes = () => {
 		const res = { headers: {} as Record<string, string>, statusCode: 0, body: "" };
 		return {
-			setHeader: jest.fn((k: string, v: string) => { res.headers[k] = v; }),
-			writeHead: jest.fn((code: number) => { res.statusCode = code; return { end: jest.fn((b: string) => { res.body = b; }) }; }),
+			setHeader: jest.fn((k: string, v: string) => {
+				res.headers[k] = v;
+			}),
+			writeHead: jest.fn((code: number) => {
+				res.statusCode = code;
+				return {
+					end: jest.fn((b: string) => {
+						res.body = b;
+					}),
+				};
+			}),
 			res,
 		} as unknown as import("node:http").ServerResponse & { res: typeof res };
 	};
@@ -107,7 +117,12 @@ describe("CacheService.handleCacheClear", () => {
 	});
 
 	it("skips files that do not match the type filter", async () => {
-		const cssEntry: CacheEntry = { ...validEntry, isHtml: false, isCss: true, contentType: "text/css" };
+		const cssEntry: CacheEntry = {
+			...validEntry,
+			isHtml: false,
+			isCss: true,
+			contentType: "text/css",
+		};
 		(mockFs.readdir as jest.Mock).mockResolvedValue(["abc.json"]);
 		mockFs.readFile.mockResolvedValue(JSON.stringify(cssEntry));
 		mockFs.unlink.mockResolvedValue(undefined);

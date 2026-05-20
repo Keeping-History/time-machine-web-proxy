@@ -1,8 +1,8 @@
 import pino from "pino";
-import { ProxyService } from "../../src/services/proxy";
-import type { CacheService } from "../../src/services/cache";
 import type { WaybackClient } from "../../src/clients/wayback";
 import type { CacheEntry } from "../../src/models/cache";
+import type { CacheService } from "../../src/services/cache";
+import { ProxyService } from "../../src/services/proxy";
 
 const ARCHIVE_PREFIX = "https://web.archive.org/web";
 const PROXY_BASE = "http://localhost:8080";
@@ -52,7 +52,11 @@ const makeService = (
 		proxyPrefix: "",
 	});
 
-	return { svc, cache: cache as jest.Mocked<CacheService>, wayback: wayback as jest.Mocked<WaybackClient> };
+	return {
+		svc,
+		cache: cache as jest.Mocked<CacheService>,
+		wayback: wayback as jest.Mocked<WaybackClient>,
+	};
 };
 
 beforeEach(() => jest.resetAllMocks());
@@ -74,7 +78,12 @@ describe("ProxyService.fetch — cache HIT", () => {
 	});
 
 	it("returns cached binary as a Buffer", async () => {
-		const binaryEntry: CacheEntry = { ...cssEntry, contentType: "image/png", isCss: false, body: Buffer.from([1, 2, 3]).toString("base64") };
+		const binaryEntry: CacheEntry = {
+			...cssEntry,
+			contentType: "image/png",
+			isCss: false,
+			body: Buffer.from([1, 2, 3]).toString("base64"),
+		};
 		const { svc } = makeService({ get: jest.fn().mockResolvedValue(binaryEntry) });
 		const result = await svc.fetch(TARGET_URL, TIME);
 		expect(result.cache).toBe("HIT");
@@ -83,7 +92,7 @@ describe("ProxyService.fetch — cache HIT", () => {
 });
 
 describe("ProxyService.fetch — cache MISS", () => {
-	const makeHtmlFetch = (body: string, url = ARCHIVE_URL) =>
+	const _makeHtmlFetch = (body: string, url = ARCHIVE_URL) =>
 		new Response(body, {
 			status: 200,
 			headers: { "content-type": "text/html", "x-archive-orig-content-type": "text/html" },
@@ -119,7 +128,10 @@ describe("ProxyService.fetch — cache MISS", () => {
 	it("fetches binary and stores body as base64", async () => {
 		const { svc, cache, wayback } = makeService();
 		wayback.fetch.mockResolvedValue(
-			new Response(new Uint8Array([1, 2, 3]), { status: 200, headers: { "content-type": "image/png" } }),
+			new Response(new Uint8Array([1, 2, 3]), {
+				status: 200,
+				headers: { "content-type": "image/png" },
+			}),
 		);
 		const result = await svc.fetch(TARGET_URL, TIME);
 		expect(result.cache).toBe("MISS");
@@ -156,7 +168,10 @@ describe("ProxyService.fetchAndCacheImage", () => {
 	it("fetches, caches, and returns true on success", async () => {
 		const { svc, cache, wayback } = makeService();
 		wayback.fetch.mockResolvedValue(
-			new Response(new Uint8Array([1, 2]), { status: 200, headers: { "content-type": "image/png" } }),
+			new Response(new Uint8Array([1, 2]), {
+				status: 200,
+				headers: { "content-type": "image/png" },
+			}),
 		);
 		const result = await svc.fetchAndCacheImage("http://example.com/img.png", TIME);
 		expect(result).toBe(true);

@@ -1,12 +1,12 @@
-import { loadConfig, ensureCacheDir } from "./lib/config";
-import { createLogger } from "./lib/logger";
-import { ShutdownController } from "./lib/shutdown";
-import { ArchiveRequestQueue } from "./lib/queue";
 import { WaybackClient } from "./clients/wayback";
+import { ensureCacheDir, loadConfig } from "./lib/config";
+import { createLogger } from "./lib/logger";
+import { ArchiveRequestQueue } from "./lib/queue";
+import { ShutdownController } from "./lib/shutdown";
+import { isHostWhitelisted, validateTargetUrl } from "./lib/url-validator";
 import { CacheService } from "./services/cache";
 import { ProxyService } from "./services/proxy";
 import { TimeMachineService } from "./services/time-machine";
-import { validateTargetUrl, isHostWhitelisted } from "./lib/url-validator";
 
 const config = loadConfig();
 ensureCacheDir(config.cacheDir);

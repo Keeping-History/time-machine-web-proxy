@@ -8,9 +8,9 @@
 		"test": {
 			"outputs": ["coverage/**"]
 		},
-		"//#lint": {},
-		"//#check": {},
-		"//#check:fix": {
+		"lint": {},
+		"check": {},
+		"check:fix": {
 			"cache": false
 		}
 	}

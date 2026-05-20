@@ -5,9 +5,9 @@ jest.mock("../../src/lib/shutdown", () => ({
 }));
 
 import pino from "pino";
+import { WaybackClient } from "../../src/clients/wayback";
 import { ArchiveRequestQueue } from "../../src/lib/queue";
 import { ShutdownController } from "../../src/lib/shutdown";
-import { WaybackClient } from "../../src/clients/wayback";
 
 const ARCHIVE_PREFIX = "https://web.archive.org/web";
 const VALID_URL = `${ARCHIVE_PREFIX}/20200101000000/http://example.com/`;
@@ -43,21 +43,27 @@ describe("WaybackClient.fetch", () => {
 	});
 
 	it("passes document headers by default", async () => {
-		const spy = jest.spyOn(global, "fetch").mockResolvedValueOnce(new Response(null, { status: 200 }));
+		const spy = jest
+			.spyOn(global, "fetch")
+			.mockResolvedValueOnce(new Response(null, { status: 200 }));
 		await makeClient().fetch(VALID_URL);
 		const headers = spy.mock.calls[0][1]?.headers as Record<string, string>;
 		expect(headers["Sec-Fetch-Dest"]).toBe("document");
 	});
 
 	it("passes image headers for image resource type", async () => {
-		const spy = jest.spyOn(global, "fetch").mockResolvedValueOnce(new Response(null, { status: 200 }));
+		const spy = jest
+			.spyOn(global, "fetch")
+			.mockResolvedValueOnce(new Response(null, { status: 200 }));
 		await makeClient().fetch(VALID_URL, "image");
 		const headers = spy.mock.calls[0][1]?.headers as Record<string, string>;
 		expect(headers["Sec-Fetch-Dest"]).toBe("image");
 	});
 
 	it("passes style headers for style resource type", async () => {
-		const spy = jest.spyOn(global, "fetch").mockResolvedValueOnce(new Response(null, { status: 200 }));
+		const spy = jest
+			.spyOn(global, "fetch")
+			.mockResolvedValueOnce(new Response(null, { status: 200 }));
 		await makeClient().fetch(VALID_URL, "style");
 		const headers = spy.mock.calls[0][1]?.headers as Record<string, string>;
 		expect(headers["Sec-Fetch-Dest"]).toBe("style");

@@ -1,9 +1,9 @@
 import pino from "pino";
-import { TimeMachineService } from "../../src/services/time-machine";
-import type { Config } from "../../src/models/config";
-import type { ProxyService } from "../../src/services/proxy";
-import type { CacheService } from "../../src/services/cache";
 import { ShutdownController } from "../../src/lib/shutdown";
+import type { Config } from "../../src/models/config";
+import type { CacheService } from "../../src/services/cache";
+import type { ProxyService } from "../../src/services/proxy";
+import { TimeMachineService } from "../../src/services/time-machine";
 
 const logger = pino({ level: "silent" });
 
@@ -28,8 +28,18 @@ const config: Config = {
 };
 
 const makeService = () => {
-	const proxy = { fetch: jest.fn(), fetchAndCacheImage: jest.fn(), prefetchResources: jest.fn(), prefetchResourceUrls: jest.fn(), getCachedResourceUrls: jest.fn() } as unknown as ProxyService;
-	const cache = { get: jest.fn(), put: jest.fn(), handleCacheClear: jest.fn() } as unknown as CacheService;
+	const proxy = {
+		fetch: jest.fn(),
+		fetchAndCacheImage: jest.fn(),
+		prefetchResources: jest.fn(),
+		prefetchResourceUrls: jest.fn(),
+		getCachedResourceUrls: jest.fn(),
+	} as unknown as ProxyService;
+	const cache = {
+		get: jest.fn(),
+		put: jest.fn(),
+		handleCacheClear: jest.fn(),
+	} as unknown as CacheService;
 	const validator = {
 		validateTargetUrl: jest.fn((url: string) => url),
 		isHostWhitelisted: jest.fn(() => true),

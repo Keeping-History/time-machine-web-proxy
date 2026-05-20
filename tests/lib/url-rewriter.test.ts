@@ -1,11 +1,11 @@
 import {
-	sanitizeTimeParam,
 	arcUrl,
+	collectWaybackResourceUrls,
 	rewriteArchiveLinks,
 	rewriteCssUrls,
-	rewriteImageUrlsFiltered,
 	rewriteCssUrlsFiltered,
-	collectWaybackResourceUrls,
+	rewriteImageUrlsFiltered,
+	sanitizeTimeParam,
 	stripWaybackToolbar,
 	unwrapNestedProxyUrl,
 } from "../../src/lib/url-rewriter";
@@ -85,13 +85,17 @@ describe("rewriteArchiveLinks", () => {
 	it("rewrites absolute archive hrefs", () => {
 		const html = `<a href="https://web.archive.org/web/20200101000000/http://example.com/page">link</a>`;
 		const result = rewriteArchiveLinks(html, PROXY);
-		expect(result).toContain(`href="${PROXY}/?url=${encodeURIComponent("http://example.com/page")}&time=${TIME}"`);
+		expect(result).toContain(
+			`href="${PROXY}/?url=${encodeURIComponent("http://example.com/page")}&time=${TIME}"`,
+		);
 	});
 
 	it("rewrites relative archive hrefs", () => {
 		const html = `<a href="/web/20200101000000/http://example.com/page">link</a>`;
 		const result = rewriteArchiveLinks(html, PROXY);
-		expect(result).toContain(`href="${PROXY}/?url=${encodeURIComponent("http://example.com/page")}&time=${TIME}"`);
+		expect(result).toContain(
+			`href="${PROXY}/?url=${encodeURIComponent("http://example.com/page")}&time=${TIME}"`,
+		);
 	});
 
 	it("leaves non-archive hrefs untouched", () => {
@@ -104,13 +108,17 @@ describe("rewriteCssUrls", () => {
 	it("rewrites absolute archive url() references", () => {
 		const css = `background: url('https://web.archive.org/web/20200101000000/http://example.com/img.png')`;
 		const result = rewriteCssUrls(css, PROXY, TIME);
-		expect(result).toContain(`url('${PROXY}/?url=${encodeURIComponent("http://example.com/img.png")}&time=${TIME}')`);
+		expect(result).toContain(
+			`url('${PROXY}/?url=${encodeURIComponent("http://example.com/img.png")}&time=${TIME}')`,
+		);
 	});
 
 	it("rewrites relative archive url() references", () => {
 		const css = `background: url('/web/20200101000000/http://example.com/img.png')`;
 		const result = rewriteCssUrls(css, PROXY, TIME);
-		expect(result).toContain(`url('${PROXY}/?url=${encodeURIComponent("http://example.com/img.png")}&time=${TIME}')`);
+		expect(result).toContain(
+			`url('${PROXY}/?url=${encodeURIComponent("http://example.com/img.png")}&time=${TIME}')`,
+		);
 	});
 });
 

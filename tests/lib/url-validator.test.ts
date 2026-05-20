@@ -1,4 +1,4 @@
-import { validateTargetUrl, isHostWhitelisted, parseWhitelist } from "../../src/lib/url-validator";
+import { isHostWhitelisted, parseWhitelist, validateTargetUrl } from "../../src/lib/url-validator";
 
 describe("parseWhitelist", () => {
 	it("splits comma-separated hosts", () => {
@@ -79,30 +79,44 @@ describe("validateTargetUrl", () => {
 	});
 
 	it("throws for localhost", () => {
-		expect(() => validateTargetUrl("http://localhost/path")).toThrow("Private/internal hosts disallowed");
+		expect(() => validateTargetUrl("http://localhost/path")).toThrow(
+			"Private/internal hosts disallowed",
+		);
 	});
 
 	it("throws for 127.x loopback", () => {
-		expect(() => validateTargetUrl("http://127.0.0.1/path")).toThrow("Private/internal hosts disallowed");
+		expect(() => validateTargetUrl("http://127.0.0.1/path")).toThrow(
+			"Private/internal hosts disallowed",
+		);
 	});
 
 	it("throws for 10.x private range", () => {
-		expect(() => validateTargetUrl("http://10.0.0.1/path")).toThrow("Private/internal hosts disallowed");
+		expect(() => validateTargetUrl("http://10.0.0.1/path")).toThrow(
+			"Private/internal hosts disallowed",
+		);
 	});
 
 	it("throws for 192.168.x private range", () => {
-		expect(() => validateTargetUrl("http://192.168.1.1/path")).toThrow("Private/internal hosts disallowed");
+		expect(() => validateTargetUrl("http://192.168.1.1/path")).toThrow(
+			"Private/internal hosts disallowed",
+		);
 	});
 
 	it("throws for 172.16-31.x private range", () => {
-		expect(() => validateTargetUrl("http://172.16.0.1/path")).toThrow("Private/internal hosts disallowed");
+		expect(() => validateTargetUrl("http://172.16.0.1/path")).toThrow(
+			"Private/internal hosts disallowed",
+		);
 	});
 
 	it("throws for IPv6 loopback ::1", () => {
-		expect(() => validateTargetUrl("http://[::1]/path")).toThrow("Private/internal hosts disallowed");
+		expect(() => validateTargetUrl("http://[::1]/path")).toThrow(
+			"Private/internal hosts disallowed",
+		);
 	});
 
 	it("throws for link-local 169.254.x", () => {
-		expect(() => validateTargetUrl("http://169.254.1.1/path")).toThrow("Private/internal hosts disallowed");
+		expect(() => validateTargetUrl("http://169.254.1.1/path")).toThrow(
+			"Private/internal hosts disallowed",
+		);
 	});
 });

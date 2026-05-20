@@ -1,7 +1,4 @@
 import type pino from "pino";
-import type { Config } from "../models/config";
-import type { ProxyResult } from "../models/proxy";
-import type { CacheService } from "./cache";
 import type { WaybackClient } from "../clients/wayback";
 import {
 	arcUrl,
@@ -12,6 +9,9 @@ import {
 	rewriteImageUrlsFiltered,
 	stripWaybackToolbar,
 } from "../lib/url-rewriter";
+import type { Config } from "../models/config";
+import type { ProxyResult } from "../models/proxy";
+import type { CacheService } from "./cache";
 
 const RE_ARCHIVE_TIME = /\/web\/(\d{14})\//;
 
@@ -63,7 +63,9 @@ export class ProxyService {
 			throw Object.assign(new Error("Not found in archive"), { status: 404 });
 		}
 		if (!fetchRes.ok) {
-			throw Object.assign(new Error(`Archive returned ${fetchRes.status}`), { status: fetchRes.status });
+			throw Object.assign(new Error(`Archive returned ${fetchRes.status}`), {
+				status: fetchRes.status,
+			});
 		}
 
 		const contentType = fetchRes.headers.get("content-type") || "";
@@ -76,7 +78,14 @@ export class ProxyService {
 		if (isHtml) {
 			const html = await fetchRes.text();
 			const filtered = stripWaybackToolbar(html, fetchRes.url);
-			await this.cache.put(targetUrl, time, { contentType, archiveUrl: fetchRes.url, archiveTime, body: filtered, isHtml: true, isCss: false });
+			await this.cache.put(targetUrl, time, {
+				contentType,
+				archiveUrl: fetchRes.url,
+				archiveTime,
+				body: filtered,
+				isHtml: true,
+				isCss: false,
+			});
 			const uncachedUrls = collectWaybackResourceUrls(filtered);
 			this.prefetchResourceUrls(uncachedUrls, time);
 			const empty = new Set<string>();
@@ -91,15 +100,36 @@ export class ProxyService {
 			);
 		} else if (isCss) {
 			const css = await fetchRes.text();
-			await this.cache.put(targetUrl, time, { contentType, archiveUrl: fetchRes.url, archiveTime, body: css, isHtml: false, isCss: true });
+			await this.cache.put(targetUrl, time, {
+				contentType,
+				archiveUrl: fetchRes.url,
+				archiveTime,
+				body: css,
+				isHtml: false,
+				isCss: true,
+			});
 			body = rewriteCssUrls(css, this.config.proxyBase, time);
 		} else {
 			const buffer = Buffer.from(await fetchRes.arrayBuffer());
-			await this.cache.put(targetUrl, time, { contentType, archiveUrl: fetchRes.url, archiveTime, body: buffer.toString("base64"), isHtml: false, isCss: false });
+			await this.cache.put(targetUrl, time, {
+				contentType,
+				archiveUrl: fetchRes.url,
+				archiveTime,
+				body: buffer.toString("base64"),
+				isHtml: false,
+				isCss: false,
+			});
 			body = buffer;
 		}
 
-		return { contentType, archiveUrl: fetchRes.url, originalUrl: targetUrl, archiveTime, body, cache: "MISS" };
+		return {
+			contentType,
+			archiveUrl: fetchRes.url,
+			originalUrl: targetUrl,
+			archiveTime,
+			body,
+			cache: "MISS",
+		};
 	}
 
 	async fetchAndCacheImage(url: string, time: string): Promise<boolean> {

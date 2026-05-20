@@ -1,10 +1,10 @@
 import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
-import { join } from "node:path";
 import type { IncomingMessage, ServerResponse } from "node:http";
+import { join } from "node:path";
 import type pino from "pino";
-import type { Config } from "../models/config";
 import { type CacheEntry, isCacheEntry } from "../models/cache";
+import type { Config } from "../models/config";
 
 const RE_WAYBACK_EXTRACT_URL = /\/web\/\d{1,14}[^/]*\/(https?:\/\/.+)/;
 
@@ -27,7 +27,10 @@ export class CacheService {
 		} catch (e) {
 			const code = (e as NodeJS.ErrnoException).code;
 			if (code !== "ENOENT") {
-				this.logger.warn({ file, url, error: e instanceof Error ? e.message : String(e) }, "[TimeMachine] Failed to read cache entry");
+				this.logger.warn(
+					{ file, url, error: e instanceof Error ? e.message : String(e) },
+					"[TimeMachine] Failed to read cache entry",
+				);
 			}
 			return null;
 		}
@@ -39,7 +42,10 @@ export class CacheService {
 		try {
 			await fs.writeFile(file, JSON.stringify(entry));
 		} catch (e) {
-			this.logger.error({ file, url, error: e instanceof Error ? e.message : String(e) }, "[TimeMachine] Failed to write cache entry");
+			this.logger.error(
+				{ file, url, error: e instanceof Error ? e.message : String(e) },
+				"[TimeMachine] Failed to write cache entry",
+			);
 		}
 	}
 
@@ -53,7 +59,10 @@ export class CacheService {
 		try {
 			files = await fs.readdir(this.config.cacheDir);
 		} catch (e) {
-			this.logger.error({ cacheDir: this.config.cacheDir, error: e }, "[TimeMachine] Failed to read cache directory");
+			this.logger.error(
+				{ cacheDir: this.config.cacheDir, error: e },
+				"[TimeMachine] Failed to read cache directory",
+			);
 			res.setHeader("Content-Type", "application/json");
 			res.writeHead(500).end(JSON.stringify({ error: "Failed to read cache directory" }));
 			return;
@@ -87,7 +96,10 @@ export class CacheService {
 						deleted++;
 					} catch (e) {
 						errors++;
-						this.logger.warn({ file, error: e instanceof Error ? e.message : String(e) }, "[TimeMachine] Cache clear error");
+						this.logger.warn(
+							{ file, error: e instanceof Error ? e.message : String(e) },
+							"[TimeMachine] Cache clear error",
+						);
 					}
 				}),
 			);

@@ -485,14 +485,14 @@ server.start();
 
 ## Acceptance Criteria
 
-- [ ] `pnpm install` succeeds from clean checkout (no npm)
-- [ ] `pnpm run build` produces `dist/timemachine.js` via esbuild from `src/index.ts`
-- [ ] `pnpm run typecheck` passes with zero errors
-- [ ] `pnpm test` passes — all unit tests green
-- [ ] `pnpm exec turbo build` works (turborepo pipeline)
-- [ ] `node dist/timemachine.js` starts and serves requests identically to the original
-- [ ] `docker build .` succeeds
-- [ ] No logic changes — all existing behavior preserved exactly
+- [x] `pnpm install` succeeds from clean checkout (no npm)
+- [x] `pnpm run build` produces `dist/timemachine.js` via esbuild from `src/index.ts`
+- [x] `pnpm run typecheck` passes with zero errors
+- [x] `pnpm test` passes — all unit tests green
+- [x] `pnpm exec turbo build` works (turborepo pipeline)
+- [x] `node dist/timemachine.js` starts and serves requests identically to the original
+- [x] `docker build .` succeeds
+- [x] No logic changes — all existing behavior preserved exactly
 
 ### Research Enhancement
 

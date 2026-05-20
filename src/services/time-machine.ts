@@ -1,13 +1,13 @@
 import http, { type IncomingMessage, type ServerResponse } from "node:http";
+import type pino from "pino";
 import type { WebSocket } from "ws";
 import { WebSocketServer } from "ws";
-import type pino from "pino";
-import type { Config } from "../models/config";
-import type { ProxyService } from "./proxy";
-import type { CacheService } from "./cache";
-import { ShutdownController } from "../lib/shutdown";
 import { hasStatus } from "../lib/errors";
+import type { ShutdownController } from "../lib/shutdown";
 import { sanitizeTimeParam, unwrapNestedProxyUrl } from "../lib/url-rewriter";
+import type { Config } from "../models/config";
+import type { CacheService } from "./cache";
+import type { ProxyService } from "./proxy";
 
 export interface UrlValidatorModule {
 	validateTargetUrl: (url: string) => string;
@@ -64,8 +64,12 @@ export class TimeMachineService {
 		process.on("SIGINT", () => void this.stop());
 
 		this.server.listen(this.config.port, this.config.hostname, () => {
-			this.logger.info(`TimeMachine server listening on http://${this.config.hostname}:${this.config.port}`);
-			this.logger.info(`TimeMachine WebSocket listening on ws://${this.config.hostname}:${this.config.port}/ws`);
+			this.logger.info(
+				`TimeMachine server listening on http://${this.config.hostname}:${this.config.port}`,
+			);
+			this.logger.info(
+				`TimeMachine WebSocket listening on ws://${this.config.hostname}:${this.config.port}/ws`,
+			);
 		});
 	}
 
@@ -87,7 +91,10 @@ export class TimeMachineService {
 		}
 		res.setHeader("Access-Control-Allow-Methods", "GET, DELETE, OPTIONS");
 		res.setHeader("Access-Control-Allow-Headers", "Content-Type");
-		res.setHeader("Access-Control-Expose-Headers", "X-Archive-Url, X-Original-Url, X-Archive-Time, X-Cache");
+		res.setHeader(
+			"Access-Control-Expose-Headers",
+			"X-Archive-Url, X-Original-Url, X-Archive-Time, X-Cache",
+		);
 	}
 
 	private async httpHandler(req: IncomingMessage, res: ServerResponse): Promise<void> {
@@ -96,7 +103,12 @@ export class TimeMachineService {
 
 		if (req.method === "OPTIONS") {
 			res.writeHead(204).end();
-			this.logger.debug({ method: "OPTIONS", path: req.url, status: 204, durationMs: Date.now() - start });
+			this.logger.debug({
+				method: "OPTIONS",
+				path: req.url,
+				status: 204,
+				durationMs: Date.now() - start,
+			});
 			return;
 		}
 
@@ -108,7 +120,7 @@ export class TimeMachineService {
 					this.logRequest(req, 403, start);
 					return;
 				}
-				const auth = req.headers["authorization"] ?? "";
+				const auth = req.headers.authorization ?? "";
 				if (auth !== `Bearer ${this.config.cacheClearToken}`) {
 					res.writeHead(401).end("Unauthorized");
 					this.logRequest(req, 401, start);
@@ -136,7 +148,11 @@ export class TimeMachineService {
 		}
 
 		if (targetUrl) {
-			({ url: targetUrl, time } = unwrapNestedProxyUrl(targetUrl, time, this.config.proxyBaseHostname));
+			({ url: targetUrl, time } = unwrapNestedProxyUrl(
+				targetUrl,
+				time,
+				this.config.proxyBaseHostname,
+			));
 		}
 
 		if (!targetUrl) {
@@ -186,7 +202,9 @@ export class TimeMachineService {
 	private wsHandler(ws: WebSocket): void {
 		this.logger.info("[TimeMachine WS] Client connected");
 		let isAlive = true;
-		ws.on("pong", () => { isAlive = true; });
+		ws.on("pong", () => {
+			isAlive = true;
+		});
 
 		const keepalive = setInterval(() => {
 			if (!isAlive) {
@@ -211,7 +229,9 @@ export class TimeMachineService {
 				if (!isWsRequest(parsed)) throw new SyntaxError("Invalid message shape");
 				msg = parsed;
 			} catch {
-				ws.send(JSON.stringify({ type: "error", status: 400, message: "Invalid JSON" } as WsResponse));
+				ws.send(
+					JSON.stringify({ type: "error", status: 400, message: "Invalid JSON" } as WsResponse),
+				);
 				return;
 			}
 
@@ -219,42 +239,93 @@ export class TimeMachineService {
 			try {
 				time = sanitizeTimeParam(msg.time ?? null, this.config.defaultTime);
 			} catch {
-				ws.send(JSON.stringify({ type: "error", id: msg.id, status: 400, message: "Invalid time parameter" } as WsResponse));
+				ws.send(
+					JSON.stringify({
+						type: "error",
+						id: msg.id,
+						status: 400,
+						message: "Invalid time parameter",
+					} as WsResponse),
+				);
 				return;
 			}
 
-			const { url: unwrappedUrl, time: unwrappedTime } = unwrapNestedProxyUrl(msg.url, time, this.config.proxyBaseHostname);
+			const { url: unwrappedUrl, time: unwrappedTime } = unwrapNestedProxyUrl(
+				msg.url,
+				time,
+				this.config.proxyBaseHostname,
+			);
 			if (unwrappedTime !== time) time = unwrappedTime;
 
 			let targetUrl: string;
 			try {
 				targetUrl = this.validator.validateTargetUrl(unwrappedUrl);
 			} catch (e) {
-				ws.send(JSON.stringify({ type: "error", id: msg.id, status: 403, message: e instanceof Error ? e.message : "Invalid URL" } as WsResponse));
+				ws.send(
+					JSON.stringify({
+						type: "error",
+						id: msg.id,
+						status: 403,
+						message: e instanceof Error ? e.message : "Invalid URL",
+					} as WsResponse),
+				);
 				return;
 			}
 
 			if (!this.validator.isHostWhitelisted(targetUrl, this.config.whitelistHosts)) {
-				ws.send(JSON.stringify({ type: "error", id: msg.id, status: 403, message: "Host not whitelisted" } as WsResponse));
+				ws.send(
+					JSON.stringify({
+						type: "error",
+						id: msg.id,
+						status: 403,
+						message: "Host not whitelisted",
+					} as WsResponse),
+				);
 				return;
 			}
 
-			this.proxy.fetch(targetUrl, time)
+			this.proxy
+				.fetch(targetUrl, time)
 				.then((result) => {
 					if (ws.readyState !== ws.OPEN) return;
-					const bodyStr = typeof result.body === "string" ? result.body : result.body.toString("base64");
-					ws.send(JSON.stringify({ type: "result", id: msg.id, html: bodyStr, contentType: result.contentType, archiveUrl: result.archiveUrl, originalUrl: result.originalUrl, archiveTime: result.archiveTime, cache: result.cache } as WsResponse));
+					const bodyStr =
+						typeof result.body === "string" ? result.body : result.body.toString("base64");
+					ws.send(
+						JSON.stringify({
+							type: "result",
+							id: msg.id,
+							html: bodyStr,
+							contentType: result.contentType,
+							archiveUrl: result.archiveUrl,
+							originalUrl: result.originalUrl,
+							archiveTime: result.archiveTime,
+							cache: result.cache,
+						} as WsResponse),
+					);
 				})
 				.catch((e: unknown) => {
 					const status = hasStatus(e) ? e.status : 500;
-					if (status >= 500) this.logger.error({ error: e }, "[TimeMachine WS] Upstream request failed");
+					if (status >= 500)
+						this.logger.error({ error: e }, "[TimeMachine WS] Upstream request failed");
 					if (ws.readyState !== ws.OPEN) return;
-					ws.send(JSON.stringify({ type: "error", id: msg.id, status, message: e instanceof Error ? e.message : "Upstream request failed" } as WsResponse));
+					ws.send(
+						JSON.stringify({
+							type: "error",
+							id: msg.id,
+							status,
+							message: e instanceof Error ? e.message : "Upstream request failed",
+						} as WsResponse),
+					);
 				});
 		});
 	}
 
 	private logRequest(req: IncomingMessage, status: number, startMs: number): void {
-		this.logger.info({ method: req.method, path: req.url, status, durationMs: Date.now() - startMs });
+		this.logger.info({
+			method: req.method,
+			path: req.url,
+			status,
+			durationMs: Date.now() - startMs,
+		});
 	}
 }
