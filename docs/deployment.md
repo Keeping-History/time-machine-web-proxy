@@ -234,6 +234,20 @@ or `OUTBOUND_PROXY_CHOOSER` is anything other than `Sequential`/`Random`, or
 any URL in the list is unparseable or non-http(s), the process fails fast at
 startup.
 
+**Startup connectivity probe.** Each configured proxy is exercised at startup
+with an HTTP request to `https://web.archive.org/` (30s timeout). If every
+proxy fails the probe, the process exits. If some pass and some fail, the
+failed ones start in cooldown and are re-probed automatically.
+
+**Runtime circuit breaker.** Transport errors (connect/DNS/timeout/TLS),
+HTTP 407, and 502/503/504 responses through a proxy mark it failed and take
+it out of rotation for `OUTBOUND_PROXY_COOLDOWN_SECONDS` (default 60s). At
+cooldown expiry, the proxy is re-probed; success restores it, failure
+extends the cooldown linearly (X, 2X, 3X, ...). When every proxy is
+currently in cooldown, dispatch throws `no healthy proxy`. Note that
+5xx-from-upstream forwarded by the proxy may produce false positives —
+tune the cooldown to limit blast radius from a single Wayback hiccup.
+
 ---
 
 ## 6. GitHub Actions / Cloud Build

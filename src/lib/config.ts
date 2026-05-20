@@ -13,9 +13,16 @@ function parseOutboundProxyChooser(raw: string | undefined): OutboundProxyChoose
 	if (!raw) return "sequential";
 	const lowered = raw.trim().toLowerCase();
 	if (lowered === "sequential" || lowered === "random") return lowered;
-	throw new Error(
-		`OUTBOUND_PROXY_CHOOSER must be "sequential" or "random" (got "${raw}")`,
-	);
+	throw new Error(`OUTBOUND_PROXY_CHOOSER must be "sequential" or "random" (got "${raw}")`);
+}
+
+function parseOutboundProxyCooldownMs(raw: string | undefined): number {
+	if (raw === undefined || raw === "") return 60_000;
+	const parsed = Number(raw);
+	if (!Number.isFinite(parsed) || parsed < 0) {
+		throw new Error(`OUTBOUND_PROXY_COOLDOWN_SECONDS must be a non-negative number (got "${raw}")`);
+	}
+	return Math.floor(parsed * 1000);
 }
 
 export function loadConfig(): Config {
@@ -51,6 +58,9 @@ export function loadConfig(): Config {
 		outboundProxyChooser: parseOutboundProxyChooser(process.env.OUTBOUND_PROXY_CHOOSER),
 		outboundProxyUsername: process.env.OUTBOUND_PROXY_USERNAME ?? "",
 		outboundProxyPassword: process.env.OUTBOUND_PROXY_PASSWORD ?? "",
+		outboundProxyCooldownMs: parseOutboundProxyCooldownMs(
+			process.env.OUTBOUND_PROXY_COOLDOWN_SECONDS,
+		),
 	};
 }
 

@@ -25,6 +25,11 @@ export interface Config {
 	outboundProxyChooser: OutboundProxyChooser;
 	outboundProxyUsername: string;
 	outboundProxyPassword: string;
+	/** Base cooldown applied to a proxy after a failure, in milliseconds.
+	 * Parsed from OUTBOUND_PROXY_COOLDOWN_SECONDS (default 60s).
+	 * Each consecutive re-probe failure extends the cooldown linearly by
+	 * this base value (X, 2X, 3X, ...). */
+	outboundProxyCooldownMs: number;
 }
 
 export type OutboundProxyChooser = "sequential" | "random";

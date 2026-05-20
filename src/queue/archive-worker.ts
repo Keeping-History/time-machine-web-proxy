@@ -147,9 +147,7 @@ export function startArchiveWorkers(opts: StartArchiveWorkersOpts): ArchiveWorke
 			// the job explicitly so BullMQ retries (and the caller sees a real
 			// error) when nothing was actually written.
 			if (!(await directoryHasFiles(directory))) {
-				throw new Error(
-					`Downloader produced no files for ${url} @ ${time} (snapped ${snapped})`,
-				);
+				throw new Error(`Downloader produced no files for ${url} @ ${time} (snapped ${snapped})`);
 			}
 		},
 		{

@@ -31,6 +31,7 @@ const config: Config = {
 	outboundProxyChooser: "sequential",
 	outboundProxyUsername: "",
 	outboundProxyPassword: "",
+	outboundProxyCooldownMs: 60_000,
 };
 
 const makeService = () => {
