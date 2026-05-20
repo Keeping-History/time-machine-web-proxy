@@ -13,3 +13,5 @@ node_modules
 .pnpm-store
 plans/archive
 reviews/archive
+.ralph
+ralph-tasks.json
