@@ -11,3 +11,5 @@ node_modules
 /.vscode
 .mdkb
 .pnpm-store
+plans/archive
+reviews/archive
