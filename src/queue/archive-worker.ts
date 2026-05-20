@@ -2,6 +2,7 @@ import { promises as fs } from "node:fs";
 import { type ConnectionOptions, type QueueEvents, Worker } from "bullmq";
 import type pino from "pino";
 import { WaybackMachineDownloader } from "wayback-machine-downloader";
+import { dayWindow } from "../lib/archive-time";
 import { normalizeBaseUrlInput } from "../lib/normalize-base-url";
 import type { CacheService } from "../services/cache";
 import { assertDomainCrawlJob, assertExactUrlJob, QUEUE_CRAWL, QUEUE_EXACT } from "./jobs";
@@ -45,14 +46,6 @@ async function directoryHasFiles(dir: string): Promise<boolean> {
 	} catch {
 		return false;
 	}
-}
-
-// Convert a 14-digit YYYYMMDDhhmmss timestamp into the calendar-day window
-// it falls within. Used by domain crawls so CDX returns ALL captures of the
-// host on that day rather than only those at the exact requested second.
-function dayWindow(time: string): { from: string; to: string } {
-	const day = time.slice(0, 8);
-	return { from: `${day}000000`, to: `${day}235959` };
 }
 
 export interface StartArchiveWorkersOpts {
