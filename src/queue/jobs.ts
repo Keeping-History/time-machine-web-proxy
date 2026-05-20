@@ -1,5 +1,9 @@
-export const QUEUE_EXACT = "archive:exact";
-export const QUEUE_CRAWL = "archive:crawl";
+// BullMQ rejects queue names containing ":" at construction time
+// (see node_modules/bullmq/dist/cjs/classes/queue-base.js:34) — the colon
+// is reserved for Redis key separators. Use "-" instead. Resulting Redis
+// keys look like `tm:archive-exact:wait`, still namespaced by `tm:`.
+export const QUEUE_EXACT = "archive-exact";
+export const QUEUE_CRAWL = "archive-crawl";
 
 export interface ExactUrlJob {
 	url: string;

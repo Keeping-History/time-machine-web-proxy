@@ -30,16 +30,14 @@ jest.mock(
 	}),
 	{ virtual: true },
 );
-// `lib/utils.js` is not in the package's `exports` field, so jest's resolver
-// cannot find it. `virtual: true` lets us mock the path without resolution.
-jest.mock(
-	"wayback-machine-downloader/lib/utils.js",
-	() => ({
-		__esModule: true,
-		normalizeBaseUrlInput: normalizeBaseUrlInputMock,
-	}),
-	{ virtual: true },
-);
+// We inlined `normalizeBaseUrlInput` into our own shim module (see
+// `src/lib/normalize-base-url.ts`) because the upstream `lib/utils.js` is not
+// in the package's `exports` field — esbuild and strict ESM resolvers reject
+// the subpath. Mock the shim instead.
+jest.mock("../../src/lib/normalize-base-url", () => ({
+	__esModule: true,
+	normalizeBaseUrlInput: normalizeBaseUrlInputMock,
+}));
 
 interface CapturedWorker {
 	name: string;
@@ -448,7 +446,7 @@ describe("attachQueueLogger", () => {
 		const logger = makeLogger();
 		const events = makeEvents();
 		attachQueueLogger(
-			"archive:exact",
+			"archive-exact",
 			events as unknown as Parameters<typeof attachQueueLogger>[1],
 			logger,
 		);
@@ -462,7 +460,7 @@ describe("attachQueueLogger", () => {
 		const logger = makeLogger();
 		const events = makeEvents();
 		attachQueueLogger(
-			"archive:exact",
+			"archive-exact",
 			events as unknown as Parameters<typeof attachQueueLogger>[1],
 			logger,
 		);
@@ -473,7 +471,7 @@ describe("attachQueueLogger", () => {
 		events.handlers.completed({ jobId: "j-1" });
 		expect(logger.info).toHaveBeenCalledWith(
 			expect.objectContaining({
-				queue: "archive:exact",
+				queue: "archive-exact",
 				jobId: "j-1",
 				durationMs: 750,
 				event: "completed",
@@ -487,7 +485,7 @@ describe("attachQueueLogger", () => {
 		const logger = makeLogger();
 		const events = makeEvents();
 		attachQueueLogger(
-			"archive:exact",
+			"archive-exact",
 			events as unknown as Parameters<typeof attachQueueLogger>[1],
 			logger,
 		);
@@ -498,7 +496,7 @@ describe("attachQueueLogger", () => {
 		events.handlers.failed({ jobId: "j-2", failedReason: "oops" });
 		expect(logger.warn).toHaveBeenCalledWith(
 			expect.objectContaining({
-				queue: "archive:exact",
+				queue: "archive-exact",
 				jobId: "j-2",
 				durationMs: 1_200,
 				failedReason: "oops",
@@ -513,13 +511,13 @@ describe("attachQueueLogger", () => {
 		const logger = makeLogger();
 		const events = makeEvents();
 		attachQueueLogger(
-			"archive:crawl",
+			"archive-crawl",
 			events as unknown as Parameters<typeof attachQueueLogger>[1],
 			logger,
 		);
 		events.handlers.stalled({ jobId: "j-3" });
 		expect(logger.warn).toHaveBeenCalledWith(
-			expect.objectContaining({ queue: "archive:crawl", jobId: "j-3", event: "stalled" }),
+			expect.objectContaining({ queue: "archive-crawl", jobId: "j-3", event: "stalled" }),
 			expect.stringContaining("stalled"),
 		);
 	});

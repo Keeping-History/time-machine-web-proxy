@@ -6,12 +6,19 @@ import {
 } from "../../src/queue/jobs";
 
 describe("queue constants", () => {
-	it("QUEUE_EXACT is 'archive:exact'", () => {
-		expect(QUEUE_EXACT).toBe("archive:exact");
+	// BullMQ rejects ":" in queue names at construction time, so we use "-".
+	// The colon-namespacing happens at the Redis-key level via bullmqPrefix.
+	it("QUEUE_EXACT is 'archive-exact'", () => {
+		expect(QUEUE_EXACT).toBe("archive-exact");
 	});
 
-	it("QUEUE_CRAWL is 'archive:crawl'", () => {
-		expect(QUEUE_CRAWL).toBe("archive:crawl");
+	it("QUEUE_CRAWL is 'archive-crawl'", () => {
+		expect(QUEUE_CRAWL).toBe("archive-crawl");
+	});
+
+	it("queue names do not contain ':' (BullMQ constraint)", () => {
+		expect(QUEUE_EXACT).not.toContain(":");
+		expect(QUEUE_CRAWL).not.toContain(":");
 	});
 });
 

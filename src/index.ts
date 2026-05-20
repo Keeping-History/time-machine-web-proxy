@@ -13,6 +13,8 @@ ensureCacheDir(config.cacheDir);
 
 const dependencies = new Dependencies(config);
 const { logger, shutdown, proxy, cache, validator } = dependencies.get();
-const service = new TimeMachineService(config, proxy, cache, validator, shutdown, logger);
+const service = new TimeMachineService(config, proxy, cache, validator, shutdown, logger, () =>
+	dependencies.close(),
+);
 
 service.start();

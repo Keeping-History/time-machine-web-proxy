@@ -1,7 +1,7 @@
 import { type ConnectionOptions, type QueueEvents, Worker } from "bullmq";
 import type pino from "pino";
 import { WaybackMachineDownloader } from "wayback-machine-downloader";
-import { normalizeBaseUrlInput } from "wayback-machine-downloader/lib/utils.js";
+import { normalizeBaseUrlInput } from "../lib/normalize-base-url";
 import type { CacheService } from "../services/cache";
 import { assertDomainCrawlJob, assertExactUrlJob, QUEUE_CRAWL, QUEUE_EXACT } from "./jobs";
 

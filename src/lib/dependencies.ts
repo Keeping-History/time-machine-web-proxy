@@ -1,59 +1,133 @@
+import { Queue, QueueEvents, type Worker } from "bullmq";
+import type IORedis from "ioredis";
 import type pino from "pino";
-import type { ArchiveJobClientPort } from "../clients/archive-job-client";
-import { WaybackClient } from "../clients/wayback";
+import { ArchiveJobClient } from "../clients/archive-job-client";
 import type { Config } from "../models/config";
+import { attachQueueLogger, startArchiveWorkers } from "../queue/archive-worker";
+import { type DomainCrawlJob, type ExactUrlJob, QUEUE_CRAWL, QUEUE_EXACT } from "../queue/jobs";
 import { CacheService } from "../services/cache";
 import { ProxyService } from "../services/proxy";
 import type { UrlValidatorModule } from "../services/time-machine";
 import { createLogger } from "./logger";
-import { ArchiveRequestQueue } from "./queue";
+import { createRedis } from "./redis";
 import { ShutdownController } from "./shutdown";
 import { isHostWhitelisted, validateTargetUrl } from "./url-validator";
 
+/**
+ * Aggregate of every long-lived runtime resource. TimeMachineService reads
+ * `proxy`, `cache`, `validator`, `shutdown`, `logger`; Dependencies.close()
+ * owns the rest for orderly shutdown.
+ *
+ * Removed in TASK-010: legacy `queue` (ArchiveRequestQueue) and `wayback`
+ * (WaybackClient) — superseded by the BullMQ-backed archiveJobClient.
+ */
 export interface DependencyStore {
 	logger: pino.Logger;
 	shutdown: ShutdownController;
-	queue: ArchiveRequestQueue;
-	wayback: WaybackClient;
+	redis: IORedis;
+	exactQueue: Queue<ExactUrlJob>;
+	crawlQueue: Queue<DomainCrawlJob>;
+	exactEvents: QueueEvents;
+	crawlEvents: QueueEvents;
+	workers: { exact: Worker; crawl: Worker };
 	cache: CacheService;
+	archiveJobClient: ArchiveJobClient;
 	proxy: ProxyService;
 	validator: UrlValidatorModule;
 }
 
 /**
- * Interim ArchiveJobClient stub. TASK-010 replaces this with the real
- * BullMQ-backed client wired to Redis + queues + workers + QueueEvents.
- * Until then any attempt to actually USE the proxy at runtime will throw
- * — but tests that mock the proxy entirely are unaffected, and typecheck
- * still passes because the stub satisfies ArchiveJobClientPort.
+ * Constructs the full runtime graph from a Config. Single ioredis connection
+ * is shared across both Queues, both QueueEvents, both Workers, and the
+ * ProxyService's per-host budget SET NX EX writes.
+ *
+ * close() ordering is load-bearing:
+ *   1. Workers drain (Promise.all) — finishes in-flight jobs, prevents the
+ *      "Connection is closed" warnings BullMQ emits when downstream Redis
+ *      disconnects mid-processor.
+ *   2. Queues + QueueEvents close (Promise.all) — releases blocking BRPOPLPUSH
+ *      subscribers cleanly.
+ *   3. redis.quit() — graceful QUIT, flushes pending writes.
  */
-class StubArchiveJobClient implements ArchiveJobClientPort {
-	async enqueueExactAndWait(): Promise<void> {
-		throw new Error("ArchiveJobClient not wired — TASK-010 pending");
-	}
-	async enqueueDomainCrawl(): Promise<void> {
-		throw new Error("ArchiveJobClient not wired — TASK-010 pending");
-	}
-}
-
 export class Dependencies {
 	private readonly deps: DependencyStore;
 
 	constructor(config: Config) {
-		const { archiveMaxConcurrent, archiveRatePerSec, archiveBurst } = config;
 		const logger = createLogger();
 		const shutdown = new ShutdownController();
-		const queue = new ArchiveRequestQueue(archiveMaxConcurrent, archiveRatePerSec, archiveBurst);
-		const wayback = new WaybackClient(queue, shutdown, logger, config);
+		const redis = createRedis(config.redisUrl);
+
+		const exactQueue = new Queue<ExactUrlJob>(QUEUE_EXACT, {
+			connection: redis,
+			prefix: config.bullmqPrefix,
+		});
+		const crawlQueue = new Queue<DomainCrawlJob>(QUEUE_CRAWL, {
+			connection: redis,
+			prefix: config.bullmqPrefix,
+		});
+		const exactEvents = new QueueEvents(QUEUE_EXACT, {
+			connection: redis,
+			prefix: config.bullmqPrefix,
+		});
+		const crawlEvents = new QueueEvents(QUEUE_CRAWL, {
+			connection: redis,
+			prefix: config.bullmqPrefix,
+		});
+		attachQueueLogger(QUEUE_EXACT, exactEvents, logger);
+		attachQueueLogger(QUEUE_CRAWL, crawlEvents, logger);
+
 		const cache = new CacheService(config, logger);
-		// TODO(TASK-010): wire real ArchiveJobClient with Redis/queues/QueueEvents.
-		const archiveJobClient = new StubArchiveJobClient();
-		const proxy = new ProxyService(cache, archiveJobClient, logger, config);
+		const workers = startArchiveWorkers({
+			connection: redis,
+			cache,
+			logger,
+			bullmqPrefix: config.bullmqPrefix,
+			workerConcurrency: config.workerConcurrency,
+			workerRateLimitPerSec: config.workerRateLimitPerSec,
+			downloaderThreadsCount: config.downloaderThreadsCount,
+		});
+		const archiveJobClient = new ArchiveJobClient(
+			exactQueue,
+			crawlQueue,
+			exactEvents,
+			logger,
+			config.domainCrawlEnabled,
+		);
+		const proxy = new ProxyService(cache, archiveJobClient, logger, config, redis);
 		const validator: UrlValidatorModule = { validateTargetUrl, isHostWhitelisted };
-		this.deps = { logger, shutdown, queue, wayback, cache, proxy, validator };
+
+		this.deps = {
+			logger,
+			shutdown,
+			redis,
+			exactQueue,
+			crawlQueue,
+			exactEvents,
+			crawlEvents,
+			workers,
+			cache,
+			archiveJobClient,
+			proxy,
+			validator,
+		};
 	}
 
 	get(): DependencyStore {
 		return this.deps;
+	}
+
+	async close(): Promise<void> {
+		const { workers, exactQueue, crawlQueue, exactEvents, crawlEvents, redis } = this.deps;
+		// 1. Drain workers first so in-flight jobs complete
+		await Promise.all([workers.exact.close(), workers.crawl.close()]);
+		// 2. Close queues + events together
+		await Promise.all([
+			exactQueue.close(),
+			crawlQueue.close(),
+			exactEvents.close(),
+			crawlEvents.close(),
+		]);
+		// 3. Quit Redis last (graceful QUIT after all subscribers disconnect)
+		await redis.quit();
 	}
 }

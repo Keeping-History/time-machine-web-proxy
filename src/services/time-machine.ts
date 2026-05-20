@@ -26,6 +26,7 @@ export class TimeMachineService {
 		private readonly validator: UrlValidatorModule,
 		private readonly shutdown: ShutdownController,
 		private readonly logger: pino.Logger,
+		private readonly onStop?: () => Promise<void>,
 	) {}
 
 	start(): void {
@@ -64,6 +65,10 @@ export class TimeMachineService {
 			this.wss.close();
 			this.server.close(() => resolve());
 		});
+		// Hand off to the Dependencies graph (workers → queues → redis).
+		// Errors here are caught by the caller in `index.ts`; we surface them
+		// rather than swallow so SIGTERM can fail loudly when shutdown breaks.
+		await this.onStop?.();
 	}
 
 	private setCorsHeaders(req: IncomingMessage, res: ServerResponse): void {
