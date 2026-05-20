@@ -11,17 +11,12 @@ export function loadConfig(): Config {
 		port,
 		hostname,
 		defaultTime: process.env.ARCHIVE_TIME ?? "19980101000000",
-		archivePrefix: process.env.URL_PREFIX ?? "https://web.archive.org/web",
 		cacheDir: process.env.CACHE_DIR ?? "/app/cache",
 		cacheEnabled: process.env.CACHE_ENABLED?.toLowerCase() !== "false",
 		allowedOrigins: (process.env.CORS_ORIGIN ?? "http://localhost:5173")
 			.split(",")
 			.map((s) => s.trim())
 			.filter(Boolean),
-		archiveRatePerSec: Number(process.env.ARCHIVE_RATE_PER_SEC) || 2,
-		archiveBurst: Number(process.env.ARCHIVE_BURST) || 5,
-		archiveMaxRetries: Number(process.env.ARCHIVE_MAX_RETRIES) || 3,
-		archiveMaxConcurrent: Number(process.env.ARCHIVE_MAX_CONCURRENT) || 10,
 		whitelistHosts: process.env.WHITELIST_HOSTS ?? "*",
 		proxyPrefix: process.env.PROXY_PREFIX ?? "",
 		proxyBase,

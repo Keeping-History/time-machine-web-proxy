@@ -17,9 +17,6 @@ import { isHostWhitelisted, validateTargetUrl } from "./url-validator";
  * Aggregate of every long-lived runtime resource. TimeMachineService reads
  * `proxy`, `cache`, `validator`, `shutdown`, `logger`; Dependencies.close()
  * owns the rest for orderly shutdown.
- *
- * Removed in TASK-010: legacy `queue` (ArchiveRequestQueue) and `wayback`
- * (WaybackClient) — superseded by the BullMQ-backed archiveJobClient.
  */
 export interface DependencyStore {
 	logger: pino.Logger;

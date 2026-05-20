@@ -11,14 +11,9 @@ const config: Config = {
 	port: 0,
 	hostname: "127.0.0.1",
 	defaultTime: "20000101000000",
-	archivePrefix: "https://web.archive.org/web",
 	cacheDir: "/tmp/cache",
 	cacheEnabled: false,
 	allowedOrigins: ["*"],
-	archiveRatePerSec: 2,
-	archiveBurst: 5,
-	archiveMaxRetries: 3,
-	archiveMaxConcurrent: 10,
 	whitelistHosts: "*",
 	proxyPrefix: "",
 	proxyBase: "http://localhost:0",
@@ -46,8 +41,6 @@ const makeService = () => {
 		getCachedResourceUrls: jest.fn(),
 	} as unknown as ProxyService;
 	const cache = {
-		get: jest.fn(),
-		put: jest.fn(),
 		handleCacheClear: jest.fn(),
 	} as unknown as CacheService;
 	const validator = {

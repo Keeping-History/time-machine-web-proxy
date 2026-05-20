@@ -13,7 +13,7 @@ export interface Config {
 	cacheClearToken: string;
 	wsKeepaliveMs: number;
 
-	// — new (Redis/BullMQ/worker/downloader/outbound-proxy) —
+	// — Redis/BullMQ/worker/downloader/outbound-proxy —
 	redisUrl: string;
 	bullmqPrefix: string;
 	domainCrawlEnabled: boolean;
@@ -24,16 +24,4 @@ export interface Config {
 	outboundProxyUrl: string;
 	outboundProxyUsername: string;
 	outboundProxyPassword: string;
-
-	// — deprecated; removed in TASK-011 alongside WaybackClient/ArchiveRequestQueue —
-	/** @deprecated removed in TASK-011 */
-	archivePrefix: string;
-	/** @deprecated removed in TASK-011 */
-	archiveRatePerSec: number;
-	/** @deprecated removed in TASK-011 */
-	archiveBurst: number;
-	/** @deprecated removed in TASK-011 */
-	archiveMaxRetries: number;
-	/** @deprecated removed in TASK-011 */
-	archiveMaxConcurrent: number;
 }

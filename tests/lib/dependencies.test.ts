@@ -1,10 +1,9 @@
 /**
- * Dependencies wiring test (TASK-010).
+ * Dependencies wiring test.
  *
  * Mocks `bullmq`, `ioredis`, and the worker-startup helper so we can assert:
  *   1. `new Dependencies(config).get()` exposes the full DependencyStore shape
- *      with the new Redis/BullMQ fields and without the legacy
- *      ArchiveRequestQueue/WaybackClient fields.
+ *      with the Redis/BullMQ fields and none of the pre-BullMQ legacy fields.
  *   2. `Dependencies.close()` drains in the documented order:
  *        workers (exact + crawl)  →  queues + events  →  redis.quit()
  *      Reverse ordering would log "Connection is closed" warnings in
@@ -90,12 +89,6 @@ const baseConfig: Config = {
 	outboundProxyUrl: "",
 	outboundProxyUsername: "",
 	outboundProxyPassword: "",
-	// legacy/deprecated — present until TASK-011 deletes them
-	archivePrefix: "https://web.archive.org/web",
-	archiveRatePerSec: 2,
-	archiveBurst: 5,
-	archiveMaxRetries: 3,
-	archiveMaxConcurrent: 10,
 };
 
 describe("Dependencies (TASK-010)", () => {
@@ -198,7 +191,7 @@ describe("Dependencies (TASK-010)", () => {
 		expect(redisQuit).toHaveBeenCalledTimes(1);
 	});
 
-	it("removes the legacy ArchiveRequestQueue/WaybackClient fields from the store", () => {
+	it("does not expose pre-BullMQ legacy fields on the store", () => {
 		const deps = new Dependencies(baseConfig).get() as unknown as Record<string, unknown>;
 		expect(deps.queue).toBeUndefined();
 		expect(deps.wayback).toBeUndefined();

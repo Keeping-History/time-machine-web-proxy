@@ -1,17 +1,12 @@
 import {
-	arcUrl,
-	collectWaybackResourceUrls,
 	rewriteArchiveLinks,
 	rewriteCssUrls,
-	rewriteCssUrlsFiltered,
-	rewriteImageUrlsFiltered,
 	sanitizeTimeParam,
 	stripWaybackToolbar,
 	unwrapNestedProxyUrl,
 } from "../../src/lib/url-rewriter";
 
 const PROXY = "http://localhost:8080";
-const PREFIX = "https://web.archive.org/web";
 const TIME = "20200101000000";
 
 describe("sanitizeTimeParam", () => {
@@ -29,20 +24,6 @@ describe("sanitizeTimeParam", () => {
 
 	it("throws on non-14-digit string", () => {
 		expect(() => sanitizeTimeParam("2023", "20000101000000")).toThrow("Invalid time parameter");
-	});
-});
-
-describe("arcUrl", () => {
-	it("builds a simple archive URL without proxyPrefix", () => {
-		expect(arcUrl("http://example.com/", TIME, PREFIX, "")).toBe(
-			`${PREFIX}/${TIME}/http://example.com/`,
-		);
-	});
-
-	it("inserts proxyPrefix when provided", () => {
-		expect(arcUrl("http://example.com/", TIME, PREFIX, "if_")).toBe(
-			`${PREFIX}/${TIME}/if_/http://example.com/`,
-		);
 	});
 });
 
@@ -142,53 +123,6 @@ describe("rewriteCssUrls", () => {
 	it("leaves non-archive url() references unchanged", () => {
 		const css = `background: url('http://example.com/plain.png')`;
 		expect(rewriteCssUrls(css, PROXY, TIME)).toBe(css);
-	});
-});
-
-describe("collectWaybackResourceUrls", () => {
-	it("collects img src URLs from absolute archive references", () => {
-		const html = `<img src="https://web.archive.org/web/20200101000000/http://example.com/img.png">`;
-		expect(collectWaybackResourceUrls(html)).toContain("http://example.com/img.png");
-	});
-
-	it("collects img src URLs from relative archive references", () => {
-		const html = `<img src="/web/20200101000000/http://example.com/img.png">`;
-		expect(collectWaybackResourceUrls(html)).toContain("http://example.com/img.png");
-	});
-
-	it("returns deduplicated list", () => {
-		const html = `<img src="/web/20200101000000/http://example.com/img.png"><img src="/web/20200101000000/http://example.com/img.png">`;
-		expect(collectWaybackResourceUrls(html)).toHaveLength(1);
-	});
-});
-
-describe("rewriteImageUrlsFiltered", () => {
-	it("rewrites img src only when URL is in cachedUrls", () => {
-		const url = "http://example.com/img.png";
-		const html = `<img src="https://web.archive.org/web/${TIME}/http://example.com/img.png">`;
-		const result = rewriteImageUrlsFiltered(html, PROXY, TIME, new Set([url]));
-		expect(result).toContain(`src="${PROXY}/?url=${encodeURIComponent(url)}&time=${TIME}"`);
-	});
-
-	it("leaves img src untouched when URL is not in cachedUrls", () => {
-		const html = `<img src="https://web.archive.org/web/${TIME}/http://example.com/img.png">`;
-		const result = rewriteImageUrlsFiltered(html, PROXY, TIME, new Set());
-		expect(result).toBe(html);
-	});
-});
-
-describe("rewriteCssUrlsFiltered", () => {
-	it("rewrites CSS url() only when URL is in cachedUrls", () => {
-		const url = "http://example.com/bg.png";
-		const css = `background: url('https://web.archive.org/web/${TIME}/http://example.com/bg.png')`;
-		const result = rewriteCssUrlsFiltered(css, PROXY, TIME, new Set([url]));
-		expect(result).toContain(`url('${PROXY}/?url=${encodeURIComponent(url)}&time=${TIME}')`);
-	});
-
-	it("leaves CSS url() untouched when URL is not in cachedUrls", () => {
-		const css = `background: url('https://web.archive.org/web/${TIME}/http://example.com/bg.png')`;
-		const result = rewriteCssUrlsFiltered(css, PROXY, TIME, new Set());
-		expect(result).toBe(css);
 	});
 });
 
