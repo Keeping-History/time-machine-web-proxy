@@ -21,7 +21,10 @@ export interface Config {
 	workerRateLimitPerSec: number;
 	downloaderThreadsCount: number;
 	crawlMaxCdxPages: number;
-	outboundProxyUrl: string;
+	outboundProxyUrls: string[];
+	outboundProxyChooser: OutboundProxyChooser;
 	outboundProxyUsername: string;
 	outboundProxyPassword: string;
 }
+
+export type OutboundProxyChooser = "sequential" | "random";

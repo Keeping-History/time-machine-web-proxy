@@ -30,7 +30,8 @@ describe("loadConfig", () => {
 		delete process.env.WORKER_RATE_LIMIT_PER_SEC;
 		delete process.env.DOWNLOADER_THREADS_COUNT;
 		delete process.env.CRAWL_MAX_CDX_PAGES;
-		delete process.env.OUTBOUND_PROXY_URL;
+		delete process.env.OUTBOUND_PROXY_URLS;
+		delete process.env.OUTBOUND_PROXY_CHOOSER;
 		delete process.env.OUTBOUND_PROXY_USERNAME;
 		delete process.env.OUTBOUND_PROXY_PASSWORD;
 
@@ -52,7 +53,8 @@ describe("loadConfig", () => {
 		expect(config.workerRateLimitPerSec).toBe(1);
 		expect(config.downloaderThreadsCount).toBe(3);
 		expect(config.crawlMaxCdxPages).toBe(50);
-		expect(config.outboundProxyUrl).toBe("");
+		expect(config.outboundProxyUrls).toEqual([]);
+		expect(config.outboundProxyChooser).toBe("sequential");
 		expect(config.outboundProxyUsername).toBe("");
 		expect(config.outboundProxyPassword).toBe("");
 	});
@@ -146,15 +148,51 @@ describe("loadConfig", () => {
 		expect(config.crawlMaxCdxPages).toBe(100);
 	});
 
-	it("reads outbound proxy env vars", () => {
-		process.env.OUTBOUND_PROXY_URL = "http://proxymesh.example.com:31280";
+	it("reads a single outbound proxy URL from OUTBOUND_PROXY_URLS", () => {
+		process.env.OUTBOUND_PROXY_URLS = "http://proxymesh.example.com:31280";
 		process.env.OUTBOUND_PROXY_USERNAME = "user";
 		process.env.OUTBOUND_PROXY_PASSWORD = "secret";
 
 		const config = loadConfig();
 
-		expect(config.outboundProxyUrl).toBe("http://proxymesh.example.com:31280");
+		expect(config.outboundProxyUrls).toEqual(["http://proxymesh.example.com:31280"]);
 		expect(config.outboundProxyUsername).toBe("user");
 		expect(config.outboundProxyPassword).toBe("secret");
+	});
+
+	it("parses OUTBOUND_PROXY_URLS as a CSV, trimming whitespace and dropping empties", () => {
+		process.env.OUTBOUND_PROXY_URLS =
+			"http://a.example.com:31280, http://b.example.com:31280 ,,http://c.example.com:31280";
+
+		const config = loadConfig();
+
+		expect(config.outboundProxyUrls).toEqual([
+			"http://a.example.com:31280",
+			"http://b.example.com:31280",
+			"http://c.example.com:31280",
+		]);
+	});
+
+	it("defaults outboundProxyChooser to 'sequential' when unset", () => {
+		delete process.env.OUTBOUND_PROXY_CHOOSER;
+		expect(loadConfig().outboundProxyChooser).toBe("sequential");
+	});
+
+	it("parses OUTBOUND_PROXY_CHOOSER case-insensitively", () => {
+		process.env.OUTBOUND_PROXY_CHOOSER = "Sequential";
+		expect(loadConfig().outboundProxyChooser).toBe("sequential");
+
+		process.env.OUTBOUND_PROXY_CHOOSER = "RANDOM";
+		expect(loadConfig().outboundProxyChooser).toBe("random");
+
+		process.env.OUTBOUND_PROXY_CHOOSER = "random";
+		expect(loadConfig().outboundProxyChooser).toBe("random");
+	});
+
+	it("throws on unknown OUTBOUND_PROXY_CHOOSER value", () => {
+		process.env.OUTBOUND_PROXY_CHOOSER = "roundrobin";
+		expect(() => loadConfig()).toThrow(
+			/OUTBOUND_PROXY_CHOOSER must be "Sequential" or "Random"/,
+		);
 	});
 });

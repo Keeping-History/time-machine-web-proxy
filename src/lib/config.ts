@@ -1,5 +1,22 @@
 import { mkdirSync } from "node:fs";
-import type { Config } from "../models/config";
+import type { Config, OutboundProxyChooser } from "../models/config";
+
+function parseOutboundProxyUrls(raw: string | undefined): string[] {
+	if (!raw) return [];
+	return raw
+		.split(",")
+		.map((s) => s.trim())
+		.filter(Boolean);
+}
+
+function parseOutboundProxyChooser(raw: string | undefined): OutboundProxyChooser {
+	if (!raw) return "sequential";
+	const lowered = raw.trim().toLowerCase();
+	if (lowered === "sequential" || lowered === "random") return lowered;
+	throw new Error(
+		`OUTBOUND_PROXY_CHOOSER must be "Sequential" or "Random" (got "${raw}")`,
+	);
+}
 
 export function loadConfig(): Config {
 	const hostname = process.env.LISTENER ?? "0.0.0.0";
@@ -30,7 +47,8 @@ export function loadConfig(): Config {
 		workerRateLimitPerSec: Number(process.env.WORKER_RATE_LIMIT_PER_SEC) || 1,
 		downloaderThreadsCount: Number(process.env.DOWNLOADER_THREADS_COUNT) || 3,
 		crawlMaxCdxPages: Number(process.env.CRAWL_MAX_CDX_PAGES) || 50,
-		outboundProxyUrl: process.env.OUTBOUND_PROXY_URL ?? "",
+		outboundProxyUrls: parseOutboundProxyUrls(process.env.OUTBOUND_PROXY_URLS),
+		outboundProxyChooser: parseOutboundProxyChooser(process.env.OUTBOUND_PROXY_CHOOSER),
 		outboundProxyUsername: process.env.OUTBOUND_PROXY_USERNAME ?? "",
 		outboundProxyPassword: process.env.OUTBOUND_PROXY_PASSWORD ?? "",
 	};
