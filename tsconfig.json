@@ -9,5 +9,5 @@
 		"noUnusedLocals": false,
 		"noUnusedParameters": true
 	},
-	"include": ["timemachine.ts"]
+	"include": ["timemachine.ts", "src/**/*", "tests/**/*"]
 }

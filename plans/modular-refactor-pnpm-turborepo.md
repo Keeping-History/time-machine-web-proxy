@@ -1,3 +1,9 @@
+---
+status: in_progress
+approved_at: "2026-05-20T03:18:39.487Z"
+updated: "2026-05-20T03:20:11.085Z"
+started_at: "2026-05-20T03:20:11.085Z"
+---
 # Implementation Plan: Modular Refactor + pnpm + Turborepo
 
 **Created:** 2026-05-20

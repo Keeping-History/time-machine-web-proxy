@@ -3,18 +3,34 @@
 	"private": true,
 	"version": "1.0.0",
 	"type": "module",
+	"packageManager": "pnpm@10.26.0",
 	"scripts": {
 		"build": "esbuild timemachine.ts --bundle --platform=node --target=node22 --outfile=dist/timemachine.js",
-		"typecheck": "tsc --noEmit"
+		"typecheck": "tsc --noEmit",
+		"test": "jest --passWithNoTests",
+		"lint": "biome lint .",
+		"check": "biome check .",
+		"check:fix": "biome check --write ."
 	},
 	"dependencies": {
+		"pino": "^10.3.1",
 		"ws": "^8.18.2"
 	},
 	"devDependencies": {
+		"@biomejs/biome": "2.4.15",
+		"@types/jest": "^30.0.0",
 		"@types/node": "^24.1.0",
 		"@types/ws": "^8.5.14",
 		"esbuild": "^0.25.0",
+		"jest": "^30.4.2",
+		"ts-jest": "^29.4.10",
+		"turbo": "^2.9.14",
 		"typescript": "~5.9.3"
+	},
+	"pnpm": {
+		"onlyBuiltDependencies": [
+			"esbuild"
+		]
 	},
 	"volta": {
 		"node": "25.2.0"
