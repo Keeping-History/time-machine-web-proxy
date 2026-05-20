@@ -6,42 +6,47 @@ import { normalizeBaseUrlInput } from "../lib/normalize-base-url";
 import type { CacheService } from "../services/cache";
 import { assertDomainCrawlJob, assertExactUrlJob, QUEUE_CRAWL, QUEUE_EXACT } from "./jobs";
 
-// Wayback Availability API. Given a URL + target timestamp it returns the
-// nearest real capture, e.g. {archived_snapshots:{closest:{timestamp:...}}}.
-// Required because wayback-machine-downloader uses CDX `from`/`to` ranges,
-// and second-precision `from=to=<time>` virtually never matches a capture.
-const AVAILABILITY_URL = "https://archive.org/wayback/available";
+// Wayback CDX search API. We use this (not the Availability API) to find
+// the latest capture AT OR BEFORE the requested time. Why CDX:
+//   - Availability's `closest=before` is unreliable: it can return future
+//     captures (observed: target 20010917, returned 20020803).
+//   - In strict-match mode Availability won't bridge http/https for sites
+//     whose early captures are http-only (e.g. apple.com pre-2000 returns
+//     empty when queried as https://).
+//   - CDX uses SURT canonicalization, which is the same form the downloader
+//     queries internally — so the snap timestamp is guaranteed to correspond
+//     to a capture the downloader can find.
+const CDX_URL = "https://web.archive.org/cdx/search/cdx";
 // 30s rather than the undici default-ish 10s: production logs show sporadic
 // connect timeouts to web.archive.org under that ceiling, and a precondition
 // call timing out here would surface to the user as a 500 even though the
 // downloader could likely have succeeded.
-const AVAILABILITY_TIMEOUT_MS = 30_000;
+const CDX_TIMEOUT_MS = 30_000;
 
-interface AvailabilityResponse {
-	readonly archived_snapshots?: {
-		readonly closest?: {
-			readonly timestamp?: string;
-			readonly available?: boolean;
-		};
-	};
-}
-
-async function findNearestSnapshotTimestamp(url: string, time: string): Promise<string> {
-	// `closest=before` constrains the snap to captures AT OR BEFORE the
-	// requested timestamp. The user-facing contract is "as close to the
-	// requested time as possible without going past it"; without this we
-	// could resolve to a capture from after the user's requested moment.
+async function findLatestSnapshotAtOrBefore(url: string, time: string): Promise<string> {
+	// Strip the scheme so Wayback's URL canonicalizer handles http/https
+	// archive variants uniformly. CDX uses SURT (scheme-agnostic) keys, but
+	// some Wayback paths still treat scheme-included URLs literally.
+	const schemeless = url.replace(/^https?:\/\//i, "");
+	// `to=<time>` upper-bounds the search at the requested timestamp.
+	// `limit=-1` returns just the LAST matching row, which is the most
+	// recent capture in the window — exactly what "at or before" means.
 	const u =
-		`${AVAILABILITY_URL}?url=${encodeURIComponent(url)}` +
-		`&timestamp=${time}&closest=before`;
-	const r = await fetch(u, { signal: AbortSignal.timeout(AVAILABILITY_TIMEOUT_MS) });
-	if (!r.ok) throw new Error(`Wayback availability ${r.status}`);
-	const body = (await r.json()) as AvailabilityResponse;
-	const closest = body.archived_snapshots?.closest;
-	if (!closest?.available || !closest.timestamp) {
-		throw new Error(`No archived snapshot for ${url} near ${time}`);
+		`${CDX_URL}?url=${encodeURIComponent(schemeless)}` +
+		`&to=${time}&limit=-1&output=json`;
+	const r = await fetch(u, { signal: AbortSignal.timeout(CDX_TIMEOUT_MS) });
+	if (!r.ok) throw new Error(`Wayback CDX ${r.status}`);
+	const body = (await r.json()) as unknown;
+	// CDX returns [[headers], [row1], …]. Empty result is just [[headers]]
+	// or `[]`. The capture timestamp lives at column index 1.
+	if (!Array.isArray(body) || body.length < 2) {
+		throw new Error(`No archived snapshot for ${url} at or before ${time}`);
 	}
-	return closest.timestamp;
+	const row = body[1];
+	if (!Array.isArray(row) || typeof row[1] !== "string") {
+		throw new Error(`No archived snapshot for ${url} at or before ${time}`);
+	}
+	return row[1];
 }
 
 export interface StartArchiveWorkersOpts {
@@ -112,11 +117,10 @@ export function startArchiveWorkers(opts: StartArchiveWorkersOpts): ArchiveWorke
 			const { hostname } = new URL(url);
 			const directory = cache.cacheDirForJob(time, hostname);
 			logger.info({ url, time, directory }, "[worker:exact] start");
-			// Resolve the user's requested second to the nearest real capture
-			// AT OR BEFORE that time. Without `closest=before` (inside
-			// findNearestSnapshotTimestamp) the snap could land on a future
-			// capture, violating the user-facing contract.
-			const snapped = await findNearestSnapshotTimestamp(base.canonicalUrl, time);
+			// Resolve the user's requested second to the latest real capture
+			// AT OR BEFORE that time via CDX (see findLatestSnapshotAtOrBefore
+			// for why CDX, not the Availability API).
+			const snapped = await findLatestSnapshotAtOrBefore(base.canonicalUrl, time);
 			if (snapped !== time) {
 				logger.info(
 					{ url, requestedTime: time, snapped },

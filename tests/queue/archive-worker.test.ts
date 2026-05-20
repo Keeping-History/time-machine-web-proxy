@@ -135,20 +135,35 @@ function findWorker(name: string): CapturedWorker {
 // determined by `cache.lookup(url, time)` to match what the proxy reader will
 // actually find. See `makeCache` for the default HIT and per-test overrides.
 
-// `globalThis.fetch` is replaced with a mock that resolves the Wayback
-// Availability API call. The default response is a successful "snap to the
-// same second" so the existing tests keep their original from/to assertions
-// without having to thread availability fixtures through every case.
+// `globalThis.fetch` is replaced with a mock that resolves the Wayback CDX
+// API call (used by the worker to find the latest capture at or before the
+// requested time). The default response snaps to the requested second so the
+// existing from/to assertions don't have to thread fixtures through every test.
 const fetchMock = jest.fn();
 beforeAll(() => {
 	(globalThis as { fetch: typeof fetch }).fetch = fetchMock as unknown as typeof fetch;
 });
 
-function availabilityResponse(timestamp: string | null): Response {
+// CDX search returns rows of [urlkey, timestamp, original, mimetype, statuscode,
+// digest, length]. Row 0 is the header; row 1 (if present) is the capture.
+const CDX_HEADERS = [
+	"urlkey",
+	"timestamp",
+	"original",
+	"mimetype",
+	"statuscode",
+	"digest",
+	"length",
+] as const;
+
+function cdxResponse(timestamp: string | null): Response {
 	const body =
 		timestamp === null
-			? { archived_snapshots: {} }
-			: { archived_snapshots: { closest: { timestamp, available: true } } };
+			? [CDX_HEADERS]
+			: [
+					CDX_HEADERS,
+					["com,example)/", timestamp, "http://example.com/", "text/html", "200", "ABCD", "1234"],
+				];
 	return {
 		ok: true,
 		status: 200,
@@ -163,11 +178,11 @@ beforeEach(() => {
 	downloadFilesMock.mockReset().mockResolvedValue(undefined);
 	normalizeBaseUrlInputMock.mockClear();
 	workerInstances.length = 0;
-	// Default: Availability API returns the requested time as the closest capture.
+	// Default: CDX returns one row at the requested `to` timestamp.
 	fetchMock.mockReset().mockImplementation(async (u: string) => {
 		const url = new URL(u);
-		const t = url.searchParams.get("timestamp") ?? "";
-		return availabilityResponse(t);
+		const t = url.searchParams.get("to") ?? "";
+		return cdxResponse(t);
 	});
 });
 
@@ -229,9 +244,9 @@ describe("startArchiveWorkers", () => {
 
 describe("exact worker processor", () => {
 	it("constructs WaybackMachineDownloader with exact_url:true and from/to set to the snapped capture timestamp", async () => {
-		// Availability API returns a DIFFERENT timestamp than the request to
-		// prove from/to come from the snap-to-nearest result, not the input.
-		fetchMock.mockImplementationOnce(async () => availabilityResponse("20200103121530"));
+		// CDX returns a DIFFERENT timestamp than the request to prove from/to
+		// come from the snap-to-nearest result, not the input.
+		fetchMock.mockImplementationOnce(async () => cdxResponse("20200103121530"));
 		const cache = makeCache();
 		startArchiveWorkers(baseOpts({ cache }));
 		const worker = findWorker(QUEUE_EXACT);
@@ -251,30 +266,37 @@ describe("exact worker processor", () => {
 		expect(args.download_external_assets).toBe(false);
 	});
 
-	it("queries the Wayback Availability API with the canonical URL, requested timestamp, and closest=before so the snap never lands on a future capture", async () => {
+	it("queries the Wayback CDX API with a schemeless URL and to=<requested-time> + limit=-1 so the snap returns the latest capture AT OR BEFORE the requested time", async () => {
 		startArchiveWorkers(baseOpts());
 		const worker = findWorker(QUEUE_EXACT);
 		await worker.processor({
-			id: "j-avail",
+			id: "j-snap",
 			data: { url: "https://www.example.com/about", time: "20200101000000" },
-			token: "tk-avail",
+			token: "tk-snap",
 		});
 		expect(fetchMock).toHaveBeenCalledTimes(1);
 		const calledUrl = new URL(fetchMock.mock.calls[0][0]);
-		expect(calledUrl.origin + calledUrl.pathname).toBe("https://archive.org/wayback/available");
+		expect(calledUrl.origin + calledUrl.pathname).toBe(
+			"https://web.archive.org/cdx/search/cdx",
+		);
+		// Schemeless URL: CDX uses SURT canonicalization, so dropping the
+		// scheme lets Wayback's matcher bridge http/https archive variants.
 		// `normalizeBaseUrlInputMock` strips `www.` and adds a trailing slash —
-		// that's the form the WAYBACK API call uses (Wayback collapses www/apex
+		// that's the form the WAYBACK lookup uses (Wayback collapses www/apex
 		// for indexing). The cache directory key, by contrast, preserves the
 		// user's hostname distinction (see the directory test below).
-		expect(calledUrl.searchParams.get("url")).toBe("https://example.com/");
-		expect(calledUrl.searchParams.get("timestamp")).toBe("20200101000000");
+		expect(calledUrl.searchParams.get("url")).toBe("example.com/");
 		// "at or before the requested time" is the user-facing contract: we
 		// must never serve a capture from after the requested timestamp.
-		expect(calledUrl.searchParams.get("closest")).toBe("before");
+		expect(calledUrl.searchParams.get("to")).toBe("20200101000000");
+		// limit=-1 returns just the LAST row, which is the latest capture
+		// in the [start-of-index, to] window.
+		expect(calledUrl.searchParams.get("limit")).toBe("-1");
+		expect(calledUrl.searchParams.get("output")).toBe("json");
 	});
 
-	it("throws (job fails) when Wayback Availability reports no snapshot for the URL", async () => {
-		fetchMock.mockImplementationOnce(async () => availabilityResponse(null));
+	it("throws (job fails) when CDX has no captures at or before the requested time", async () => {
+		fetchMock.mockImplementationOnce(async () => cdxResponse(null));
 		startArchiveWorkers(baseOpts());
 		const worker = findWorker(QUEUE_EXACT);
 		await expect(
@@ -288,12 +310,12 @@ describe("exact worker processor", () => {
 		expect(downloadFilesMock).not.toHaveBeenCalled();
 	});
 
-	it("throws (job fails) and skips the downloader when the Availability API returns a non-OK status", async () => {
-		// Upstream Availability errors (5xx, 4xx) must surface as job failures
-		// so BullMQ retries with backoff. Running the downloader against an
-		// unresolved snap-target would CDX-query with the raw user timestamp
-		// and almost always produce zero captures — masking the upstream error
-		// as a misleading "produced no files" failure downstream.
+	it("throws (job fails) and skips the downloader when the CDX API returns a non-OK status", async () => {
+		// Upstream CDX errors (5xx, 4xx) must surface as job failures so BullMQ
+		// retries with backoff. Running the downloader against an unresolved
+		// snap-target would CDX-query with the raw user timestamp and almost
+		// always produce zero captures — masking the upstream error as a
+		// misleading "produced no files" failure downstream.
 		fetchMock.mockImplementationOnce(
 			async () =>
 				({
@@ -310,7 +332,7 @@ describe("exact worker processor", () => {
 				data: { url: "https://example.com/", time: "20200101000000" },
 				token: "tk-avail-500",
 			}),
-		).rejects.toThrow(/Wayback availability 500/);
+		).rejects.toThrow(/Wayback CDX 500/);
 		expect(downloadFilesMock).not.toHaveBeenCalled();
 	});
 
