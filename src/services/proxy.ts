@@ -133,9 +133,13 @@ export class ProxyService {
 	}
 
 	private async cdxPageCount(host: string, time: string): Promise<number> {
+		// Widen to the calendar day of `time` so CDX counts captures across the
+		// day instead of the exact second (which virtually never matches and
+		// would always yield 0, defeating the crawl-size cap).
+		const day = time.slice(0, 8);
 		const u =
 			`https://web.archive.org/cdx/search/cdx?url=${encodeURIComponent(`${host}/*`)}` +
-			`&from=${time}&to=${time}&output=json&showNumPages=true`;
+			`&from=${day}000000&to=${day}235959&output=json&showNumPages=true`;
 		const r = await fetch(u, { signal: AbortSignal.timeout(CDX_TIMEOUT_MS) });
 		if (!r.ok) throw new Error(`CDX preflight ${r.status}`);
 		const txt = (await r.text()).trim();

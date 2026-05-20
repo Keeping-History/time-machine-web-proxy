@@ -1,9 +1,55 @@
+import { promises as fs } from "node:fs";
 import { type ConnectionOptions, type QueueEvents, Worker } from "bullmq";
 import type pino from "pino";
 import { WaybackMachineDownloader } from "wayback-machine-downloader";
 import { normalizeBaseUrlInput } from "../lib/normalize-base-url";
 import type { CacheService } from "../services/cache";
 import { assertDomainCrawlJob, assertExactUrlJob, QUEUE_CRAWL, QUEUE_EXACT } from "./jobs";
+
+// Wayback Availability API. Given a URL + target timestamp it returns the
+// nearest real capture, e.g. {archived_snapshots:{closest:{timestamp:...}}}.
+// Required because wayback-machine-downloader uses CDX `from`/`to` ranges,
+// and second-precision `from=to=<time>` virtually never matches a capture.
+const AVAILABILITY_URL = "https://archive.org/wayback/available";
+const AVAILABILITY_TIMEOUT_MS = 10_000;
+
+interface AvailabilityResponse {
+	readonly archived_snapshots?: {
+		readonly closest?: {
+			readonly timestamp?: string;
+			readonly available?: boolean;
+		};
+	};
+}
+
+async function findNearestSnapshotTimestamp(url: string, time: string): Promise<string> {
+	const u = `${AVAILABILITY_URL}?url=${encodeURIComponent(url)}&timestamp=${time}`;
+	const r = await fetch(u, { signal: AbortSignal.timeout(AVAILABILITY_TIMEOUT_MS) });
+	if (!r.ok) throw new Error(`Wayback availability ${r.status}`);
+	const body = (await r.json()) as AvailabilityResponse;
+	const closest = body.archived_snapshots?.closest;
+	if (!closest?.available || !closest.timestamp) {
+		throw new Error(`No archived snapshot for ${url} near ${time}`);
+	}
+	return closest.timestamp;
+}
+
+async function directoryHasFiles(dir: string): Promise<boolean> {
+	try {
+		const entries = await fs.readdir(dir, { recursive: true, withFileTypes: true });
+		return entries.some((e) => e.isFile());
+	} catch {
+		return false;
+	}
+}
+
+// Convert a 14-digit YYYYMMDDhhmmss timestamp into the calendar-day window
+// it falls within. Used by domain crawls so CDX returns ALL captures of the
+// host on that day rather than only those at the exact requested second.
+function dayWindow(time: string): { from: string; to: string } {
+	const day = time.slice(0, 8);
+	return { from: `${day}000000`, to: `${day}235959` };
+}
 
 export interface StartArchiveWorkersOpts {
 	connection: ConnectionOptions;
@@ -67,12 +113,22 @@ export function startArchiveWorkers(opts: StartArchiveWorkersOpts): ArchiveWorke
 			const base = normalizeBaseUrlInput(url);
 			const directory = cache.cacheDirForJob(time, base.bareHost);
 			logger.info({ url, time, directory }, "[worker:exact] start");
+			// Resolve the user's requested second to the nearest real capture.
+			// Without this the downloader's CDX `from=to=<exact-second>` query
+			// returns zero snapshots almost every time.
+			const snapped = await findNearestSnapshotTimestamp(base.canonicalUrl, time);
+			if (snapped !== time) {
+				logger.info(
+					{ url, requestedTime: time, snapped },
+					"[worker:exact] snapped to nearest capture",
+				);
+			}
 			await runWithRateLimitGuard(exact, () =>
 				new WaybackMachineDownloader({
 					base_url: base.canonicalUrl,
 					normalized_base: base,
-					from_timestamp: time,
-					to_timestamp: time,
+					from_timestamp: snapped,
+					to_timestamp: snapped,
 					threads_count: downloaderThreadsCount,
 					rewrite_mode: "as-is",
 					canonical_action: "keep",
@@ -81,6 +137,16 @@ export function startArchiveWorkers(opts: StartArchiveWorkersOpts): ArchiveWorke
 					directory,
 				}).download_files(),
 			);
+			// The downloader returns successfully on zero-result CDX queries,
+			// which would mark the BullMQ job `completed` with an empty cache
+			// directory and surface as a misleading 502 at the API layer. Fail
+			// the job explicitly so BullMQ retries (and the caller sees a real
+			// error) when nothing was actually written.
+			if (!(await directoryHasFiles(directory))) {
+				throw new Error(
+					`Downloader produced no files for ${url} @ ${time} (snapped ${snapped})`,
+				);
+			}
 		},
 		{
 			connection,
@@ -117,13 +183,14 @@ export function startArchiveWorkers(opts: StartArchiveWorkersOpts): ArchiveWorke
 				);
 			}, CRAWL_LOCK_EXTEND_INTERVAL_MS);
 
+			const { from, to } = dayWindow(time);
 			try {
 				await runWithRateLimitGuard(crawl, () =>
 					new WaybackMachineDownloader({
 						base_url: base.canonicalUrl,
 						normalized_base: base,
-						from_timestamp: time,
-						to_timestamp: time,
+						from_timestamp: from,
+						to_timestamp: to,
 						threads_count: downloaderThreadsCount,
 						rewrite_mode: "as-is",
 						canonical_action: "keep",

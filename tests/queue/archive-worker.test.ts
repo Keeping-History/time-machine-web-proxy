@@ -125,6 +125,36 @@ function findWorker(name: string): CapturedWorker {
 	return w;
 }
 
+// `node:fs` is mocked so the exact processor's "directory has files" guard
+// returns true by default. Individual tests override readdir to simulate the
+// "downloader completed but wrote nothing" failure path.
+const readdirMock = jest.fn().mockResolvedValue([{ name: "index.html", isFile: () => true }]);
+jest.mock("node:fs", () => ({
+	__esModule: true,
+	promises: { readdir: (...args: unknown[]) => readdirMock(...args) },
+}));
+
+// `globalThis.fetch` is replaced with a mock that resolves the Wayback
+// Availability API call. The default response is a successful "snap to the
+// same second" so the existing tests keep their original from/to assertions
+// without having to thread availability fixtures through every case.
+const fetchMock = jest.fn();
+beforeAll(() => {
+	(globalThis as { fetch: typeof fetch }).fetch = fetchMock as unknown as typeof fetch;
+});
+
+function availabilityResponse(timestamp: string | null): Response {
+	const body =
+		timestamp === null
+			? { archived_snapshots: {} }
+			: { archived_snapshots: { closest: { timestamp, available: true } } };
+	return {
+		ok: true,
+		status: 200,
+		json: async () => body,
+	} as unknown as Response;
+}
+
 beforeEach(() => {
 	WorkerMock.mockClear();
 	rateLimitErrorMock.mockClear();
@@ -132,6 +162,13 @@ beforeEach(() => {
 	downloadFilesMock.mockReset().mockResolvedValue(undefined);
 	normalizeBaseUrlInputMock.mockClear();
 	workerInstances.length = 0;
+	readdirMock.mockReset().mockResolvedValue([{ name: "index.html", isFile: () => true }]);
+	// Default: Availability API returns the requested time as the closest capture.
+	fetchMock.mockReset().mockImplementation(async (u: string) => {
+		const url = new URL(u);
+		const t = url.searchParams.get("timestamp") ?? "";
+		return availabilityResponse(t);
+	});
 });
 
 // --- startArchiveWorkers: returned shape + Worker construction ---------------
@@ -191,7 +228,10 @@ describe("startArchiveWorkers", () => {
 // --- Exact processor ---------------------------------------------------------
 
 describe("exact worker processor", () => {
-	it("constructs WaybackMachineDownloader with exact_url:true and matching from/to timestamps", async () => {
+	it("constructs WaybackMachineDownloader with exact_url:true and from/to set to the snapped capture timestamp", async () => {
+		// Availability API returns a DIFFERENT timestamp than the request to
+		// prove from/to come from the snap-to-nearest result, not the input.
+		fetchMock.mockImplementationOnce(async () => availabilityResponse("20200103121530"));
 		const cache = makeCache();
 		startArchiveWorkers(baseOpts({ cache }));
 		const worker = findWorker(QUEUE_EXACT);
@@ -203,12 +243,59 @@ describe("exact worker processor", () => {
 		expect(WaybackMachineDownloaderMock).toHaveBeenCalledTimes(1);
 		const args = WaybackMachineDownloaderMock.mock.calls[0][0];
 		expect(args.exact_url).toBe(true);
-		expect(args.from_timestamp).toBe("20200101000000");
-		expect(args.to_timestamp).toBe("20200101000000");
+		expect(args.from_timestamp).toBe("20200103121530");
+		expect(args.to_timestamp).toBe("20200103121530");
 		expect(args.threads_count).toBe(3);
 		expect(args.rewrite_mode).toBe("as-is");
 		expect(args.canonical_action).toBe("keep");
 		expect(args.download_external_assets).toBe(false);
+	});
+
+	it("queries the Wayback Availability API with the canonical URL and requested timestamp before downloading", async () => {
+		startArchiveWorkers(baseOpts());
+		const worker = findWorker(QUEUE_EXACT);
+		await worker.processor({
+			id: "j-avail",
+			data: { url: "https://www.example.com/about", time: "20200101000000" },
+			token: "tk-avail",
+		});
+		expect(fetchMock).toHaveBeenCalledTimes(1);
+		const calledUrl = new URL(fetchMock.mock.calls[0][0]);
+		expect(calledUrl.origin + calledUrl.pathname).toBe("https://archive.org/wayback/available");
+		// `normalizeBaseUrlInputMock` strips `www.` and adds a trailing slash.
+		expect(calledUrl.searchParams.get("url")).toBe("https://example.com/");
+		expect(calledUrl.searchParams.get("timestamp")).toBe("20200101000000");
+	});
+
+	it("throws (job fails) when Wayback Availability reports no snapshot for the URL", async () => {
+		fetchMock.mockImplementationOnce(async () => availabilityResponse(null));
+		startArchiveWorkers(baseOpts());
+		const worker = findWorker(QUEUE_EXACT);
+		await expect(
+			worker.processor({
+				id: "j-no-snap",
+				data: { url: "https://example.com/", time: "20200101000000" },
+				token: "tk-no-snap",
+			}),
+		).rejects.toThrow(/No archived snapshot/);
+		// Downloader must not run when there's nothing to download.
+		expect(downloadFilesMock).not.toHaveBeenCalled();
+	});
+
+	it("throws (job fails) when the downloader returns but the cache directory is still empty", async () => {
+		// Downloader resolves successfully but writes nothing — the contract
+		// bug that masked Wayback's zero-snapshot result as a misleading 502.
+		readdirMock.mockResolvedValueOnce([]);
+		startArchiveWorkers(baseOpts());
+		const worker = findWorker(QUEUE_EXACT);
+		await expect(
+			worker.processor({
+				id: "j-empty",
+				data: { url: "https://example.com/", time: "20200101000000" },
+				token: "tk-empty",
+			}),
+		).rejects.toThrow(/produced no files/);
+		expect(downloadFilesMock).toHaveBeenCalledTimes(1);
 	});
 
 	it("derives directory from cache.cacheDirForJob(time, base.bareHost)", async () => {
@@ -314,13 +401,13 @@ describe("crawl worker processor", () => {
 		jest.useRealTimers();
 	});
 
-	it("constructs WaybackMachineDownloader with exact_url:false and derives base from 'https://<host>'", async () => {
+	it("constructs WaybackMachineDownloader with exact_url:false, a day-window CDX range, and base derived from 'https://<host>'", async () => {
 		const cache = makeCache();
 		startArchiveWorkers(baseOpts({ cache }));
 		const worker = findWorker(QUEUE_CRAWL);
 		const jobPromise = worker.processor({
 			id: "c1",
-			data: { host: "example.com", time: "20200101000000" },
+			data: { host: "example.com", time: "20200101123045" },
 			token: "tk-c1",
 			extendLock: jest.fn().mockResolvedValue(0),
 		});
@@ -328,9 +415,13 @@ describe("crawl worker processor", () => {
 		expect(normalizeBaseUrlInputMock).toHaveBeenCalledWith("https://example.com");
 		const args = WaybackMachineDownloaderMock.mock.calls[0][0];
 		expect(args.exact_url).toBe(false);
+		// Range widens to the calendar day of the requested time. CDX `from=to=<exact-second>`
+		// virtually never matches a real capture, so the crawl would otherwise be a no-op.
 		expect(args.from_timestamp).toBe("20200101000000");
-		expect(args.to_timestamp).toBe("20200101000000");
-		expect(args.directory).toBe("/cache/v2/20200101000000/example.com");
+		expect(args.to_timestamp).toBe("20200101235959");
+		// Cache directory remains keyed by the user-requested time so the API layer
+		// finds pre-warmed files under the path it originally looked up.
+		expect(args.directory).toBe("/cache/v2/20200101123045/example.com");
 	});
 
 	it("rejects invalid DomainCrawlJob payloads via the asserter", async () => {
