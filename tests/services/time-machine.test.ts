@@ -25,6 +25,16 @@ const config: Config = {
 	proxyBaseHostname: "localhost",
 	cacheClearToken: "",
 	wsKeepaliveMs: 30000,
+	redisUrl: "redis://localhost:6379",
+	bullmqPrefix: "tm",
+	domainCrawlEnabled: true,
+	workerConcurrency: 2,
+	workerRateLimitPerSec: 1,
+	downloaderThreadsCount: 3,
+	crawlMaxCdxPages: 50,
+	outboundProxyUrl: "",
+	outboundProxyUsername: "",
+	outboundProxyPassword: "",
 };
 
 const makeService = () => {

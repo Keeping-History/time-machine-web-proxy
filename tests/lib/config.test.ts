@@ -28,6 +28,16 @@ describe("loadConfig", () => {
 		delete process.env.PROXY_BASE_URL;
 		delete process.env.CACHE_CLEAR_TOKEN;
 		delete process.env.WS_KEEPALIVE_MS;
+		delete process.env.REDIS_URL;
+		delete process.env.BULLMQ_PREFIX;
+		delete process.env.DOMAIN_CRAWL_ENABLED;
+		delete process.env.WORKER_CONCURRENCY;
+		delete process.env.WORKER_RATE_LIMIT_PER_SEC;
+		delete process.env.DOWNLOADER_THREADS_COUNT;
+		delete process.env.CRAWL_MAX_CDX_PAGES;
+		delete process.env.OUTBOUND_PROXY_URL;
+		delete process.env.OUTBOUND_PROXY_USERNAME;
+		delete process.env.OUTBOUND_PROXY_PASSWORD;
 
 		const config = loadConfig();
 
@@ -45,6 +55,16 @@ describe("loadConfig", () => {
 		expect(config.proxyPrefix).toBe("");
 		expect(config.cacheClearToken).toBe("");
 		expect(config.wsKeepaliveMs).toBe(30_000);
+		expect(config.redisUrl).toBe("redis://localhost:6379");
+		expect(config.bullmqPrefix).toBe("tm");
+		expect(config.domainCrawlEnabled).toBe(true);
+		expect(config.workerConcurrency).toBe(2);
+		expect(config.workerRateLimitPerSec).toBe(1);
+		expect(config.downloaderThreadsCount).toBe(3);
+		expect(config.crawlMaxCdxPages).toBe(50);
+		expect(config.outboundProxyUrl).toBe("");
+		expect(config.outboundProxyUsername).toBe("");
+		expect(config.outboundProxyPassword).toBe("");
 	});
 
 	it("reads values from env vars", () => {
@@ -93,5 +113,60 @@ describe("loadConfig", () => {
 
 		process.env.CACHE_ENABLED = "yes";
 		expect(loadConfig().cacheEnabled).toBe(true);
+	});
+
+	it("reads Redis and BullMQ env vars", () => {
+		process.env.REDIS_URL = "redis://memorystore.internal:6379";
+		process.env.BULLMQ_PREFIX = "custom";
+
+		const config = loadConfig();
+
+		expect(config.redisUrl).toBe("redis://memorystore.internal:6379");
+		expect(config.bullmqPrefix).toBe("custom");
+	});
+
+	it("treats DOMAIN_CRAWL_ENABLED=false (case-insensitive) as disabled", () => {
+		process.env.DOMAIN_CRAWL_ENABLED = "false";
+		expect(loadConfig().domainCrawlEnabled).toBe(false);
+
+		process.env.DOMAIN_CRAWL_ENABLED = "FALSE";
+		expect(loadConfig().domainCrawlEnabled).toBe(false);
+
+		process.env.DOMAIN_CRAWL_ENABLED = "False";
+		expect(loadConfig().domainCrawlEnabled).toBe(false);
+	});
+
+	it("treats any DOMAIN_CRAWL_ENABLED value other than false as enabled", () => {
+		process.env.DOMAIN_CRAWL_ENABLED = "true";
+		expect(loadConfig().domainCrawlEnabled).toBe(true);
+
+		process.env.DOMAIN_CRAWL_ENABLED = "yes";
+		expect(loadConfig().domainCrawlEnabled).toBe(true);
+	});
+
+	it("reads worker and downloader integer env vars", () => {
+		process.env.WORKER_CONCURRENCY = "5";
+		process.env.WORKER_RATE_LIMIT_PER_SEC = "2";
+		process.env.DOWNLOADER_THREADS_COUNT = "8";
+		process.env.CRAWL_MAX_CDX_PAGES = "100";
+
+		const config = loadConfig();
+
+		expect(config.workerConcurrency).toBe(5);
+		expect(config.workerRateLimitPerSec).toBe(2);
+		expect(config.downloaderThreadsCount).toBe(8);
+		expect(config.crawlMaxCdxPages).toBe(100);
+	});
+
+	it("reads outbound proxy env vars", () => {
+		process.env.OUTBOUND_PROXY_URL = "http://proxymesh.example.com:31280";
+		process.env.OUTBOUND_PROXY_USERNAME = "user";
+		process.env.OUTBOUND_PROXY_PASSWORD = "secret";
+
+		const config = loadConfig();
+
+		expect(config.outboundProxyUrl).toBe("http://proxymesh.example.com:31280");
+		expect(config.outboundProxyUsername).toBe("user");
+		expect(config.outboundProxyPassword).toBe("secret");
 	});
 });
