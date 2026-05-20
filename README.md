@@ -13,15 +13,16 @@ Supports both HTTP and WebSocket interfaces.
 - Fetches pages from `web.archive.org` at a configurable point in time
 - Strips the Wayback Machine toolbar and injected JS
 - Rewrites HTML/CSS links to route through the local proxy
-- Disk-based response cache (keyed by URL + timestamp)
-- Background prefetching of images and stylesheets
-- Token-bucket rate limiting with concurrency control
-- Exponential backoff retry on transient network errors
+- Filesystem-tree disk cache (`${CACHE_DIR}/v2/<time>/<host>/<path>`) populated by [`wayback-machine-downloader`](https://www.npmjs.com/package/wayback-machine-downloader)
+- Redis-backed BullMQ job queue (foreground exact-URL jobs + background domain-crawl jobs)
+- Optional outbound HTTP proxy (ProxyMesh / Squid) via `undici.setGlobalDispatcher`
 - WebSocket API for programmatic access
 - SSRF protection: blocks private/internal IPs and non-HTTP protocols
 - Optional host whitelist
 - Bearer token protection on the cache management API
 - Docker support with Google Cloud Run deployment
+
+See [docs/deployment.md](docs/deployment.md) for production deployment (Memorystore, VPC Connector, outbound proxy).
 
 ---
 
@@ -44,18 +45,22 @@ The proxy listens on port `8765` by default.
 | `LISTENER` | `0.0.0.0` | Bind address |
 | `PROXY_BASE_URL` | _(derived from `LISTENER:PORT`)_ | Public base URL used when rewriting proxied links. Required when running behind a reverse proxy or on Cloud Run (e.g. `https://your-service.run.app`) |
 | `ARCHIVE_TIME` | `19980101000000` | Default Wayback timestamp (`YYYYMMDDHHmmss`) |
-| `URL_PREFIX` | `https://web.archive.org/web` | Archive base URL |
 | `PROXY_PREFIX` | _(empty)_ | Optional path prefix appended between timestamp and URL |
-| `CACHE_DIR` | `/app/cache` | Directory for cached responses |
+| `CACHE_DIR` | `/app/cache` | Root directory for cached responses. The v2 tree lives under `${CACHE_DIR}/v2/`. |
 | `CACHE_ENABLED` | `true` | Set to `false` to disable disk caching |
 | `CACHE_CLEAR_TOKEN` | _(empty)_ | Bearer token required to call `DELETE /cache`. If empty, the endpoint is unprotected. |
 | `CORS_ORIGIN` | `http://localhost:5173` | Allowed CORS origin (`*` for open) |
 | `WHITELIST_HOSTS` | `*` | Comma-separated list of allowed target hostnames (supports `*.example.com` wildcards). `*` allows all. |
-| `ARCHIVE_RATE_PER_SEC` | `2` | Archive fetch rate limit (requests/sec) |
-| `ARCHIVE_BURST` | `5` | Token bucket burst capacity |
-| `ARCHIVE_MAX_RETRIES` | `3` | Max retries on transient errors |
-| `BACKOFF_INTERVAL_SEC` | _(unused)_ | Deprecated — backoff uses fixed steps: 1s, 10s, 30s, 1m, 5m |
-| `ARCHIVE_MAX_CONCURRENT` | `10` | Max concurrent in-flight archive requests |
+| `REDIS_URL` | `redis://localhost:6379` | ioredis connection URL for BullMQ |
+| `BULLMQ_PREFIX` | `tm` | Namespace prefix for BullMQ Redis keys |
+| `DOMAIN_CRAWL_ENABLED` | `true` | When true, HTML cache misses fire a background domain crawl |
+| `WORKER_CONCURRENCY` | `2` | Concurrent foreground (exact-URL) jobs |
+| `WORKER_RATE_LIMIT_PER_SEC` | `1` | Outbound request ceiling. `1`/sec → 60 req/min, which stays under Wayback's sustained-IP-block threshold. |
+| `DOWNLOADER_THREADS_COUNT` | `3` | `wayback-machine-downloader` internal threads per job |
+| `CRAWL_MAX_CDX_PAGES` | `50` | CDX preflight cap. At default (50 pages × ~3000 URLs/page) ≈ 150k URLs per crawl. |
+| `OUTBOUND_PROXY_URL` | _(empty)_ | HTTP/HTTPS proxy for outbound Wayback fetches (e.g. `http://us-wa-load-balancer.proxymesh.com:31280`). Empty = direct. |
+| `OUTBOUND_PROXY_USERNAME` | _(empty)_ | Basic-auth username for the proxy. Empty = IP whitelist auth. |
+| `OUTBOUND_PROXY_PASSWORD` | _(empty)_ | Basic-auth password. Required when `OUTBOUND_PROXY_USERNAME` is set. |
 
 ---
 
@@ -104,8 +109,8 @@ Returns `401` if the token is missing or incorrect.
 
 | Query param | Description |
 |---|---|
-| `type` | Filter by type: `html`, `css`, or `image` |
-| `domain` | Filter by domain (supports `*.example.com` wildcards) |
+| `type` | **Removed in v2.** Returns `410 Gone` — the filesystem-tree layout has no per-entry MIME metadata. |
+| `domain` | Filter by host directory (supports `*.example.com` wildcards) |
 
 **Response:**
 
@@ -164,21 +169,24 @@ For non-HTML responses, `html` contains a base64-encoded body.
 
 ## Development
 
-**Requirements:** Node.js 22+, npm
+**Requirements:** Node.js 22, pnpm 10.26+ (pinned via `.mise.toml`), a running Redis instance.
 
 ```bash
-npm install
-npx tsx timemachine.ts
+docker compose up -d redis   # local Redis on :6379
+pnpm install
+pnpm dev
 ```
 
-The source is a single TypeScript file (`timemachine.ts`). esbuild bundles it into `dist/timemachine.js`, which the Docker image runs.
+The source lives under `src/` and is bundled by `esbuild` into `dist/`. The Docker image runs the bundled output.
 
-**npm scripts:**
+**pnpm scripts:**
 
 | Script | Description |
 |---|---|
-| `npm run build` | Bundle `timemachine.ts` with esbuild |
-| `npm run typecheck` | Type-check without emitting |
+| `pnpm build` | Bundle the server with esbuild |
+| `pnpm typecheck` | Type-check without emitting |
+| `pnpm test` | Run the Jest suite |
+| `pnpm check` | Biome format + lint |
 
 ---
 
@@ -218,7 +226,7 @@ The shared cache is a GCS bucket mounted at `/app/cache` via GCS FUSE, so all Cl
 
 - Only `http:` and `https:` protocols are allowed as targets
 - Private and loopback addresses are blocked (`localhost`, `127.x`, `10.x`, `192.168.x`, etc.)
-- All archive fetches are constrained to `URL_PREFIX` — arbitrary upstream fetches are not possible
+- All archive fetches are constrained to `https://web.archive.org/` — arbitrary upstream fetches are not possible
 - CORS is restricted to `CORS_ORIGIN`
 - `WHITELIST_HOSTS` can restrict which domains can be proxied
 - `DELETE /cache` can be protected with a Bearer token via `CACHE_CLEAR_TOKEN`

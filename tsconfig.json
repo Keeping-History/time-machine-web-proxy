@@ -7,7 +7,8 @@
 		"strict": true,
 		"skipLibCheck": true,
 		"noUnusedLocals": false,
-		"noUnusedParameters": true
+		"noUnusedParameters": true,
+		"types": ["node", "jest"]
 	},
-	"include": ["timemachine.ts"]
+	"include": ["src/**/*", "tests/**/*"]
 }

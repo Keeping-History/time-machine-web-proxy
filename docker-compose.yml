@@ -7,7 +7,21 @@ services:
       - "${TIMEMACHINE_PORT:-8765}:${TIMEMACHINE_PORT:-8765}"
     volumes:
       - ${HOST_CACHE_DIR:-timemachine-cache}:${CACHE_DIR:-/app/cache}
+    depends_on:
+      redis:
+        condition: service_healthy
     restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
 
 volumes:
   timemachine-cache:

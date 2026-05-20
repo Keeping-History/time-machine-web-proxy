@@ -1,10 +1,12 @@
 FROM node:22-bookworm AS build
 
 WORKDIR /app
-COPY package.json ./
-RUN npm install
-COPY timemachine.ts ./
-RUN npm run build
+COPY package.json pnpm-lock.yaml ./
+RUN npm install -g corepack@latest && corepack enable && corepack prepare pnpm@10.26.0 --activate
+ENV COREPACK_ENABLE_DOWNLOAD_PROMPT=0
+RUN pnpm install --frozen-lockfile
+COPY src/ ./src/
+RUN pnpm run build
 
 FROM node:22-bookworm-slim
 

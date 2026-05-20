@@ -3,18 +3,41 @@
 	"private": true,
 	"version": "1.0.0",
 	"type": "module",
+	"packageManager": "pnpm@10.26.0",
 	"scripts": {
-		"build": "esbuild timemachine.ts --bundle --platform=node --target=node22 --outfile=dist/timemachine.js",
-		"typecheck": "tsc --noEmit"
+		"build": "esbuild src/index.ts --bundle --platform=node --format=cjs --target=node22 --outfile=dist/timemachine.js && printf '{\"type\":\"commonjs\"}' > dist/package.json",
+		"typecheck": "tsc --noEmit",
+		"test": "jest --passWithNoTests",
+		"lint": "biome lint .",
+		"check": "biome check .",
+		"check:fix": "biome check --write ."
 	},
 	"dependencies": {
+		"bullmq": "^5.76.10",
+		"ioredis": "^5.10.1",
+		"mime-types": "^3.0.2",
+		"pino": "^10.3.1",
+		"undici": "^8.3.0",
+		"wayback-machine-downloader": "https://registry.npmjs.org/wayback-machine-downloader/-/wayback-machine-downloader-0.5.0.tgz",
 		"ws": "^8.18.2"
 	},
 	"devDependencies": {
+		"@biomejs/biome": "2.4.15",
+		"@types/jest": "^30.0.0",
+		"@types/mime-types": "^3.0.1",
 		"@types/node": "^24.1.0",
 		"@types/ws": "^8.5.14",
 		"esbuild": "^0.25.0",
+		"jest": "^30.4.2",
+		"ts-jest": "^29.4.10",
+		"ts-node": "^10.9.2",
+		"turbo": "^2.9.14",
 		"typescript": "~5.9.3"
+	},
+	"pnpm": {
+		"onlyBuiltDependencies": [
+			"esbuild"
+		]
 	},
 	"volta": {
 		"node": "25.2.0"
