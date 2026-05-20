@@ -110,24 +110,25 @@ describe("CacheService.lookup (v2)", () => {
 		expect(result?.contentType).toBe("application/octet-stream");
 	});
 
-	// The worker writes cache entries under the bare host (www.-stripped) because
-	// normalizeBaseUrlInput drops the prefix when computing the canonical form.
-	// The reader MUST use the same normalization or every www.* URL would miss
-	// after a successful download — observed in production as a 502 on the
-	// www.apple.com root request despite "Download completed (1 files)".
-	it("normalizes www. host to bare host so reads match what the worker wrote", async () => {
-		(mockFs.access as jest.Mock).mockResolvedValue(undefined);
-		const svc = makeService();
-		const result = await svc.lookup("https://www.apple.com/", TIME);
-		expect(result?.absPath).toBe("/tmp/cache/v2/20200101000000/apple.com/index.html");
-	});
-
-	it("www. and bare host resolve to the same cache entry", async () => {
+	// www.example.com and example.com may serve different content and the
+	// Wayback Machine archives them as distinct URLs. The cache key preserves
+	// that distinction so a hit on one form never returns content from the
+	// other.
+	it("www. and apex hosts resolve to DISTINCT cache entries", async () => {
 		(mockFs.access as jest.Mock).mockResolvedValue(undefined);
 		const svc = makeService();
 		const a = await svc.lookup("https://www.example.com/about.html", TIME);
 		const b = await svc.lookup("https://example.com/about.html", TIME);
-		expect(a?.absPath).toBe(b?.absPath);
+		expect(a?.absPath).toBe("/tmp/cache/v2/20200101000000/www.example.com/about.html");
+		expect(b?.absPath).toBe("/tmp/cache/v2/20200101000000/example.com/about.html");
+		expect(a?.absPath).not.toBe(b?.absPath);
+	});
+
+	it("lookup for a www. URL uses the www. hostname verbatim in the cache path", async () => {
+		(mockFs.access as jest.Mock).mockResolvedValue(undefined);
+		const svc = makeService();
+		const result = await svc.lookup("https://www.apple.com/", TIME);
+		expect(result?.absPath).toBe("/tmp/cache/v2/20200101000000/www.apple.com/index.html");
 	});
 });
 

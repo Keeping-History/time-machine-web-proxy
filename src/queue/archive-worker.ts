@@ -1,4 +1,3 @@
-import { promises as fs } from "node:fs";
 import { type ConnectionOptions, type QueueEvents, Worker } from "bullmq";
 import type pino from "pino";
 import { WaybackMachineDownloader } from "wayback-machine-downloader";
@@ -28,7 +27,13 @@ interface AvailabilityResponse {
 }
 
 async function findNearestSnapshotTimestamp(url: string, time: string): Promise<string> {
-	const u = `${AVAILABILITY_URL}?url=${encodeURIComponent(url)}&timestamp=${time}`;
+	// `closest=before` constrains the snap to captures AT OR BEFORE the
+	// requested timestamp. The user-facing contract is "as close to the
+	// requested time as possible without going past it"; without this we
+	// could resolve to a capture from after the user's requested moment.
+	const u =
+		`${AVAILABILITY_URL}?url=${encodeURIComponent(url)}` +
+		`&timestamp=${time}&closest=before`;
 	const r = await fetch(u, { signal: AbortSignal.timeout(AVAILABILITY_TIMEOUT_MS) });
 	if (!r.ok) throw new Error(`Wayback availability ${r.status}`);
 	const body = (await r.json()) as AvailabilityResponse;
@@ -39,18 +44,9 @@ async function findNearestSnapshotTimestamp(url: string, time: string): Promise<
 	return closest.timestamp;
 }
 
-async function directoryHasFiles(dir: string): Promise<boolean> {
-	try {
-		const entries = await fs.readdir(dir, { recursive: true, withFileTypes: true });
-		return entries.some((e) => e.isFile());
-	} catch {
-		return false;
-	}
-}
-
 export interface StartArchiveWorkersOpts {
 	connection: ConnectionOptions;
-	cache: Pick<CacheService, "cacheDirForJob">;
+	cache: Pick<CacheService, "cacheDirForJob" | "lookup">;
 	logger: pino.Logger;
 	bullmqPrefix: string;
 	workerConcurrency: number;
@@ -108,11 +104,18 @@ export function startArchiveWorkers(opts: StartArchiveWorkersOpts): ArchiveWorke
 			assertExactUrlJob(job.data);
 			const { url, time } = job.data;
 			const base = normalizeBaseUrlInput(url);
-			const directory = cache.cacheDirForJob(time, base.bareHost);
+			// Cache directory keys on the URL's hostname verbatim — www.example.com
+			// and example.com are stored as separate entries because they can
+			// legitimately serve different content. `base.canonicalUrl` is still
+			// used as the Wayback API key (Wayback collapses www/apex for its own
+			// indexing), but that's a Wayback-side concern, not a cache-key one.
+			const { hostname } = new URL(url);
+			const directory = cache.cacheDirForJob(time, hostname);
 			logger.info({ url, time, directory }, "[worker:exact] start");
-			// Resolve the user's requested second to the nearest real capture.
-			// Without this the downloader's CDX `from=to=<exact-second>` query
-			// returns zero snapshots almost every time.
+			// Resolve the user's requested second to the nearest real capture
+			// AT OR BEFORE that time. Without `closest=before` (inside
+			// findNearestSnapshotTimestamp) the snap could land on a future
+			// capture, violating the user-facing contract.
 			const snapped = await findNearestSnapshotTimestamp(base.canonicalUrl, time);
 			if (snapped !== time) {
 				logger.info(
@@ -134,13 +137,16 @@ export function startArchiveWorkers(opts: StartArchiveWorkersOpts): ArchiveWorke
 					directory,
 				}).download_files(),
 			);
-			// The downloader returns successfully on zero-result CDX queries,
-			// which would mark the BullMQ job `completed` with an empty cache
-			// directory and surface as a misleading 502 at the API layer. Fail
-			// the job explicitly so BullMQ retries (and the caller sees a real
-			// error) when nothing was actually written.
-			if (!(await directoryHasFiles(directory))) {
-				throw new Error(`Downloader produced no files for ${url} @ ${time} (snapped ${snapped})`);
+			// Success criterion must match what the proxy reader requires for
+			// THIS specific (url, time) — a host-level "directory has any file"
+			// check used to mask zero-result CDX runs whenever sibling URLs at
+			// the same host had been downloaded previously, marking the job
+			// `completed` while the proxy then 502'd on the re-lookup.
+			const hit = await cache.lookup(url, time);
+			if (!hit) {
+				throw new Error(
+					`Downloader produced no usable file for ${url} @ ${time} (snapped ${snapped})`,
+				);
 			}
 		},
 		{
