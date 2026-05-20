@@ -8,7 +8,10 @@ import type { Config } from "../models/config";
 import type { ProxyResult } from "../models/proxy";
 import type { CacheService } from "./cache";
 
-const CDX_TIMEOUT_MS = 10_000;
+// 30s — matches AVAILABILITY_TIMEOUT_MS in the worker. Production logs show
+// sporadic 10s connect timeouts against web.archive.org; widening here keeps
+// the size-preflight from misclassifying transient slowness as "skip crawl".
+const CDX_TIMEOUT_MS = 30_000;
 const HOST_BUDGET_TTL_S = 86_400;
 const HOST_BUDGET_KEY_PREFIX = "tm:crawl:budget:";
 

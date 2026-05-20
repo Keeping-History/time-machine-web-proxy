@@ -11,7 +11,11 @@ import { assertDomainCrawlJob, assertExactUrlJob, QUEUE_CRAWL, QUEUE_EXACT } fro
 // Required because wayback-machine-downloader uses CDX `from`/`to` ranges,
 // and second-precision `from=to=<time>` virtually never matches a capture.
 const AVAILABILITY_URL = "https://archive.org/wayback/available";
-const AVAILABILITY_TIMEOUT_MS = 10_000;
+// 30s rather than the undici default-ish 10s: production logs show sporadic
+// connect timeouts to web.archive.org under that ceiling, and a precondition
+// call timing out here would surface to the user as a 500 even though the
+// downloader could likely have succeeded.
+const AVAILABILITY_TIMEOUT_MS = 30_000;
 
 interface AvailabilityResponse {
 	readonly archived_snapshots?: {
