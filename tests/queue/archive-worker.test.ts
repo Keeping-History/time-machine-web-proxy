@@ -282,6 +282,32 @@ describe("exact worker processor", () => {
 		expect(downloadFilesMock).not.toHaveBeenCalled();
 	});
 
+	it("throws (job fails) and skips the downloader when the Availability API returns a non-OK status", async () => {
+		// Upstream Availability errors (5xx, 4xx) must surface as job failures
+		// so BullMQ retries with backoff. Running the downloader against an
+		// unresolved snap-target would CDX-query with the raw user timestamp
+		// and almost always produce zero captures — masking the upstream error
+		// as a misleading "produced no files" failure downstream.
+		fetchMock.mockImplementationOnce(
+			async () =>
+				({
+					ok: false,
+					status: 500,
+					json: async () => ({}),
+				}) as unknown as Response,
+		);
+		startArchiveWorkers(baseOpts());
+		const worker = findWorker(QUEUE_EXACT);
+		await expect(
+			worker.processor({
+				id: "j-avail-500",
+				data: { url: "https://example.com/", time: "20200101000000" },
+				token: "tk-avail-500",
+			}),
+		).rejects.toThrow(/Wayback availability 500/);
+		expect(downloadFilesMock).not.toHaveBeenCalled();
+	});
+
 	it("throws (job fails) when the downloader returns but the cache directory is still empty", async () => {
 		// Downloader resolves successfully but writes nothing — the contract
 		// bug that masked Wayback's zero-snapshot result as a misleading 502.
