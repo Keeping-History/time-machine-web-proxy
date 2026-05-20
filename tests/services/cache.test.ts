@@ -4,6 +4,7 @@ jest.mock("node:fs", () => ({
 		writeFile: jest.fn(),
 		readdir: jest.fn(),
 		unlink: jest.fn(),
+		access: jest.fn(),
 	},
 	createHash: jest.requireActual("node:crypto").createHash,
 }));
@@ -142,5 +143,94 @@ describe("CacheService.handleCacheClear", () => {
 		await makeService().handleCacheClear(makeReq("?domain=other.com"), res);
 
 		expect(mockFs.unlink).not.toHaveBeenCalled();
+	});
+});
+
+describe("CacheService.cacheDirForJob", () => {
+	it("returns <cacheDir>/v2/<time>/<host> exactly", () => {
+		const svc = makeService();
+		expect(svc.cacheDirForJob("20200101000000", "example.com")).toBe(
+			"/tmp/cache/v2/20200101000000/example.com",
+		);
+	});
+
+	it("composes path correctly with different host and time values", () => {
+		const svc = makeService();
+		expect(svc.cacheDirForJob("19990921123456", "sub.example.org")).toBe(
+			"/tmp/cache/v2/19990921123456/sub.example.org",
+		);
+	});
+});
+
+describe("CacheService.lookup (v2)", () => {
+	const TIME = "20200101000000";
+
+	it("returns null without touching fs when cacheEnabled is false", async () => {
+		const svc = makeService(false);
+		const result = await svc.lookup("https://example.com/about", TIME);
+		expect(result).toBeNull();
+		expect(mockFs.access).not.toHaveBeenCalled();
+	});
+
+	it("HIT: returns { absPath, contentType } when file exists", async () => {
+		(mockFs.access as jest.Mock).mockResolvedValue(undefined);
+		const svc = makeService();
+		const result = await svc.lookup("https://example.com/about.html", TIME);
+		expect(result).toEqual({
+			absPath: "/tmp/cache/v2/20200101000000/example.com/about.html",
+			contentType: "text/html",
+		});
+		expect(mockFs.access).toHaveBeenCalledTimes(1);
+	});
+
+	it("MISS: returns null when fs.access rejects", async () => {
+		(mockFs.access as jest.Mock).mockRejectedValue(
+			Object.assign(new Error("ENOENT"), { code: "ENOENT" }),
+		);
+		const svc = makeService();
+		const result = await svc.lookup("https://example.com/missing.html", TIME);
+		expect(result).toBeNull();
+	});
+
+	it("directory URL ending with / resolves to <root>/index.html", async () => {
+		(mockFs.access as jest.Mock).mockResolvedValue(undefined);
+		const svc = makeService();
+		const result = await svc.lookup("https://example.com/about/", TIME);
+		expect(result?.absPath).toBe("/tmp/cache/v2/20200101000000/example.com/about/index.html");
+		expect(result?.contentType).toBe("text/html");
+	});
+
+	it("root path / resolves to <root>/index.html", async () => {
+		(mockFs.access as jest.Mock).mockResolvedValue(undefined);
+		const svc = makeService();
+		const result = await svc.lookup("https://example.com/", TIME);
+		expect(result?.absPath).toBe("/tmp/cache/v2/20200101000000/example.com/index.html");
+	});
+
+	it("path-traversal attempt throws Error with status: 400", async () => {
+		const svc = makeService();
+		// The URL constructor normalizes literal "/../" segments; the realistic
+		// attack vector is percent-encoded traversal which only decodes after
+		// the URL parse step. The guard catches the decoded form.
+		await expect(
+			svc.lookup("https://example.com/%2e%2e%2f%2e%2e%2fetc%2fpasswd", TIME),
+		).rejects.toMatchObject({ status: 400 });
+		expect(mockFs.access).not.toHaveBeenCalled();
+	});
+
+	it("derives content-type from file extension via mime-types", async () => {
+		(mockFs.access as jest.Mock).mockResolvedValue(undefined);
+		const svc = makeService();
+		const cssResult = await svc.lookup("https://example.com/style.css", TIME);
+		expect(cssResult?.contentType).toBe("text/css");
+		const pngResult = await svc.lookup("https://example.com/img.png", TIME);
+		expect(pngResult?.contentType).toBe("image/png");
+	});
+
+	it("returns application/octet-stream for unknown extension", async () => {
+		(mockFs.access as jest.Mock).mockResolvedValue(undefined);
+		const svc = makeService();
+		const result = await svc.lookup("https://example.com/file.unknownext", TIME);
+		expect(result?.contentType).toBe("application/octet-stream");
 	});
 });
