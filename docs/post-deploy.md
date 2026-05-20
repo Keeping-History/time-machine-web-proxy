@@ -116,7 +116,7 @@ If `LLEN` shows duplicates, the deterministic `jobId` (sha256 of `host|time`) ma
 
 ## Check 5 — Outbound proxy install (plan AC, log line)
 
-Only relevant when `OUTBOUND_PROXY_URL` is configured.
+Only relevant when `OUTBOUND_PROXY_URLS` is configured.
 
 ```bash
 gcloud logging read \
@@ -127,7 +127,8 @@ gcloud logging read \
 ```
 
 **PASS criteria:**
-- Returns a line like `[outbound-proxy] installed` with `host=<proxy>` and `auth=basic|ip`.
+- For a single URL, returns `[outbound-proxy] installed` with `host=<proxy>` and `auth=basic|ip`.
+- For multiple URLs, returns `[outbound-proxy] installed (rotating)` with `hosts=[...]`, `chooser=sequential|random`, and `count=<N>`.
 - The password value does NOT appear in any log line:
   ```bash
   gcloud logging read 'resource.type=cloud_run_revision' --limit=200 --format=json \
@@ -135,7 +136,7 @@ gcloud logging read \
   ```
   Must return `0`.
 
-If the log line is missing but `OUTBOUND_PROXY_URL` is set in the revision env, the install function may be silently no-op'ing — investigate `src/lib/outbound-proxy.ts`.
+If the log line is missing but `OUTBOUND_PROXY_URLS` is set in the revision env, the install function may be silently no-op'ing — investigate `src/lib/outbound-proxy.ts`.
 
 ---
 

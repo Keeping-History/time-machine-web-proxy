@@ -58,8 +58,9 @@ The proxy listens on port `8765` by default.
 | `WORKER_RATE_LIMIT_PER_SEC` | `1` | Outbound request ceiling. `1`/sec → 60 req/min, which stays under Wayback's sustained-IP-block threshold. |
 | `DOWNLOADER_THREADS_COUNT` | `3` | `wayback-machine-downloader` internal threads per job |
 | `CRAWL_MAX_CDX_PAGES` | `50` | CDX preflight cap. At default (50 pages × ~3000 URLs/page) ≈ 150k URLs per crawl. |
-| `OUTBOUND_PROXY_URL` | _(empty)_ | HTTP/HTTPS proxy for outbound Wayback fetches (e.g. `http://us-wa-load-balancer.proxymesh.com:31280`). Empty = direct. |
-| `OUTBOUND_PROXY_USERNAME` | _(empty)_ | Basic-auth username for the proxy. Empty = IP whitelist auth. |
+| `OUTBOUND_PROXY_URLS` | _(empty)_ | CSV of HTTP/HTTPS proxy URLs for outbound Wayback fetches. One URL → single proxy; multiple URLs → rotation. Empty = direct. |
+| `OUTBOUND_PROXY_CHOOSER` | `Sequential` | Rotation strategy when multiple `OUTBOUND_PROXY_URLS` are set: `Sequential` (round-robin) or `Random` (uniform per-request). Ignored when only one URL is provided. |
+| `OUTBOUND_PROXY_USERNAME` | _(empty)_ | Basic-auth username applied to every proxy URL. Empty = IP whitelist auth. |
 | `OUTBOUND_PROXY_PASSWORD` | _(empty)_ | Basic-auth password. Required when `OUTBOUND_PROXY_USERNAME` is set. |
 
 ---

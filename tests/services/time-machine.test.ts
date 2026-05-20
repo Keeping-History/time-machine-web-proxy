@@ -27,7 +27,8 @@ const config: Config = {
 	workerRateLimitPerSec: 1,
 	downloaderThreadsCount: 3,
 	crawlMaxCdxPages: 50,
-	outboundProxyUrl: "",
+	outboundProxyUrls: [],
+	outboundProxyChooser: "sequential",
 	outboundProxyUsername: "",
 	outboundProxyPassword: "",
 };
