@@ -1,8 +1,7 @@
 import http, { type IncomingMessage, type ServerResponse } from "node:http";
 import type pino from "pino";
-import type { WebSocket } from "ws";
-import { WebSocketServer } from "ws";
-import { hasStatus } from "../lib/errors";
+import { type WebSocket, WebSocketServer } from "ws";
+import { errorHasStatus } from "../lib/errors";
 import type { ShutdownController } from "../lib/shutdown";
 import { sanitizeTimeParam, unwrapNestedProxyUrl } from "../lib/url-rewriter";
 import type { Config } from "../models/config";
@@ -186,7 +185,7 @@ export class TimeMachineService {
 			res.end(result.body);
 			this.logRequest(req, 200, start);
 		} catch (e) {
-			const status = hasStatus(e) ? e.status : 500;
+			const status = errorHasStatus(e) ? e.status : 500;
 			if (status === 404) {
 				res.writeHead(404).end("Not found in archive");
 			} else if (status >= 400 && status < 500) {
@@ -304,7 +303,7 @@ export class TimeMachineService {
 					);
 				})
 				.catch((e: unknown) => {
-					const status = hasStatus(e) ? e.status : 500;
+					const status = errorHasStatus(e) ? e.status : 500;
 					if (status >= 500)
 						this.logger.error({ error: e }, "[TimeMachine WS] Upstream request failed");
 					if (ws.readyState !== ws.OPEN) return;
