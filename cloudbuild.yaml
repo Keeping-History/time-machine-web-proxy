@@ -15,6 +15,9 @@
 #   _SERVICE_NAME       Cloud Run service name            (default: time-machine-proxy)
 #   _CACHE_BUCKET       GCS bucket name for shared cache  (default: tm-cache-723408812472)
 #   _DOCKERHUB_USERNAME Docker Hub username               (default: robbiebyrd)
+#   _VPC_CONNECTOR      Serverless VPC Access connector   (operator must set;
+#                                                          required to reach
+#                                                          Memorystore)
 
 steps:
   # Build the container image
@@ -84,11 +87,9 @@ steps:
   # --execution-environment=gen2 is required for GCS volume mounts.
   #
   # --add-volume / --add-volume-mount mounts the GCS bucket at /app/cache via
-  #   GCS FUSE. All instances share the same bucket, so cached responses are
-  #   available across scale-out events and restarts. Cache entries are keyed
-  #   by SHA256(url+time) and are write-once, so concurrent writes from
-  #   multiple instances are safe — two instances racing on the same key write
-  #   identical content.
+  #   GCS FUSE. All instances share the same bucket. The v2 cache layout is
+  #   filesystem-tree (cacheDir/v2/<time>/<host>/<path>); two instances racing
+  #   on the same path write identical content from the downloader.
   #
   # --env-vars-file loads env.yaml (converted from .env.prod with LISTENER
   #   overridden to 0.0.0.0, since .env.prod binds to 127.0.0.1 which Cloud
@@ -99,6 +100,24 @@ steps:
   #
   # --timeout 3600 allows long-lived WebSocket connections (max Cloud Run
   #   supports). HTTP requests still honour normal timeouts.
+  #
+  # --vpc-connector is required to reach Memorystore (private IP). Replace
+  #   $_VPC_CONNECTOR with the name of an existing Serverless VPC Access
+  #   connector in the same region. See docs/deployment.md.
+  #
+  # --vpc-egress=private-ranges-only sends only RFC1918 traffic through the
+  #   connector; public traffic (Wayback, outbound proxy) still uses the
+  #   default egress path.
+  #
+  # --set-secrets injects the Redis AUTH password and outbound-proxy password
+  #   from Secret Manager. Create the secrets with:
+  #     gcloud secrets create redis-password --replication-policy=automatic
+  #     echo -n "<password>" | gcloud secrets versions add redis-password --data-file=-
+  #   (and likewise for outbound-proxy-password).
+  #
+  # --min-instances=1 and --no-cpu-throttling keep the in-process BullMQ
+  #   worker scheduled when no request is active. Without these, the worker
+  #   stalls between requests. Cost: ~$10-15/mo per always-on instance.
   - name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
     entrypoint: gcloud
     args:
@@ -116,8 +135,12 @@ steps:
       - --timeout=3600
       - --cpu=1
       - --memory=512Mi
-      - --min-instances=0
+      - --min-instances=1
       - --max-instances=10
+      - --no-cpu-throttling
+      - --vpc-connector=$_VPC_CONNECTOR
+      - --vpc-egress=private-ranges-only
+      - --set-secrets=REDIS_PASSWORD=redis-password:latest,OUTBOUND_PROXY_PASSWORD=outbound-proxy-password:latest
       - --add-volume=name=cache,type=cloud-storage,bucket=$_CACHE_BUCKET
       - --add-volume-mount=volume=cache,mount-path=/app/cache
 
@@ -137,6 +160,10 @@ substitutions:
   _AR_REPOSITORY: cloud-run-source-deploy
   _CACHE_BUCKET: tm-cache-723408812472
   _DOCKERHUB_USERNAME: robbiebyrd
+  # Serverless VPC Access connector name. The connector must exist in the
+  # same region as the service. See docs/deployment.md for the gcloud command
+  # to create one.
+  _VPC_CONNECTOR: TODO-vpc-connector-name
 
 options:
   logging: CLOUD_LOGGING_ONLY
