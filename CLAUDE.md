@@ -47,3 +47,5 @@ A single-file Node.js proxy server (`timemachine.ts`) that fetches archived page
 - Do not add dependencies without discussion — the bundle must stay lean
 - Do not commit `.env`, `.env.prod`, or `key.json`
 - Never push or create PRs without explicit instruction
+
+@.claude/wiz-claude.md

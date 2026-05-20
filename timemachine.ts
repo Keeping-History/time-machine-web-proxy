@@ -1,6 +1,6 @@
 // This project is slightly adapted from the work of Rémi, an amazing
 // developer who also loves retro computing.
-// The source: https://github.com/remino/timeprox
+// The inspiration source: https://github.com/remino/timeprox
 // Rémi's website: https://remino.net
 
 import { createHash } from "node:crypto";
@@ -36,6 +36,7 @@ const proxyPrefix: string =
 const proxyBase: string =
 	process.env.PROXY_BASE_URL || `http://${hostname}:${port}`;
 const cacheClearToken: string = process.env.CACHE_CLEAR_TOKEN || "";
+const proxyBaseHostname: string = new URL(proxyBase).hostname;
 
 if (!existsSync(cacheDir)) {
 	mkdirSync(cacheDir, { recursive: true });
@@ -56,6 +57,8 @@ console.log({
 		archiveMaxConcurrent,
 		whitelistHosts,
 		proxyPrefix,
+		proxyBase,
+		cacheManagement: cacheClearToken ? "enabled" : "disabled",
 	},
 });
 
@@ -64,9 +67,11 @@ console.log({
 const parseWhitelist = (raw: string): string[] =>
 	raw.split(",").map((h) => h.trim()).filter(Boolean);
 
+const parsedWhitelist: string[] = parseWhitelist(whitelistHosts);
+
 const isHostWhitelisted = (targetUrl: string): boolean => {
 	if (whitelistHosts === "*") return true;
-	const allowed = parseWhitelist(whitelistHosts);
+	const allowed = parsedWhitelist;
 	if (allowed.length === 0) return true;
 	try {
 		const { hostname: targetHost } = new URL(targetUrl);
@@ -86,7 +91,7 @@ const isHostWhitelisted = (targetUrl: string): boolean => {
 
 const ALLOWED_PROTOCOLS = new Set(["http:", "https:"]);
 const PRIVATE_HOST_RE =
-	/^(localhost|127\.|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|169\.254\.|0\.0\.0\.0|\[?::1\]?)/;
+	/^(localhost|127\.|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|169\.254\.|0\.0\.0\.0|\[?::1\]?|\[?::ffff:|\[?fe[89ab][0-9a-f]|\[?f[cd][0-9a-f]{2})/i;
 
 const validateTargetUrl = (raw: string): string => {
 	let parsed: URL;
@@ -115,6 +120,18 @@ interface CacheEntry {
 	isCss: boolean;
 }
 
+const isCacheEntry = (v: unknown): v is CacheEntry => {
+	if (v === null || typeof v !== "object") return false;
+	const o = v as Record<string, unknown>;
+	return (
+		typeof o.contentType === "string" &&
+		typeof o.archiveUrl === "string" &&
+		typeof o.body === "string" &&
+		typeof o.isHtml === "boolean" &&
+		typeof o.isCss === "boolean"
+	);
+};
+
 const cacheKey = (url: string, time: string): string =>
 	createHash("sha256").update(`${time}:${url}`).digest("hex");
 
@@ -126,7 +143,8 @@ const cacheGet = async (
 	const file = join(cacheDir, `${cacheKey(url, time)}.json`);
 	try {
 		const data = await fs.readFile(file, "utf-8");
-		return JSON.parse(data) as CacheEntry;
+		const parsed = JSON.parse(data);
+		return isCacheEntry(parsed) ? parsed : null;
 	} catch (e) {
 		const code = (e as NodeJS.ErrnoException).code;
 		if (code !== "ENOENT") {
@@ -197,6 +215,31 @@ const arcUrl = (url: string, time: string): string => {
 	return proxyPrefix ? `${base}/${proxyPrefix}/${url}` : `${base}/${url}`;
 };
 
+// Unwrap nested proxy URLs: if a URL is itself a TimeMachine proxy link
+// (hostname matches proxyBase), extract the real target url and time.
+// Called before validateTargetUrl from both HTTP and WS handlers.
+const unwrapNestedProxyUrl = (
+	url: string,
+	fallbackTime: string,
+): { url: string; time: string } => {
+	try {
+		const nested = new URL(url);
+		if (nested.hostname === proxyBaseHostname && nested.searchParams.has("url")) {
+			const inner = nested.searchParams.get("url");
+			if (inner) {
+				const innerTime = nested.searchParams.get("time");
+				return {
+					url: inner,
+					time: innerTime && /^\d{14}$/.test(innerTime) ? innerTime : fallbackTime,
+				};
+			}
+		}
+	} catch {
+		/* not a valid absolute URL — use as-is */
+	}
+	return { url, time: fallbackTime };
+};
+
 // All archive fetches must target the configured prefix — this is the authoritative
 // check that prevents SSRF if the URL somehow bypasses upstream validation.
 const ARCHIVE_URL_PREFIX = `${prefix}/`;
@@ -249,10 +292,16 @@ const RETRYABLE_ERROR_CODES = new Set([
 
 const isRetryable = (err: unknown): boolean => {
 	if (!(err instanceof Error)) return false;
-	const cause = (err as Error & { cause?: unknown }).cause;
+	const cause = (err as { cause?: unknown }).cause;
 	const code = (cause as NodeJS.ErrnoException | undefined)?.code;
 	return code !== undefined && RETRYABLE_ERROR_CODES.has(code);
 };
+
+const hasStatus = (e: unknown): e is { status: number } =>
+	e !== null &&
+	typeof e === "object" &&
+	"status" in e &&
+	typeof (e as Record<string, unknown>).status === "number";
 
 interface QueueEntry {
 	execute: () => Promise<Response>;
@@ -271,11 +320,16 @@ class ArchiveRequestQueue {
 		private readonly maxConcurrent: number,
 		private readonly ratePerSec: number,
 		private readonly burst: number,
+		private readonly maxQueueSize: number = 200,
 	) {
 		this.rateTokens = burst;
 	}
 
 	enqueue(execute: () => Promise<Response>): Promise<Response> {
+		if (this.queue.length >= this.maxQueueSize) {
+			const err = Object.assign(new Error("Too many pending requests"), { status: 503 });
+			return Promise.reject(err);
+		}
 		return new Promise<Response>((resolve, reject) => {
 			this.queue.push({ execute, resolve, reject });
 			this.scheduleDrain();
@@ -311,7 +365,8 @@ class ArchiveRequestQueue {
 			}
 
 			this.rateTokens -= 1;
-			const entry = this.queue.shift()!;
+			const entry = this.queue.shift();
+			if (!entry) break;
 			this.active++;
 
 			entry
@@ -381,7 +436,11 @@ const fetchFromArchive = async (
 
 	try {
 		return await archiveQueue.enqueue(() =>
-			fetch(url, { headers: BROWSER_HEADERS[resourceType] }),
+			fetch(url, {
+				headers: BROWSER_HEADERS[resourceType],
+				// Automatically aborts after 'ms' milliseconds
+				signal: AbortSignal.timeout(300000)
+			}),
 		);
 	} catch (err) {
 		if (isRetryable(err) && retriesLeft > 0) {
@@ -404,7 +463,6 @@ const fetchFromArchive = async (
 const rewriteArchiveLinks = (
 	html: string,
 	proxyBase: string,
-	_time: string,
 ): string =>
 	html
 		.replace(
@@ -418,22 +476,6 @@ const rewriteArchiveLinks = (
 				`${before}${proxyBase}/?url=${encodeURIComponent(originalUrl)}&time=${archiveTime}${after}`,
 		);
 
-const _rewriteImageUrls = (
-	html: string,
-	proxyBase: string,
-	time: string,
-): string =>
-	html
-		.replace(
-			RE_IMG_SRC_ABSOLUTE,
-			(_, before, originalUrl, after) =>
-				`${before}${proxyBase}/?url=${encodeURIComponent(originalUrl)}&time=${time}${after}`,
-		)
-		.replace(
-			RE_IMG_SRC_RELATIVE,
-			(_, before, originalUrl, after) =>
-				`${before}${proxyBase}/?url=${encodeURIComponent(originalUrl)}&time=${time}${after}`,
-		);
 
 const rewriteCssUrls = (css: string, proxyBase: string, time: string): string =>
 	css
@@ -498,7 +540,12 @@ const rewriteCssUrlsFiltered = (
 		);
 
 const stripWaybackToolbar = (html: string, baseUrl: string): string => {
-	const safeBase = baseUrl.replace(/"/g, "%22");
+	const safeBase = baseUrl
+		.replace(/&/g, "%26")
+		.replace(/"/g, "%22")
+		.replace(/'/g, "%27")
+		.replace(/</g, "%3C")
+		.replace(/>/g, "%3E");
 	return html
 		.replace(RE_LEADING_WHITESPACE, "<")
 		.replace(RE_WAYBACK_JS_HEAD, "$1")
@@ -535,7 +582,8 @@ const fetchAndCacheImage = async (
 			isCss: false,
 		});
 		return true;
-	} catch {
+	} catch (e) {
+		console.warn("[TimeMachine] Failed to prefetch image", { url, time, error: e });
 		return false;
 	}
 };
@@ -551,13 +599,17 @@ const getCachedResourceUrls = async (
 	return new Set(results.filter((r) => r.cached).map((r) => r.url));
 };
 
-const prefetchResources = (html: string, time: string): void => {
-	for (const url of collectWaybackResourceUrls(html)) {
-		fetchAndCacheImage(url, time).catch(() => {
-			// errors already logged inside fetchAndCacheImage
+const prefetchResourceUrls = (urls: string[], time: string, skip: Set<string> = new Set()): void => {
+	for (const url of urls) {
+		if (skip.has(url)) continue;
+		fetchAndCacheImage(url, time).catch((e) => {
+			console.warn("[TimeMachine] Failed to prefetch resource", { url, time, error: e });
 		});
 	}
 };
+
+const prefetchResources = (html: string, time: string, skip: Set<string> = new Set()): void =>
+	prefetchResourceUrls(collectWaybackResourceUrls(html), time, skip);
 
 // --- Cache management ---
 
@@ -594,7 +646,8 @@ const handleCacheClear = async (
 	let files: string[];
 	try {
 		files = await fs.readdir(cacheDir);
-	} catch {
+	} catch (e) {
+		console.error("[TimeMachine] Failed to read cache directory", { cacheDir, error: e });
 		res.setHeader("Content-Type", "application/json");
 		res
 			.writeHead(500)
@@ -605,14 +658,16 @@ const handleCacheClear = async (
 	let deleted = 0;
 	let errors = 0;
 
-	await Promise.all(
-		files
-			.filter((f) => f.endsWith(".json"))
-			.map(async (file) => {
+	const jsonFiles = files.filter((f) => f.endsWith(".json"));
+	const BATCH_SIZE = 20;
+	for (let i = 0; i < jsonFiles.length; i += BATCH_SIZE) {
+		await Promise.all(
+			jsonFiles.slice(i, i + BATCH_SIZE).map(async (file) => {
 				const filePath = join(cacheDir, file);
 				try {
 					const data = await fs.readFile(filePath, "utf-8");
-					const entry = JSON.parse(data) as CacheEntry;
+					const entry = JSON.parse(data);
+					if (!isCacheEntry(entry)) return;
 
 					if (!matchesTypeFilter(entry, typeParam)) return;
 
@@ -637,7 +692,8 @@ const handleCacheClear = async (
 					});
 				}
 			}),
-	);
+		);
+	}
 
 	res.setHeader("Content-Type", "application/json");
 	res.writeHead(200).end(JSON.stringify({ deleted, errors }));
@@ -666,7 +722,7 @@ const proxyFetch = async (
 		let body: string | Buffer;
 		if (cached.isHtml) {
 			const cachedUrls = await getCachedResourceUrls(cached.body, time);
-			prefetchResources(cached.body, time);
+			prefetchResources(cached.body, time, cachedUrls);
 			body = rewriteArchiveLinks(
 				rewriteImageUrlsFiltered(
 					rewriteCssUrlsFiltered(cached.body, proxyBase, time, cachedUrls),
@@ -675,7 +731,6 @@ const proxyFetch = async (
 					cachedUrls,
 				),
 				proxyBase,
-				time,
 			);
 		} else if (cached.isCss) {
 			body = rewriteCssUrls(cached.body, proxyBase, time);
@@ -727,7 +782,8 @@ const proxyFetch = async (
 			isHtml: true,
 			isCss: false,
 		});
-		prefetchResources(filtered, time);
+		const uncachedUrls = collectWaybackResourceUrls(filtered);
+		prefetchResourceUrls(uncachedUrls, time);
 		const empty = new Set<string>();
 		body = rewriteArchiveLinks(
 			rewriteImageUrlsFiltered(
@@ -737,7 +793,6 @@ const proxyFetch = async (
 				empty,
 			),
 			proxyBase,
-			time,
 		);
 	} else if (isCss) {
 		const css = await fetchRes.text();
@@ -775,42 +830,6 @@ const proxyFetch = async (
 
 // --- Server ---
 
-const sendCached = async (
-	res: ServerResponse,
-	entry: CacheEntry,
-	targetUrl: string,
-	time: string,
-): Promise<void> => {
-	res.setHeader("Content-Type", entry.contentType);
-	res.setHeader("X-Archive-Url", entry.archiveUrl);
-	res.setHeader("X-Original-Url", targetUrl);
-	res.setHeader("X-Cache", "HIT");
-	if (entry.archiveTime) {
-		res.setHeader("X-Archive-Time", entry.archiveTime);
-	}
-
-	if (entry.isHtml) {
-			// Check what's already cached, then kick off background fetches for the rest
-		const cachedUrls = await getCachedResourceUrls(entry.body, time);
-		prefetchResources(entry.body, time);
-		const rewritten = rewriteArchiveLinks(
-			rewriteImageUrlsFiltered(
-				rewriteCssUrlsFiltered(entry.body, proxyBase, time, cachedUrls),
-				proxyBase,
-				time,
-				cachedUrls,
-			),
-			proxyBase,
-			time,
-		);
-		res.end(rewritten);
-	} else if (entry.isCss) {
-			res.end(rewriteCssUrls(entry.body, proxyBase, time));
-	} else {
-		res.end(Buffer.from(entry.body, "base64"));
-	}
-};
-
 const server = http.createServer(
 	async (req: IncomingMessage, res: ServerResponse) => {
 		const origin = req.headers.origin;
@@ -835,12 +854,14 @@ const server = http.createServer(
 		if (req.method === "DELETE") {
 			const { pathname } = new URL(req.url ?? "/", `http://localhost:${port}`);
 			if (pathname === "/cache") {
-				if (cacheClearToken) {
-					const auth = req.headers["authorization"] ?? "";
-					if (auth !== `Bearer ${cacheClearToken}`) {
-						res.writeHead(401).end("Unauthorized");
-						return;
-					}
+				if (!cacheClearToken) {
+					res.writeHead(403).end("Cache management not enabled");
+					return;
+				}
+				const auth = req.headers["authorization"] ?? "";
+				if (auth !== `Bearer ${cacheClearToken}`) {
+					res.writeHead(401).end("Unauthorized");
+					return;
 				}
 				await handleCacheClear(req, res);
 				return;
@@ -860,21 +881,9 @@ const server = http.createServer(
 			return;
 		}
 
-		// Unwrap nested proxy URLs — if the target is itself a TimeMachine URL,
-		// extract the real url param from it.
-		// Match on hostname rather than port: when behind a TLS terminator (e.g.
-		// Cloud Run) the public port (443) differs from the container port, so
-		// nested.port would be "" and a port comparison would never match.
+		// Unwrap nested proxy URLs before validation
 		if (targetUrl) {
-			try {
-				const nested = new URL(targetUrl);
-				const proxyHostname = new URL(proxyBase).hostname;
-				if (nested.hostname === proxyHostname && nested.searchParams.has("url")) {
-					targetUrl = nested.searchParams.get("url");
-				}
-			} catch {
-				/* not a valid URL, use as-is */
-			}
+			({ url: targetUrl, time } = unwrapNestedProxyUrl(targetUrl, time));
 		}
 
 		if (!targetUrl) {
@@ -897,105 +906,26 @@ const server = http.createServer(
 			return;
 		}
 
-		// Check cache
-		const cached = await cacheGet(targetUrl, time);
-		if (cached) {
-			console.log(`[CACHE HIT] ${targetUrl}`);
-			await sendCached(res, cached, targetUrl, time);
-			return;
-		}
-
 		try {
-			const archiveUrl = arcUrl(targetUrl, time);
-			console.log(`${targetUrl} => ${archiveUrl}`);
-			const fetchRes = await fetchFromArchive(archiveUrl);
-
-			if (fetchRes.headers.get("x-ts") === "404") {
-				res.writeHead(404).end("Not found in archive");
-				return;
+			const result = await proxyFetch(targetUrl, time);
+			res.setHeader("Content-Type", result.contentType);
+			res.setHeader("X-Archive-Url", result.archiveUrl);
+			res.setHeader("X-Original-Url", result.originalUrl);
+			res.setHeader("X-Cache", result.cache);
+			if (result.archiveTime) {
+				res.setHeader("X-Archive-Time", result.archiveTime);
 			}
-
-			if (!fetchRes.ok) {
-				res
-					.writeHead(fetchRes.status)
-					.end(`Archive returned ${fetchRes.status}`);
-				return;
-			}
-
-			const contentType = fetchRes.headers.get("content-type") || "";
-			res.setHeader("Content-Type", contentType);
-			res.setHeader("X-Archive-Url", fetchRes.url);
-			res.setHeader("X-Original-Url", targetUrl);
-			res.setHeader("X-Cache", "MISS");
-
-			const archiveTimeMatch = fetchRes.url.match(RE_ARCHIVE_TIME);
-			const archiveTime = archiveTimeMatch ? archiveTimeMatch[1] : "";
-			if (archiveTime) {
-				res.setHeader("X-Archive-Time", archiveTime);
-			}
-
-			const isHtml = contentType.startsWith("text/html");
-			const isCss = contentType.startsWith("text/css");
-
-			if (isHtml) {
-							const html = await fetchRes.text();
-				const filtered = stripWaybackToolbar(html, fetchRes.url);
-
-				// Cache stripped HTML before attempting image prefetch — if prefetch is
-				// partial the retry path in sendCached will fill in the gaps on next request
-				await cachePut(targetUrl, time, {
-					contentType,
-					archiveUrl: fetchRes.url,
-					archiveTime,
-					body: filtered,
-					isHtml: true,
-					isCss: false,
-				});
-
-				// Serve immediately; images warm up in the background
-				prefetchResources(filtered, time);
-				const empty = new Set<string>();
-				const rewritten = rewriteArchiveLinks(
-					rewriteImageUrlsFiltered(
-						rewriteCssUrlsFiltered(filtered, proxyBase, time, empty),
-						proxyBase,
-						time,
-						empty,
-					),
-					proxyBase,
-					time,
-				);
-				res.end(rewritten);
-			} else if (isCss) {
-							const css = await fetchRes.text();
-
-				await cachePut(targetUrl, time, {
-					contentType,
-					archiveUrl: fetchRes.url,
-					archiveTime,
-					body: css,
-					isHtml: false,
-					isCss: true,
-				});
-
-				res.end(rewriteCssUrls(css, proxyBase, time));
-			} else {
-				const buffer = Buffer.from(await fetchRes.arrayBuffer());
-
-				await cachePut(targetUrl, time, {
-					contentType,
-					archiveUrl: fetchRes.url,
-					archiveTime,
-					body: buffer.toString("base64"),
-					isHtml: false,
-					isCss: false,
-				});
-
-				res.end(buffer);
-			}
+			res.end(result.body);
 		} catch (e) {
-			console.error("[TimeMachine] Upstream request failed:", e);
-			res.writeHead(500).end("TimeMachine error: upstream request failed");
+			const status = hasStatus(e) ? e.status : 500;
+			if (status === 404) {
+				res.writeHead(404).end("Not found in archive");
+			} else if (status >= 400 && status < 500) {
+				res.writeHead(status).end(`Archive returned ${status}`);
+			} else {
+				console.error("[TimeMachine] Upstream request failed:", e);
+				res.writeHead(500).end("TimeMachine error: upstream request failed");
+			}
 		}
 	},
 );
@@ -1008,6 +938,12 @@ interface WsRequest {
 	url: string;
 	time?: string;
 }
+
+const isWsRequest = (v: unknown): v is WsRequest => {
+	if (v === null || typeof v !== "object") return false;
+	const o = v as Record<string, unknown>;
+	return o.type === "fetch" && typeof o.url === "string";
+};
 
 interface WsResponse {
 	type: "result" | "error";
@@ -1047,7 +983,9 @@ wss.on("connection", (ws: WebSocket) => {
 
 		let msg: WsRequest;
 		try {
-			msg = JSON.parse(data) as WsRequest;
+			const parsed = JSON.parse(data);
+			if (!isWsRequest(parsed)) throw new SyntaxError("Invalid message shape");
+			msg = parsed;
 		} catch {
 			const err: WsResponse = {
 				type: "error",
@@ -1084,10 +1022,14 @@ wss.on("connection", (ws: WebSocket) => {
 			return;
 		}
 
+		// Unwrap nested proxy URLs before validation
+		const { url: unwrappedUrl, time: unwrappedTime } = unwrapNestedProxyUrl(msg.url, time);
+		if (unwrappedTime !== time) time = unwrappedTime;
+
 		// Validate and process the URL
 		let targetUrl: string;
 		try {
-			targetUrl = validateTargetUrl(msg.url);
+			targetUrl = validateTargetUrl(unwrappedUrl);
 		} catch (e) {
 			const err: WsResponse = {
 				type: "error",
@@ -1131,9 +1073,11 @@ wss.on("connection", (ws: WebSocket) => {
 				ws.send(JSON.stringify(resp));
 			})
 			.catch((e: unknown) => {
+				const status = hasStatus(e) ? e.status : 500;
+				if (status >= 500) {
+					console.error("[TimeMachine WS] Upstream request failed:", e);
+				}
 				if (ws.readyState !== ws.OPEN) return;
-				const status =
-					(e as { status?: number }).status ?? 500;
 				const err: WsResponse = {
 					type: "error",
 					id: msg.id,
@@ -1157,6 +1101,7 @@ const shutdown = () => {
 	console.log("TimeMachine shutting down...");
 	shutdownController.abort();
 	archiveQueue.abort();
+	for (const client of wss.clients) client.terminate();
 	wss.close();
 	server.close(() => process.exit(0));
 };
