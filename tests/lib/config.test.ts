@@ -34,6 +34,7 @@ describe("loadConfig", () => {
 		delete process.env.OUTBOUND_PROXY_CHOOSER;
 		delete process.env.OUTBOUND_PROXY_USERNAME;
 		delete process.env.OUTBOUND_PROXY_PASSWORD;
+		delete process.env.OUTBOUND_PROXY_COOLDOWN_SECONDS;
 
 		const config = loadConfig();
 
@@ -57,6 +58,7 @@ describe("loadConfig", () => {
 		expect(config.outboundProxyChooser).toBe("sequential");
 		expect(config.outboundProxyUsername).toBe("");
 		expect(config.outboundProxyPassword).toBe("");
+		expect(config.outboundProxyCooldownMs).toBe(60_000);
 	});
 
 	it("reads values from env vars", () => {
@@ -191,8 +193,34 @@ describe("loadConfig", () => {
 
 	it("throws on unknown OUTBOUND_PROXY_CHOOSER value", () => {
 		process.env.OUTBOUND_PROXY_CHOOSER = "roundrobin";
-		expect(() => loadConfig()).toThrow(
-			/OUTBOUND_PROXY_CHOOSER must be "Sequential" or "Random"/,
-		);
+		expect(() => loadConfig()).toThrow(/OUTBOUND_PROXY_CHOOSER must be "sequential" or "random"/);
+	});
+
+	it("defaults outboundProxyCooldownMs to 60_000 when unset", () => {
+		delete process.env.OUTBOUND_PROXY_COOLDOWN_SECONDS;
+		expect(loadConfig().outboundProxyCooldownMs).toBe(60_000);
+	});
+
+	it("parses OUTBOUND_PROXY_COOLDOWN_SECONDS as seconds and converts to ms", () => {
+		process.env.OUTBOUND_PROXY_COOLDOWN_SECONDS = "30";
+		expect(loadConfig().outboundProxyCooldownMs).toBe(30_000);
+
+		process.env.OUTBOUND_PROXY_COOLDOWN_SECONDS = "120";
+		expect(loadConfig().outboundProxyCooldownMs).toBe(120_000);
+	});
+
+	it("accepts 0 as a valid OUTBOUND_PROXY_COOLDOWN_SECONDS (disables cooldown)", () => {
+		process.env.OUTBOUND_PROXY_COOLDOWN_SECONDS = "0";
+		expect(loadConfig().outboundProxyCooldownMs).toBe(0);
+	});
+
+	it("throws on negative OUTBOUND_PROXY_COOLDOWN_SECONDS", () => {
+		process.env.OUTBOUND_PROXY_COOLDOWN_SECONDS = "-5";
+		expect(() => loadConfig()).toThrow(/non-negative/);
+	});
+
+	it("throws on non-numeric OUTBOUND_PROXY_COOLDOWN_SECONDS", () => {
+		process.env.OUTBOUND_PROXY_COOLDOWN_SECONDS = "abc";
+		expect(() => loadConfig()).toThrow(/non-negative/);
 	});
 });

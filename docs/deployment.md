@@ -196,8 +196,9 @@ There are two authentication modes:
 
 `OUTBOUND_PROXY_URLS` is a CSV. Provide one URL for a single proxy, or two
 or more URLs to rotate per outbound request. `OUTBOUND_PROXY_CHOOSER`
-selects the rotation strategy (`Sequential` round-robin, the default, or
-`Random`) and is ignored when only one URL is configured.
+selects the rotation strategy (`sequential` round-robin, the default, or
+`random`); values are case-insensitive. Ignored when only one URL is
+configured.
 
 Example IP-auth setup, single proxy:
 
@@ -211,7 +212,7 @@ Example Basic-auth setup with rotation (the password ships via Secret Manager):
 
 ```
 OUTBOUND_PROXY_URLS=http://us-wa.proxymesh.com:31280,http://uk.proxymesh.com:31280,http://au.proxymesh.com:31280
-OUTBOUND_PROXY_CHOOSER=Random
+OUTBOUND_PROXY_CHOOSER=random
 OUTBOUND_PROXY_USERNAME=tm-prod
 OUTBOUND_PROXY_PASSWORD=<from-secret-manager>
 ```
@@ -232,6 +233,20 @@ When only one of `OUTBOUND_PROXY_USERNAME` / `OUTBOUND_PROXY_PASSWORD` is set,
 or `OUTBOUND_PROXY_CHOOSER` is anything other than `Sequential`/`Random`, or
 any URL in the list is unparseable or non-http(s), the process fails fast at
 startup.
+
+**Startup connectivity probe.** Each configured proxy is exercised at startup
+with an HTTP request to `https://web.archive.org/` (30s timeout). If every
+proxy fails the probe, the process exits. If some pass and some fail, the
+failed ones start in cooldown and are re-probed automatically.
+
+**Runtime circuit breaker.** Transport errors (connect/DNS/timeout/TLS),
+HTTP 407, and 502/503/504 responses through a proxy mark it failed and take
+it out of rotation for `OUTBOUND_PROXY_COOLDOWN_SECONDS` (default 60s). At
+cooldown expiry, the proxy is re-probed; success restores it, failure
+extends the cooldown linearly (X, 2X, 3X, ...). When every proxy is
+currently in cooldown, dispatch throws `no healthy proxy`. Note that
+5xx-from-upstream forwarded by the proxy may produce false positives —
+tune the cooldown to limit blast radius from a single Wayback hiccup.
 
 ---
 

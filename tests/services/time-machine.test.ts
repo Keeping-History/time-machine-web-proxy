@@ -31,6 +31,7 @@ const config: Config = {
 	outboundProxyChooser: "sequential",
 	outboundProxyUsername: "",
 	outboundProxyPassword: "",
+	outboundProxyCooldownMs: 60_000,
 };
 
 const makeService = () => {
@@ -66,7 +67,7 @@ describe("TimeMachineService", () => {
 
 	it("start() creates a listening server and stop() closes it", async () => {
 		const svc = makeService();
-		svc.start();
+		await svc.start();
 		await svc.stop();
 	});
 });

@@ -90,6 +90,7 @@ const baseConfig: Config = {
 	outboundProxyChooser: "sequential",
 	outboundProxyUsername: "",
 	outboundProxyPassword: "",
+	outboundProxyCooldownMs: 60_000,
 };
 
 describe("Dependencies (TASK-010)", () => {
