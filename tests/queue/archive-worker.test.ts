@@ -95,9 +95,15 @@ function makeLogger(): pino.Logger {
 	} as unknown as pino.Logger;
 }
 
-function makeCache(dir = "/cache"): { cacheDirForJob: jest.Mock } {
+function makeCache(dir = "/cache"): { cacheDirForJob: jest.Mock; lookup: jest.Mock } {
 	return {
 		cacheDirForJob: jest.fn((time: string, host: string) => `${dir}/v2/${time}/${host}`),
+		// Default: post-download lookup is a HIT so the success-path tests don't
+		// have to thread fixtures through every case. Tests that exercise the
+		// "downloader wrote nothing usable" failure path override per call.
+		lookup: jest
+			.fn()
+			.mockResolvedValue({ absPath: `${dir}/v2/x/y/index.html`, contentType: "text/html" }),
 	};
 }
 
@@ -125,14 +131,9 @@ function findWorker(name: string): CapturedWorker {
 	return w;
 }
 
-// `node:fs` is mocked so the exact processor's "directory has files" guard
-// returns true by default. Individual tests override readdir to simulate the
-// "downloader completed but wrote nothing" failure path.
-const readdirMock = jest.fn().mockResolvedValue([{ name: "index.html", isFile: () => true }]);
-jest.mock("node:fs", () => ({
-	__esModule: true,
-	promises: { readdir: (...args: unknown[]) => readdirMock(...args) },
-}));
+// The worker no longer scans the cache directory directly; success/failure is
+// determined by `cache.lookup(url, time)` to match what the proxy reader will
+// actually find. See `makeCache` for the default HIT and per-test overrides.
 
 // `globalThis.fetch` is replaced with a mock that resolves the Wayback
 // Availability API call. The default response is a successful "snap to the
@@ -162,7 +163,6 @@ beforeEach(() => {
 	downloadFilesMock.mockReset().mockResolvedValue(undefined);
 	normalizeBaseUrlInputMock.mockClear();
 	workerInstances.length = 0;
-	readdirMock.mockReset().mockResolvedValue([{ name: "index.html", isFile: () => true }]);
 	// Default: Availability API returns the requested time as the closest capture.
 	fetchMock.mockReset().mockImplementation(async (u: string) => {
 		const url = new URL(u);
@@ -251,7 +251,7 @@ describe("exact worker processor", () => {
 		expect(args.download_external_assets).toBe(false);
 	});
 
-	it("queries the Wayback Availability API with the canonical URL and requested timestamp before downloading", async () => {
+	it("queries the Wayback Availability API with the canonical URL, requested timestamp, and closest=before so the snap never lands on a future capture", async () => {
 		startArchiveWorkers(baseOpts());
 		const worker = findWorker(QUEUE_EXACT);
 		await worker.processor({
@@ -262,9 +262,15 @@ describe("exact worker processor", () => {
 		expect(fetchMock).toHaveBeenCalledTimes(1);
 		const calledUrl = new URL(fetchMock.mock.calls[0][0]);
 		expect(calledUrl.origin + calledUrl.pathname).toBe("https://archive.org/wayback/available");
-		// `normalizeBaseUrlInputMock` strips `www.` and adds a trailing slash.
+		// `normalizeBaseUrlInputMock` strips `www.` and adds a trailing slash —
+		// that's the form the WAYBACK API call uses (Wayback collapses www/apex
+		// for indexing). The cache directory key, by contrast, preserves the
+		// user's hostname distinction (see the directory test below).
 		expect(calledUrl.searchParams.get("url")).toBe("https://example.com/");
 		expect(calledUrl.searchParams.get("timestamp")).toBe("20200101000000");
+		// "at or before the requested time" is the user-facing contract: we
+		// must never serve a capture from after the requested timestamp.
+		expect(calledUrl.searchParams.get("closest")).toBe("before");
 	});
 
 	it("throws (job fails) when Wayback Availability reports no snapshot for the URL", async () => {
@@ -308,11 +314,16 @@ describe("exact worker processor", () => {
 		expect(downloadFilesMock).not.toHaveBeenCalled();
 	});
 
-	it("throws (job fails) when the downloader returns but the cache directory is still empty", async () => {
-		// Downloader resolves successfully but writes nothing — the contract
-		// bug that masked Wayback's zero-snapshot result as a misleading 502.
-		readdirMock.mockResolvedValueOnce([]);
-		startArchiveWorkers(baseOpts());
+	it("throws (job fails) when the downloader returns but cache.lookup for the requested URL is still a MISS", async () => {
+		// Downloader resolves successfully but writes nothing usable for the
+		// SPECIFIC requested URL — a host-level "directory has any file" check
+		// was previously masking this (sibling URLs at the same host left files
+		// behind), causing the job to be marked completed and the proxy to 502
+		// on the re-lookup. The worker's success criterion must match what the
+		// proxy reader actually requires for THIS url+time pair.
+		const cache = makeCache();
+		cache.lookup.mockResolvedValueOnce(null);
+		startArchiveWorkers(baseOpts({ cache }));
 		const worker = findWorker(QUEUE_EXACT);
 		await expect(
 			worker.processor({
@@ -320,11 +331,12 @@ describe("exact worker processor", () => {
 				data: { url: "https://example.com/", time: "20200101000000" },
 				token: "tk-empty",
 			}),
-		).rejects.toThrow(/produced no files/);
+		).rejects.toThrow(/no usable file/);
 		expect(downloadFilesMock).toHaveBeenCalledTimes(1);
+		expect(cache.lookup).toHaveBeenCalledWith("https://example.com/", "20200101000000");
 	});
 
-	it("derives directory from cache.cacheDirForJob(time, base.bareHost)", async () => {
+	it("derives directory from cache.cacheDirForJob(time, u.hostname) — preserving www so www.example.com and example.com are distinct cache entries", async () => {
 		const cache = makeCache("/c");
 		startArchiveWorkers(baseOpts({ cache }));
 		const worker = findWorker(QUEUE_EXACT);
@@ -333,10 +345,24 @@ describe("exact worker processor", () => {
 			data: { url: "https://www.example.com/about", time: "20200101000000" },
 			token: "tk-2",
 		});
-		// bareHost strips the leading "www."
-		expect(cache.cacheDirForJob).toHaveBeenCalledWith("20200101000000", "example.com");
+		// Hostname is preserved verbatim — Wayback may collapse www/apex but the
+		// cache key must not, because the two URLs can legitimately serve
+		// different content and conflating them would poison the cache.
+		expect(cache.cacheDirForJob).toHaveBeenCalledWith("20200101000000", "www.example.com");
 		const args = WaybackMachineDownloaderMock.mock.calls[0][0];
-		expect(args.directory).toBe("/c/v2/20200101000000/example.com");
+		expect(args.directory).toBe("/c/v2/20200101000000/www.example.com");
+	});
+
+	it("apex-host job uses the apex hostname for cacheDirForJob — separate entry from the www. variant", async () => {
+		const cache = makeCache("/c");
+		startArchiveWorkers(baseOpts({ cache }));
+		const worker = findWorker(QUEUE_EXACT);
+		await worker.processor({
+			id: "j2b",
+			data: { url: "https://example.com/about", time: "20200101000000" },
+			token: "tk-2b",
+		});
+		expect(cache.cacheDirForJob).toHaveBeenCalledWith("20200101000000", "example.com");
 	});
 
 	it("invokes download_files exactly once", async () => {
