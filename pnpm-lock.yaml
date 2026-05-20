@@ -20,6 +20,9 @@ importers:
       pino:
         specifier: ^10.3.1
         version: 10.3.1
+      undici:
+        specifier: ^8.3.0
+        version: 8.3.0
       wayback-machine-downloader:
         specifier: https://registry.npmjs.org/wayback-machine-downloader/-/wayback-machine-downloader-0.5.0.tgz
         version: 0.5.0
@@ -1851,6 +1854,10 @@ packages:
   undici@7.25.0:
     resolution: {integrity: sha512-xXnp4kTyor2Zq+J1FfPI6Eq3ew5h6Vl0F/8d9XU5zZQf1tX9s2Su1/3PiMmUANFULpmksxkClamIZcaUqryHsQ==}
     engines: {node: '>=20.18.1'}
+
+  undici@8.3.0:
+    resolution: {integrity: sha512-TkUDgb6tl7KOGZ+7e8E3d2FYgUQgF6z5YypqjWmixVQSQERFcVrVg0ySADm2LVLRh5ljAaHTCR5Fmz3Q34rB7Q==}
+    engines: {node: '>=22.19.0'}
 
   unrs-resolver@1.12.2:
     resolution: {integrity: sha512-dmlRxBJJayXjqTwC+JtF1HhJmgf3ftQ3YejFcZrf4+KKtJv0qDsK1pjqaaVjG7wJ5NJ6UVP1OqRMQ71Z4C3rxQ==}
@@ -3890,6 +3897,8 @@ snapshots:
   undici-types@7.16.0: {}
 
   undici@7.25.0: {}
+
+  undici@8.3.0: {}
 
   unrs-resolver@1.12.2:
     dependencies:

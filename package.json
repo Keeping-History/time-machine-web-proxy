@@ -17,6 +17,7 @@
 		"ioredis": "^5.10.1",
 		"mime-types": "^3.0.2",
 		"pino": "^10.3.1",
+		"undici": "^8.3.0",
 		"wayback-machine-downloader": "https://registry.npmjs.org/wayback-machine-downloader/-/wayback-machine-downloader-0.5.0.tgz",
 		"ws": "^8.18.2"
 	},
