@@ -5,6 +5,7 @@ import { errorHasStatus } from "../lib/errors";
 import type { ShutdownController } from "../lib/shutdown";
 import { sanitizeTimeParam, unwrapNestedProxyUrl } from "../lib/url-rewriter";
 import type { Config } from "../models/config";
+import { isWsRequest, type WsRequest, type WsResponse } from "../models/websocket";
 import type { CacheService } from "./cache";
 import type { ProxyService } from "./proxy";
 
@@ -13,35 +14,10 @@ export interface UrlValidatorModule {
 	isHostWhitelisted: (url: string, whitelistHosts: string) => boolean;
 }
 
-interface WsRequest {
-	type: "fetch";
-	id?: string;
-	url: string;
-	time?: string;
-}
-
-interface WsResponse {
-	type: "result" | "error";
-	id?: string;
-	html?: string;
-	contentType?: string;
-	archiveUrl?: string;
-	originalUrl?: string;
-	archiveTime?: string;
-	cache?: "HIT" | "MISS";
-	status?: number;
-	message?: string;
-}
-
-const isWsRequest = (v: unknown): v is WsRequest => {
-	if (v === null || typeof v !== "object") return false;
-	const o = v as Record<string, unknown>;
-	return o.type === "fetch" && typeof o.url === "string";
-};
-
 export class TimeMachineService {
 	private server!: http.Server;
 	private wss!: WebSocketServer;
+	private signalHandler?: () => void;
 
 	constructor(
 		private readonly config: Config,
@@ -59,21 +35,29 @@ export class TimeMachineService {
 		this.wss = new WebSocketServer({ server: this.server, path: "/ws" });
 		this.wss.on("connection", (ws: WebSocket) => this.wsHandler(ws));
 
-		process.on("SIGTERM", () => void this.stop());
-		process.on("SIGINT", () => void this.stop());
+		if (!this.signalHandler) {
+			this.signalHandler = () => void this.stop();
+			process.on("SIGTERM", this.signalHandler);
+			process.on("SIGINT", this.signalHandler);
+		}
 
 		this.server.listen(this.config.port, this.config.hostname, () => {
 			this.logger.info(
 				`TimeMachine server listening on http://${this.config.hostname}:${this.config.port}`,
 			);
 			this.logger.info(
-				`TimeMachine WebSocket listening on ws://${this.config.hostname}:${this.config.port}/ws`,
+				`TimeMachine WebSocket listening at ${this.config.hostname}:${this.config.port}/ws`,
 			);
 		});
 	}
 
 	async stop(): Promise<void> {
 		this.logger.info("TimeMachine shutting down...");
+		if (this.signalHandler) {
+			process.off("SIGTERM", this.signalHandler);
+			process.off("SIGINT", this.signalHandler);
+			this.signalHandler = undefined;
+		}
 		this.shutdown.abort();
 		for (const client of this.wss.clients) client.terminate();
 		await new Promise<void>((resolve) => {
@@ -89,7 +73,7 @@ export class TimeMachineService {
 			res.setHeader("Access-Control-Allow-Origin", allowed.includes("*") ? "*" : origin);
 		}
 		res.setHeader("Access-Control-Allow-Methods", "GET, DELETE, OPTIONS");
-		res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+		res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
 		res.setHeader(
 			"Access-Control-Expose-Headers",
 			"X-Archive-Url, X-Original-Url, X-Archive-Time, X-Cache",

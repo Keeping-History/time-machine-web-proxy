@@ -73,6 +73,24 @@ describe("unwrapNestedProxyUrl", () => {
 		});
 	});
 
+	it("falls back to fallbackTime when proxy URL time is non-numeric", () => {
+		const inner = "http://example.com/page";
+		const proxyUrl = `http://proxy.local/?url=${encodeURIComponent(inner)}&time=not-a-timestamp`;
+		expect(unwrapNestedProxyUrl(proxyUrl, TIME, "proxy.local")).toEqual({
+			url: inner,
+			time: TIME,
+		});
+	});
+
+	it("falls back to fallbackTime when proxy URL time has wrong digit length", () => {
+		const inner = "http://example.com/page";
+		const proxyUrl = `http://proxy.local/?url=${encodeURIComponent(inner)}&time=20200101`;
+		expect(unwrapNestedProxyUrl(proxyUrl, TIME, "proxy.local")).toEqual({
+			url: inner,
+			time: TIME,
+		});
+	});
+
 	it("returns original url for non-parseable string", () => {
 		expect(unwrapNestedProxyUrl("not-a-url", TIME, "proxy.local")).toEqual({
 			url: "not-a-url",
@@ -119,6 +137,11 @@ describe("rewriteCssUrls", () => {
 		expect(result).toContain(
 			`url('${PROXY}/?url=${encodeURIComponent("http://example.com/img.png")}&time=${TIME}')`,
 		);
+	});
+
+	it("leaves non-archive url() references unchanged", () => {
+		const css = `background: url('http://example.com/plain.png')`;
+		expect(rewriteCssUrls(css, PROXY, TIME)).toBe(css);
 	});
 });
 
