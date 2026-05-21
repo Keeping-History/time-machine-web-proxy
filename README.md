@@ -58,6 +58,8 @@ The proxy listens on port `8765` by default.
 | `WORKER_RATE_LIMIT_PER_SEC` | `1` | Outbound request ceiling. `1`/sec → 60 req/min, which stays under Wayback's sustained-IP-block threshold. |
 | `DOWNLOADER_THREADS_COUNT` | `3` | `wayback-machine-downloader` internal threads per job |
 | `CRAWL_MAX_CDX_PAGES` | `50` | CDX preflight cap. At default (50 pages × ~3000 URLs/page) ≈ 150k URLs per crawl. |
+| `SNAPSHOT_WINDOW_DAYS` | `30,365,3650,0` | Widening search windows (in days) for finding the closest Wayback snapshot at-or-before the requested time. Tried in order; `0` = unbounded. CSV of non-negative integers. |
+| `ALLOW_LATER_FALLBACK` | `false` | When `true` and no snapshot exists at-or-before the requested time, fall back to the earliest snapshot **after** the requested time. Default is the strict "no later than" semantic — `404` when no earlier snapshot exists. |
 | `OUTBOUND_PROXY_URL` | _(empty)_ | HTTP/HTTPS proxy for outbound Wayback fetches (e.g. `http://us-wa-load-balancer.proxymesh.com:31280`). Empty = direct. |
 | `OUTBOUND_PROXY_USERNAME` | _(empty)_ | Basic-auth username for the proxy. Empty = IP whitelist auth. |
 | `OUTBOUND_PROXY_PASSWORD` | _(empty)_ | Basic-auth password. Required when `OUTBOUND_PROXY_USERNAME` is set. |
@@ -73,7 +75,14 @@ Fetches a URL from the archive at the given timestamp and returns the response w
 | Parameter | Required | Description |
 |---|---|---|
 | `url` | Yes | Full URL to fetch (e.g. `https://example.com`) |
-| `time` | No | 14-digit Wayback timestamp. Defaults to `ARCHIVE_TIME`. |
+| `time` | No | 14-digit Wayback timestamp (`YYYYMMDDHHmmss`). Defaults to `ARCHIVE_TIME`. Interpreted as **"on or before this date"** — the proxy serves the closest snapshot whose Wayback timestamp is ≤ `time`. `X-Archive-Time` in the response reflects the actual snapshot timestamp, which may differ from the requested `time`. |
+
+**Snapshot resolution.** The worker pre-flights the CDX API with widening windows (`SNAPSHOT_WINDOW_DAYS`) and selects the latest snapshot ≤ requested time across all URL variants (https/http × bare/www). If no snapshot exists in any window:
+
+- With `ALLOW_LATER_FALLBACK=false` (default), the request returns `404 Not found in archive`.
+- With `ALLOW_LATER_FALLBACK=true`, the worker searches forward and serves the earliest snapshot **after** the requested time.
+
+**Negative caching.** A `404` result is cached as a zero-byte sentinel at `<CACHE_DIR>/v2/<time>/<host>/.notfound/<sha256-prefix>`. Subsequent requests for the same `(url, time)` short-circuit at the cache lookup — no CDX or downloader work. Sentinels are cleared along with cached files by `DELETE /cache` (including the `?domain=` filter).
 
 **Response headers:**
 
