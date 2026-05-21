@@ -74,9 +74,14 @@ export class Dependencies {
 		attachQueueLogger(QUEUE_CRAWL, crawlEvents, logger);
 
 		const cache = new CacheService(config, logger);
+		// DEFERRED (2026-05-21) — temporary identity resolver. Story 005-a8ed
+		// replaces this with the real resolveSnapshotTimestamp closure bound
+		// to config.snapshotWindowDays and config.allowLaterFallback.
+		const stubResolver = async (_variants: string[], time: string) => time;
 		const workers = startArchiveWorkers({
 			connection: redis,
 			cache,
+			resolver: stubResolver,
 			logger,
 			bullmqPrefix: config.bullmqPrefix,
 			workerConcurrency: config.workerConcurrency,

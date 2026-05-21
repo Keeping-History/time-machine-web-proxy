@@ -5,9 +5,15 @@ import { normalizeBaseUrlInput } from "../lib/normalize-base-url";
 import type { CacheService } from "../services/cache";
 import { assertDomainCrawlJob, assertExactUrlJob, QUEUE_CRAWL, QUEUE_EXACT } from "./jobs";
 
+export type SnapshotResolverFn = (
+	variants: string[],
+	requestedTime: string,
+) => Promise<string | null>;
+
 export interface StartArchiveWorkersOpts {
 	connection: ConnectionOptions;
-	cache: Pick<CacheService, "cacheDirForJob">;
+	cache: Pick<CacheService, "cacheDirForJob" | "writeNotFoundSentinel">;
+	resolver: SnapshotResolverFn;
 	logger: pino.Logger;
 	bullmqPrefix: string;
 	workerConcurrency: number;
@@ -34,6 +40,7 @@ export function startArchiveWorkers(opts: StartArchiveWorkersOpts): ArchiveWorke
 	const {
 		connection,
 		cache,
+		resolver,
 		logger,
 		bullmqPrefix,
 		workerConcurrency,
@@ -67,12 +74,19 @@ export function startArchiveWorkers(opts: StartArchiveWorkersOpts): ArchiveWorke
 			const base = normalizeBaseUrlInput(url);
 			const directory = cache.cacheDirForJob(time, base.bareHost);
 			logger.info({ url, time, directory }, "[worker:exact] start");
+			const resolved = await resolver(base.variants, time);
+			if (resolved === null) {
+				logger.warn({ url, time }, "[worker:exact] no snapshot at-or-before requested time");
+				await cache.writeNotFoundSentinel(time, url);
+				return;
+			}
+			logger.info({ url, time, resolved }, "[worker:exact] resolved snapshot");
 			await runWithRateLimitGuard(exact, () =>
 				new WaybackMachineDownloader({
 					base_url: base.canonicalUrl,
 					normalized_base: base,
-					from_timestamp: time,
-					to_timestamp: time,
+					from_timestamp: resolved,
+					to_timestamp: resolved,
 					threads_count: downloaderThreadsCount,
 					rewrite_mode: "as-is",
 					canonical_action: "keep",
@@ -98,7 +112,16 @@ export function startArchiveWorkers(opts: StartArchiveWorkersOpts): ArchiveWorke
 			const { host, time } = job.data;
 			const base = normalizeBaseUrlInput(`https://${host}`);
 			const directory = cache.cacheDirForJob(time, host);
+			const hostRootUrl = `https://${host}/`;
 			logger.info({ host, time, directory }, "[worker:crawl] start");
+
+			const resolved = await resolver(base.variants, time);
+			if (resolved === null) {
+				logger.warn({ host, time }, "[worker:crawl] no snapshot at-or-before requested time");
+				await cache.writeNotFoundSentinel(time, hostRootUrl);
+				return;
+			}
+			logger.info({ host, time, resolved }, "[worker:crawl] resolved snapshot");
 
 			const extender = setInterval(() => {
 				// BullMQ guarantees `job.token` is defined inside an active processor;
@@ -122,8 +145,8 @@ export function startArchiveWorkers(opts: StartArchiveWorkersOpts): ArchiveWorke
 					new WaybackMachineDownloader({
 						base_url: base.canonicalUrl,
 						normalized_base: base,
-						from_timestamp: time,
-						to_timestamp: time,
+						from_timestamp: resolved,
+						to_timestamp: resolved,
 						threads_count: downloaderThreadsCount,
 						rewrite_mode: "as-is",
 						canonical_action: "keep",

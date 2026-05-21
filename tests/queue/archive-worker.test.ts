@@ -95,10 +95,21 @@ function makeLogger(): pino.Logger {
 	} as unknown as pino.Logger;
 }
 
-function makeCache(dir = "/cache"): { cacheDirForJob: jest.Mock } {
+function makeCache(dir = "/cache"): {
+	cacheDirForJob: jest.Mock;
+	writeNotFoundSentinel: jest.Mock;
+} {
 	return {
 		cacheDirForJob: jest.fn((time: string, host: string) => `${dir}/v2/${time}/${host}`),
+		writeNotFoundSentinel: jest.fn().mockResolvedValue(undefined),
 	};
+}
+
+// Default resolver echoes the requested time so legacy tests that expect
+// from_timestamp === to_timestamp === requested still pass without changes.
+// Tests that exercise resolution semantics override this explicitly.
+function defaultResolver(): jest.Mock {
+	return jest.fn((_variants: string[], time: string) => Promise.resolve(time));
 }
 
 function baseOpts(
@@ -110,6 +121,7 @@ function baseOpts(
 			typeof startArchiveWorkers
 		>[0]["connection"],
 		cache: cache as unknown as Parameters<typeof startArchiveWorkers>[0]["cache"],
+		resolver: defaultResolver() as unknown as Parameters<typeof startArchiveWorkers>[0]["resolver"],
 		logger: makeLogger(),
 		bullmqPrefix: "tm",
 		workerConcurrency: 2,
@@ -279,6 +291,98 @@ describe("exact worker processor", () => {
 		expect(rateLimitErrorMock).not.toHaveBeenCalled();
 	});
 
+	it("calls resolver with base.variants and requestedTime BEFORE constructing downloader", async () => {
+		const cache = makeCache();
+		const resolver = jest.fn().mockResolvedValue("20200115000000");
+		startArchiveWorkers(baseOpts({ cache, resolver }));
+		const worker = findWorker(QUEUE_EXACT);
+		await worker.processor({
+			id: "j-r",
+			data: { url: "https://example.com/", time: "20200101000000" },
+			token: "tk-r",
+		});
+		expect(resolver).toHaveBeenCalledTimes(1);
+		const [variants, requestedTime] = resolver.mock.calls[0];
+		expect(Array.isArray(variants)).toBe(true);
+		expect(requestedTime).toBe("20200101000000");
+		// Downloader receives the RESOLVED time, not the requested time.
+		expect(WaybackMachineDownloaderMock).toHaveBeenCalledTimes(1);
+		const args = WaybackMachineDownloaderMock.mock.calls[0][0];
+		expect(args.from_timestamp).toBe("20200115000000");
+		expect(args.to_timestamp).toBe("20200115000000");
+	});
+
+	it("writes sentinel and skips downloader when resolver returns null", async () => {
+		const cache = makeCache();
+		const resolver = jest.fn().mockResolvedValue(null);
+		startArchiveWorkers(baseOpts({ cache, resolver }));
+		const worker = findWorker(QUEUE_EXACT);
+		await worker.processor({
+			id: "j-null",
+			data: { url: "https://example.com/", time: "20200101000000" },
+			token: "tk-null",
+		});
+		expect(cache.writeNotFoundSentinel).toHaveBeenCalledWith(
+			"20200101000000",
+			"https://example.com/",
+		);
+		expect(WaybackMachineDownloaderMock).not.toHaveBeenCalled();
+		expect(downloadFilesMock).not.toHaveBeenCalled();
+	});
+
+	it("returns success (no throw, no retry) when resolver returns null", async () => {
+		const resolver = jest.fn().mockResolvedValue(null);
+		startArchiveWorkers(baseOpts({ resolver }));
+		const worker = findWorker(QUEUE_EXACT);
+		// Should resolve successfully so BullMQ does not retry.
+		await expect(
+			worker.processor({
+				id: "j-null2",
+				data: { url: "https://example.com/", time: "20200101000000" },
+				token: "tk-null2",
+			}),
+		).resolves.toBeUndefined();
+	});
+
+	it("logs resolved snapshot at info level on successful resolution", async () => {
+		const logger = makeLogger();
+		const resolver = jest.fn().mockResolvedValue("20200115000000");
+		startArchiveWorkers(baseOpts({ logger, resolver }));
+		const worker = findWorker(QUEUE_EXACT);
+		await worker.processor({
+			id: "j-log",
+			data: { url: "https://example.com/", time: "20200101000000" },
+			token: "tk-log",
+		});
+		expect(logger.info).toHaveBeenCalledWith(
+			expect.objectContaining({
+				url: "https://example.com/",
+				time: "20200101000000",
+				resolved: "20200115000000",
+			}),
+			expect.stringContaining("resolved"),
+		);
+	});
+
+	it("logs warning on null resolution (no snapshot)", async () => {
+		const logger = makeLogger();
+		const resolver = jest.fn().mockResolvedValue(null);
+		startArchiveWorkers(baseOpts({ logger, resolver }));
+		const worker = findWorker(QUEUE_EXACT);
+		await worker.processor({
+			id: "j-warn",
+			data: { url: "https://example.com/", time: "20200101000000" },
+			token: "tk-warn",
+		});
+		expect(logger.warn).toHaveBeenCalledWith(
+			expect.objectContaining({
+				url: "https://example.com/",
+				time: "20200101000000",
+			}),
+			expect.stringContaining("no snapshot"),
+		);
+	});
+
 	it("'failed' event listener logs jobId, attemptsMade, data, err.message", async () => {
 		const logger = makeLogger();
 		startArchiveWorkers(baseOpts({ logger }));
@@ -364,6 +468,9 @@ describe("crawl worker processor", () => {
 			token: "tk-lock",
 			extendLock: extendLockMock,
 		});
+		// Flush the resolver microtask so setInterval is scheduled before we advance timers.
+		await Promise.resolve();
+		await Promise.resolve();
 		// Advance to just before the first interval fire to confirm 110s cadence.
 		jest.advanceTimersByTime(109_999);
 		expect(extendLockMock).not.toHaveBeenCalled();
@@ -397,6 +504,41 @@ describe("crawl worker processor", () => {
 		expect(extendLockMock).not.toHaveBeenCalled();
 	});
 
+	it("calls resolver and uses resolved time for crawl downloader from/to", async () => {
+		const resolver = jest.fn().mockResolvedValue("20200115000000");
+		startArchiveWorkers(baseOpts({ resolver }));
+		const worker = findWorker(QUEUE_CRAWL);
+		await worker.processor({
+			id: "c-r",
+			data: { host: "example.com", time: "20200101000000" },
+			token: "tk-cr",
+			extendLock: jest.fn().mockResolvedValue(0),
+		});
+		expect(resolver).toHaveBeenCalledTimes(1);
+		expect(resolver.mock.calls[0][1]).toBe("20200101000000");
+		const args = WaybackMachineDownloaderMock.mock.calls[0][0];
+		expect(args.from_timestamp).toBe("20200115000000");
+		expect(args.to_timestamp).toBe("20200115000000");
+	});
+
+	it("writes sentinel for host root URL and skips downloader on null crawl resolution", async () => {
+		const cache = makeCache();
+		const resolver = jest.fn().mockResolvedValue(null);
+		startArchiveWorkers(baseOpts({ cache, resolver }));
+		const worker = findWorker(QUEUE_CRAWL);
+		await worker.processor({
+			id: "c-null",
+			data: { host: "example.com", time: "20200101000000" },
+			token: "tk-cnull",
+			extendLock: jest.fn().mockResolvedValue(0),
+		});
+		expect(cache.writeNotFoundSentinel).toHaveBeenCalledWith(
+			"20200101000000",
+			"https://example.com/",
+		);
+		expect(WaybackMachineDownloaderMock).not.toHaveBeenCalled();
+	});
+
 	it("logs a warning (but does not throw) when extendLock rejects", async () => {
 		let resolveDownload: () => void = () => undefined;
 		downloadFilesMock.mockImplementationOnce(
@@ -415,6 +557,9 @@ describe("crawl worker processor", () => {
 			token: "tk-warn",
 			extendLock: extendLockMock,
 		});
+		// Flush resolver microtask before advancing timers.
+		await Promise.resolve();
+		await Promise.resolve();
 		jest.advanceTimersByTime(110_000);
 		// Let the rejection microtask flush.
 		await Promise.resolve();
