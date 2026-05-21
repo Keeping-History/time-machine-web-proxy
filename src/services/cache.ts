@@ -8,6 +8,12 @@ import type { Config } from "../models/config";
 
 const ROOT_VERSION = "v2";
 
+// Strip a leading "www." so cache reads share a directory with worker writes —
+// the worker uses normalizeBaseUrlInput().bareHost, which removes the same prefix.
+// Without this, http://www.apple.com writes land in <root>/apple.com/ while
+// lookup misses at <root>/www.apple.com/.
+const bareHost = (host: string): string => host.replace(/^www\./, "");
+
 export interface CacheHit {
 	absPath: string;
 	contentType: string;
@@ -26,7 +32,7 @@ export class CacheService {
 	async lookup(url: string, time: string): Promise<CacheHit | null> {
 		if (!this.config.cacheEnabled) return null;
 		const u = new URL(url);
-		const root = this.cacheDirForJob(time, u.hostname);
+		const root = this.cacheDirForJob(time, bareHost(u.hostname));
 		// Decode the pathname so percent-encoded traversal sequences (e.g. %2e%2e%2f)
 		// are normalized before path.resolve, allowing the startsWith guard below
 		// to catch them. URL's own pathname normalization only handles literal "..".
@@ -65,7 +71,7 @@ export class CacheService {
 
 	private sentinelPath(time: string, url: string): string {
 		const u = new URL(url);
-		const root = this.cacheDirForJob(time, u.hostname);
+		const root = this.cacheDirForJob(time, bareHost(u.hostname));
 		const key = createHash("sha256")
 			.update(`${u.protocol}//${u.host}${u.pathname}${u.search}`)
 			.digest("hex")

@@ -104,6 +104,14 @@ describe("CacheService.lookup (v2)", () => {
 		expect(pngResult?.contentType).toBe("image/png");
 	});
 
+	it("strips leading 'www.' from host so lookup matches worker's bareHost write path", async () => {
+		(mockFs.access as jest.Mock).mockResolvedValue(undefined);
+		const svc = makeService();
+		const result = await svc.lookup("https://www.example.com/about.html", TIME);
+		// Worker writes to <root>/example.com/, NOT <root>/www.example.com/.
+		expect(result?.absPath).toBe("/tmp/cache/v2/20200101000000/example.com/about.html");
+	});
+
 	it("returns application/octet-stream for unknown extension", async () => {
 		(mockFs.access as jest.Mock).mockResolvedValue(undefined);
 		const svc = makeService();
@@ -172,6 +180,17 @@ describe("CacheService.writeNotFoundSentinel + sentinel-aware lookup", () => {
 		expect(result?.absPath).toBe("/tmp/cache/v2/20200101000000/example.com/about.html");
 		// Exactly one fs.access call (for the file) — sentinel not consulted.
 		expect(mockFs.access).toHaveBeenCalledTimes(1);
+	});
+
+	it("sentinel root dir strips 'www.' to match worker write path", async () => {
+		(mockFs.mkdir as jest.Mock).mockResolvedValue(undefined);
+		(mockFs.writeFile as jest.Mock).mockResolvedValue(undefined);
+		const svc = makeService();
+		await svc.writeNotFoundSentinel(TIME, "https://www.example.com/about");
+		const writtenPath = (mockFs.writeFile as jest.Mock).mock.calls[0][0] as string;
+		expect(writtenPath).toMatch(
+			/^\/tmp\/cache\/v2\/20200101000000\/example\.com\/\.notfound\//,
+		);
 	});
 
 	it("sentinel keyed by full URL: same path, different query string → different sentinels", async () => {
