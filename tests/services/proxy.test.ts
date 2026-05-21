@@ -156,6 +156,43 @@ describe("ProxyService.fetch — cache MISS", () => {
 		expect(client.enqueueExactAndWait).toHaveBeenCalledTimes(1);
 	});
 
+	it("propagates {status:404} from cache.lookup after job completes (sentinel-driven)", async () => {
+		const lookup = jest
+			.fn<Promise<CacheHit | null>, [string, string]>()
+			.mockResolvedValueOnce(null)
+			.mockRejectedValueOnce(Object.assign(new Error("Not in archive"), { status: 404 }));
+		const cache = makeCache(lookup);
+		const client = makeClient();
+		const svc = new ProxyService(cache, client, logger, baseConfig);
+
+		await expect(svc.fetch(TARGET_HTML_URL, TIME)).rejects.toMatchObject({ status: 404 });
+		expect(client.enqueueExactAndWait).toHaveBeenCalledTimes(1);
+	});
+
+	it("propagates {status:404} from the FIRST cache.lookup (sentinel already present)", async () => {
+		// A previous request established the sentinel; this request short-circuits
+		// at the first lookup without ever enqueueing.
+		const cache = makeCache(
+			jest
+				.fn()
+				.mockRejectedValue(Object.assign(new Error("Not in archive"), { status: 404 })),
+		);
+		const client = makeClient();
+		const svc = new ProxyService(cache, client, logger, baseConfig);
+
+		await expect(svc.fetch(TARGET_HTML_URL, TIME)).rejects.toMatchObject({ status: 404 });
+		expect(client.enqueueExactAndWait).not.toHaveBeenCalled();
+	});
+
+	it("still throws 502 when lookup returns null (no sentinel) after job completes", async () => {
+		const lookup = jest.fn().mockResolvedValue(null);
+		const cache = makeCache(lookup);
+		const client = makeClient();
+		const svc = new ProxyService(cache, client, logger, baseConfig);
+
+		await expect(svc.fetch(TARGET_HTML_URL, TIME)).rejects.toMatchObject({ status: 502 });
+	});
+
 	it("propagates the job rejection when enqueueExactAndWait rejects", async () => {
 		const cache = makeCache(jest.fn().mockResolvedValue(null));
 		const client = makeClient();
