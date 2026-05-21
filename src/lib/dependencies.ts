@@ -11,6 +11,7 @@ import type { UrlValidatorModule } from "../services/time-machine";
 import { createLogger } from "./logger";
 import { createRedis } from "./redis";
 import { ShutdownController } from "./shutdown";
+import { resolveSnapshotTimestamp } from "./snapshot-resolver";
 import { isHostWhitelisted, validateTargetUrl } from "./url-validator";
 
 /**
@@ -74,14 +75,18 @@ export class Dependencies {
 		attachQueueLogger(QUEUE_CRAWL, crawlEvents, logger);
 
 		const cache = new CacheService(config, logger);
-		// DEFERRED (2026-05-21) — temporary identity resolver. Story 005-a8ed
-		// replaces this with the real resolveSnapshotTimestamp closure bound
-		// to config.snapshotWindowDays and config.allowLaterFallback.
-		const stubResolver = async (_variants: string[], time: string) => time;
+		const resolver = (variants: string[], requestedTime: string): Promise<string | null> =>
+			resolveSnapshotTimestamp({
+				variants,
+				requestedTime,
+				windowsDays: config.snapshotWindowDays,
+				allowLaterFallback: config.allowLaterFallback,
+				logger,
+			});
 		const workers = startArchiveWorkers({
 			connection: redis,
 			cache,
-			resolver: stubResolver,
+			resolver,
 			logger,
 			bullmqPrefix: config.bullmqPrefix,
 			workerConcurrency: config.workerConcurrency,

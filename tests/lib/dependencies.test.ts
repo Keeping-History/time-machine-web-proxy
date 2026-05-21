@@ -47,12 +47,19 @@ jest.mock("bullmq", () => ({
 	Worker: jest.fn(),
 }));
 
+const startArchiveWorkersMock = jest.fn().mockReturnValue({
+	exact: { close: workerExactClose },
+	crawl: { close: workerCrawlClose },
+});
+
 jest.mock("../../src/queue/archive-worker", () => ({
-	startArchiveWorkers: jest.fn().mockReturnValue({
-		exact: { close: workerExactClose },
-		crawl: { close: workerCrawlClose },
-	}),
+	startArchiveWorkers: startArchiveWorkersMock,
 	attachQueueLogger: jest.fn(),
+}));
+
+const resolveSnapshotTimestampMock = jest.fn().mockResolvedValue("20200101000000");
+jest.mock("../../src/lib/snapshot-resolver", () => ({
+	resolveSnapshotTimestamp: resolveSnapshotTimestampMock,
 }));
 
 jest.mock("ioredis", () => ({
@@ -104,6 +111,8 @@ describe("Dependencies (TASK-010)", () => {
 		redisQuit.mockClear();
 		queueCtor.mockClear();
 		queueEventsCtor.mockClear();
+		startArchiveWorkersMock.mockClear();
+		resolveSnapshotTimestampMock.mockClear();
 	});
 
 	it("exposes the full DependencyStore shape (new Redis/BullMQ fields)", () => {
@@ -197,5 +206,45 @@ describe("Dependencies (TASK-010)", () => {
 		const deps = new Dependencies(baseConfig).get() as unknown as Record<string, unknown>;
 		expect(deps.queue).toBeUndefined();
 		expect(deps.wayback).toBeUndefined();
+	});
+
+	it("passes a resolver function to startArchiveWorkers", () => {
+		new Dependencies(baseConfig);
+		expect(startArchiveWorkersMock).toHaveBeenCalledTimes(1);
+		const opts = startArchiveWorkersMock.mock.calls[0][0] as {
+			resolver: (v: string[], t: string) => Promise<string | null>;
+		};
+		expect(typeof opts.resolver).toBe("function");
+	});
+
+	it("resolver closure invokes resolveSnapshotTimestamp with config windows + flag", async () => {
+		new Dependencies({
+			...baseConfig,
+			snapshotWindowDays: [7, 90],
+			allowLaterFallback: true,
+		});
+		const opts = startArchiveWorkersMock.mock.calls[0][0] as {
+			resolver: (v: string[], t: string) => Promise<string | null>;
+		};
+		await opts.resolver(["https://example.com/"], "20200101000000");
+		expect(resolveSnapshotTimestampMock).toHaveBeenCalledTimes(1);
+		const callArgs = resolveSnapshotTimestampMock.mock.calls[0][0] as {
+			variants: string[];
+			requestedTime: string;
+			windowsDays: number[];
+			allowLaterFallback: boolean;
+		};
+		expect(callArgs.variants).toEqual(["https://example.com/"]);
+		expect(callArgs.requestedTime).toBe("20200101000000");
+		expect(callArgs.windowsDays).toEqual([7, 90]);
+		expect(callArgs.allowLaterFallback).toBe(true);
+	});
+
+	it("passes a cache with writeNotFoundSentinel exposed to startArchiveWorkers", () => {
+		new Dependencies(baseConfig);
+		const opts = startArchiveWorkersMock.mock.calls[0][0] as {
+			cache: { writeNotFoundSentinel: unknown };
+		};
+		expect(typeof opts.cache.writeNotFoundSentinel).toBe("function");
 	});
 });
