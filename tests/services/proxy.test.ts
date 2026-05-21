@@ -37,6 +37,7 @@ const baseConfig = {
 	proxyPrefix: "",
 	whitelistHosts: "*",
 	crawlMaxCdxPages: 50,
+	bullmqPrefix: "tm",
 } as unknown as Config;
 
 const makeCache = (lookupImpl?: jest.Mock): jest.Mocked<CacheService> =>
@@ -252,7 +253,7 @@ describe("ProxyService.fetch — domain crawl fire-and-forget", () => {
 		await new Promise((r) => setImmediate(r));
 
 		expect(client.enqueueDomainCrawl).toHaveBeenCalledWith("example.com", TIME);
-		expect(redis.set).toHaveBeenCalledWith("tm:crawl:budget:example.com", "1", "EX", 86_400, "NX");
+		expect(redis.set).toHaveBeenCalledWith("tm-budget:crawl:example.com", "1", "EX", 86_400, "NX");
 	});
 
 	it("does NOT fire crawl on cache HIT", async () => {

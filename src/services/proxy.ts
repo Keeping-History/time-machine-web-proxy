@@ -10,7 +10,6 @@ import type { CacheService } from "./cache";
 
 const CDX_TIMEOUT_MS = 10_000;
 const HOST_BUDGET_TTL_S = 86_400;
-const HOST_BUDGET_KEY_PREFIX = "tm:crawl:budget:";
 
 interface StatusError extends Error {
 	status: number;
@@ -38,7 +37,10 @@ export class ProxyService {
 		private readonly cache: CacheService,
 		private readonly archiveJobClient: ArchiveJobClientPort,
 		private readonly logger: pino.Logger,
-		private readonly config: Pick<Config, "proxyBase" | "whitelistHosts" | "crawlMaxCdxPages">,
+		private readonly config: Pick<
+			Config,
+			"proxyBase" | "whitelistHosts" | "crawlMaxCdxPages" | "bullmqPrefix"
+		>,
 		private readonly redis: IORedis | null = null,
 	) {}
 
@@ -106,7 +108,10 @@ export class ProxyService {
 			}
 
 			if (this.redis) {
-				const key = `${HOST_BUDGET_KEY_PREFIX}${host}`;
+				// Sibling namespace to the BullMQ prefix (separator "-" not ":") so
+				// bull-board's "<prefix>:*" queue-discovery scan doesn't surface this
+				// as a phantom queue.
+				const key = `${this.config.bullmqPrefix}-budget:crawl:${host}`;
 				const setRes = await this.redis.set(key, "1", "EX", HOST_BUDGET_TTL_S, "NX");
 				if (setRes !== "OK") {
 					this.logger.debug({ host }, "[crawl-skip] budget already consumed");
