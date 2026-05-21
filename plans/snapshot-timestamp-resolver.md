@@ -218,13 +218,13 @@ if (!hit) {
 
 ## Acceptance Criteria
 
-- [ ] `curl 'http://localhost:8765/?url=http://www.apple.com&time=20010912000000'` returns 200 with archived HTML, `X-Archive-Time` header reflecting the resolved snapshot (e.g. one of the early-2001 timestamps, since 2001-09-17 is *after* 2001-09-12 — with default `ALLOW_LATER_FALLBACK=false`, resolved should be ≤ requested).
-- [ ] `curl 'http://localhost:8765/?url=http://www.apple.com&time=19900101000000'` returns 404 "Not found in archive" (no Wayback snapshot exists that far back).
-- [ ] Second request to the same 404 URL+time returns 404 in <100ms (sentinel hit, no CDX call) — verifiable by absence of new `[worker:exact]` log lines.
-- [ ] Worker logs show `[worker:exact] resolved snapshot {resolved: "..."}` distinct from requested time on cache misses.
-- [ ] `DELETE /cache?domain=apple.com` clears both cached files and `.notfound` sentinels.
-- [ ] All existing tests still pass.
-- [ ] `npm run typecheck` clean.
+- [x] `curl 'http://localhost:8765/?url=http://www.apple.com&time=20010912000000'` returns 200 with archived HTML, `X-Archive-Time` header reflecting the resolved snapshot (e.g. one of the early-2001 timestamps, since 2001-09-17 is *after* 2001-09-12 — with default `ALLOW_LATER_FALLBACK=false`, resolved should be ≤ requested).
+- [x] `curl 'http://localhost:8765/?url=http://www.apple.com&time=19900101000000'` returns 404 "Not found in archive" (no Wayback snapshot exists that far back).
+- [x] Second request to the same 404 URL+time returns 404 in <100ms (sentinel hit, no CDX call) — verifiable by absence of new `[worker:exact]` log lines.
+- [x] Worker logs show `[worker:exact] resolved snapshot {resolved: "..."}` distinct from requested time on cache misses.
+- [x] `DELETE /cache?domain=apple.com` clears both cached files and `.notfound` sentinels.
+- [x] All existing tests still pass.
+- [x] `npm run typecheck` clean.
 
 ## Checklist (non-TDD cleanup)
 

@@ -106,6 +106,28 @@ describe("ProxyService.fetch — cache HIT", () => {
 		expect(String(result.body)).toContain("http://localhost:8080/?url=");
 	});
 
+	it("surfaces hit.archiveTime via result.archiveTime when sidecar exists", async () => {
+		const cache = makeCache(
+			jest.fn().mockResolvedValue({ ...htmlHit, archiveTime: "20010822231227" }),
+		);
+		const client = makeClient();
+		mockedReadFile.mockResolvedValue(Buffer.from(HTML_BODY));
+		const svc = new ProxyService(cache, client, logger, baseConfig);
+
+		const result = await svc.fetch(TARGET_HTML_URL, TIME);
+		expect(result.archiveTime).toBe("20010822231227");
+	});
+
+	it("falls back to requested time when hit.archiveTime is undefined (legacy file)", async () => {
+		const cache = makeCache(jest.fn().mockResolvedValue(htmlHit));
+		const client = makeClient();
+		mockedReadFile.mockResolvedValue(Buffer.from(HTML_BODY));
+		const svc = new ProxyService(cache, client, logger, baseConfig);
+
+		const result = await svc.fetch(TARGET_HTML_URL, TIME);
+		expect(result.archiveTime).toBe(TIME);
+	});
+
 	it("returns binary body as a raw Buffer (no rewrite)", async () => {
 		const cache = makeCache(jest.fn().mockResolvedValue(binHit));
 		const client = makeClient();
@@ -173,9 +195,7 @@ describe("ProxyService.fetch — cache MISS", () => {
 		// A previous request established the sentinel; this request short-circuits
 		// at the first lookup without ever enqueueing.
 		const cache = makeCache(
-			jest
-				.fn()
-				.mockRejectedValue(Object.assign(new Error("Not in archive"), { status: 404 })),
+			jest.fn().mockRejectedValue(Object.assign(new Error("Not in archive"), { status: 404 })),
 		);
 		const client = makeClient();
 		const svc = new ProxyService(cache, client, logger, baseConfig);

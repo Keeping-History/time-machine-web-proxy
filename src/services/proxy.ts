@@ -81,7 +81,7 @@ export class ProxyService {
 			contentType: hit.contentType,
 			archiveUrl: targetUrl,
 			originalUrl: targetUrl,
-			archiveTime: time,
+			archiveTime: hit.archiveTime ?? time,
 			body,
 			cache: cacheStatus,
 		};

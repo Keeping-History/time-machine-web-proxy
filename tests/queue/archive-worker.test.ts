@@ -98,10 +98,12 @@ function makeLogger(): pino.Logger {
 function makeCache(dir = "/cache"): {
 	cacheDirForJob: jest.Mock;
 	writeNotFoundSentinel: jest.Mock;
+	writeResolvedTimeSidecar: jest.Mock;
 } {
 	return {
 		cacheDirForJob: jest.fn((time: string, host: string) => `${dir}/v2/${time}/${host}`),
 		writeNotFoundSentinel: jest.fn().mockResolvedValue(undefined),
+		writeResolvedTimeSidecar: jest.fn().mockResolvedValue(undefined),
 	};
 }
 
@@ -342,6 +344,52 @@ describe("exact worker processor", () => {
 				token: "tk-null2",
 			}),
 		).resolves.toBeUndefined();
+	});
+
+	it("writes resolved-time sidecar after successful download (exact worker)", async () => {
+		const cache = makeCache();
+		const resolver = jest.fn().mockResolvedValue("20010822231227");
+		startArchiveWorkers(baseOpts({ cache, resolver }));
+		const worker = findWorker(QUEUE_EXACT);
+		await worker.processor({
+			id: "j-sidecar",
+			data: { url: "https://example.com/", time: "20010912000000" },
+			token: "tk-sc",
+		});
+		expect(cache.writeResolvedTimeSidecar).toHaveBeenCalledWith(
+			"20010912000000",
+			"https://example.com/",
+			"20010822231227",
+		);
+	});
+
+	it("does NOT write resolved-time sidecar when resolver returns null", async () => {
+		const cache = makeCache();
+		const resolver = jest.fn().mockResolvedValue(null);
+		startArchiveWorkers(baseOpts({ cache, resolver }));
+		const worker = findWorker(QUEUE_EXACT);
+		await worker.processor({
+			id: "j-nosidecar",
+			data: { url: "https://example.com/", time: "20010912000000" },
+			token: "tk-ns",
+		});
+		expect(cache.writeResolvedTimeSidecar).not.toHaveBeenCalled();
+	});
+
+	it("does NOT write resolved-time sidecar when downloader throws", async () => {
+		const cache = makeCache();
+		const resolver = jest.fn().mockResolvedValue("20010822231227");
+		downloadFilesMock.mockRejectedValueOnce(new Error("download failed"));
+		startArchiveWorkers(baseOpts({ cache, resolver }));
+		const worker = findWorker(QUEUE_EXACT);
+		await expect(
+			worker.processor({
+				id: "j-throw",
+				data: { url: "https://example.com/", time: "20010912000000" },
+				token: "tk-th",
+			}),
+		).rejects.toThrow("download failed");
+		expect(cache.writeResolvedTimeSidecar).not.toHaveBeenCalled();
 	});
 
 	it("logs resolved snapshot at info level on successful resolution", async () => {

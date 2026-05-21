@@ -188,9 +188,39 @@ describe("CacheService.writeNotFoundSentinel + sentinel-aware lookup", () => {
 		const svc = makeService();
 		await svc.writeNotFoundSentinel(TIME, "https://www.example.com/about");
 		const writtenPath = (mockFs.writeFile as jest.Mock).mock.calls[0][0] as string;
-		expect(writtenPath).toMatch(
-			/^\/tmp\/cache\/v2\/20200101000000\/example\.com\/\.notfound\//,
+		expect(writtenPath).toMatch(/^\/tmp\/cache\/v2\/20200101000000\/example\.com\/\.notfound\//);
+	});
+
+	it("writeResolvedTimeSidecar writes <root>/.resolved-time with the timestamp", async () => {
+		(mockFs.mkdir as jest.Mock).mockResolvedValue(undefined);
+		(mockFs.writeFile as jest.Mock).mockResolvedValue(undefined);
+		const svc = makeService();
+		await svc.writeResolvedTimeSidecar(TIME, "https://www.example.com/", "20010822231227");
+		const path = (mockFs.writeFile as jest.Mock).mock.calls[0][0] as string;
+		const content = (mockFs.writeFile as jest.Mock).mock.calls[0][1] as string;
+		expect(path).toBe("/tmp/cache/v2/20200101000000/example.com/.resolved-time");
+		expect(content).toBe("20010822231227");
+	});
+
+	it("lookup populates CacheHit.archiveTime from the sidecar when present", async () => {
+		(mockFs.access as jest.Mock).mockResolvedValue(undefined);
+		(mockFs.readFile as jest.Mock).mockImplementation((p: string) => {
+			if (p.endsWith(".resolved-time")) return Promise.resolve("20010822231227");
+			return Promise.resolve(Buffer.from(""));
+		});
+		const svc = makeService();
+		const result = await svc.lookup("https://www.example.com/about.html", TIME);
+		expect(result?.archiveTime).toBe("20010822231227");
+	});
+
+	it("lookup omits archiveTime when no sidecar exists (legacy cache HIT)", async () => {
+		(mockFs.access as jest.Mock).mockResolvedValue(undefined);
+		(mockFs.readFile as jest.Mock).mockRejectedValue(
+			Object.assign(new Error("ENOENT"), { code: "ENOENT" }),
 		);
+		const svc = makeService();
+		const result = await svc.lookup("https://www.example.com/about.html", TIME);
+		expect(result?.archiveTime).toBeUndefined();
 	});
 
 	it("sentinel keyed by full URL: same path, different query string → different sentinels", async () => {

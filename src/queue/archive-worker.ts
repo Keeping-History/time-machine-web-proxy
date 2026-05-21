@@ -12,7 +12,10 @@ export type SnapshotResolverFn = (
 
 export interface StartArchiveWorkersOpts {
 	connection: ConnectionOptions;
-	cache: Pick<CacheService, "cacheDirForJob" | "writeNotFoundSentinel">;
+	cache: Pick<
+		CacheService,
+		"cacheDirForJob" | "writeNotFoundSentinel" | "writeResolvedTimeSidecar"
+	>;
 	resolver: SnapshotResolverFn;
 	logger: pino.Logger;
 	bullmqPrefix: string;
@@ -95,6 +98,7 @@ export function startArchiveWorkers(opts: StartArchiveWorkersOpts): ArchiveWorke
 					directory,
 				}).download_files(),
 			);
+			await cache.writeResolvedTimeSidecar(time, url, resolved);
 		},
 		{
 			connection,
@@ -155,6 +159,7 @@ export function startArchiveWorkers(opts: StartArchiveWorkersOpts): ArchiveWorke
 						directory,
 					}).download_files(),
 				);
+				await cache.writeResolvedTimeSidecar(time, hostRootUrl, resolved);
 			} finally {
 				clearInterval(extender);
 			}

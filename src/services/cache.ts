@@ -17,6 +17,9 @@ const bareHost = (host: string): string => host.replace(/^www\./, "");
 export interface CacheHit {
 	absPath: string;
 	contentType: string;
+	// Resolved snapshot timestamp from the worker's CDX search, if a sidecar
+	// was written. Falls back to undefined for legacy cache files (pre-sidecar).
+	archiveTime?: string;
 }
 
 export class CacheService {
@@ -47,12 +50,17 @@ export class CacheService {
 		if (abs !== root && !abs.startsWith(root + sep)) {
 			throw Object.assign(new Error("Path traversal rejected"), { status: 400 });
 		}
+		let fileExists = false;
 		try {
 			await fs.access(abs);
-			const contentType = mimeLookup(extname(abs)) || "application/octet-stream";
-			return { absPath: abs, contentType };
+			fileExists = true;
 		} catch {
 			// File miss — fall through to sentinel check.
+		}
+		if (fileExists) {
+			const contentType = mimeLookup(extname(abs)) || "application/octet-stream";
+			const archiveTime = await this.readResolvedTime(time, u.hostname);
+			return { absPath: abs, contentType, archiveTime };
 		}
 		const sentinel = this.sentinelPath(time, url);
 		try {
@@ -61,6 +69,24 @@ export class CacheService {
 			return null;
 		}
 		throw Object.assign(new Error("Not in archive"), { status: 404 });
+	}
+
+	async writeResolvedTimeSidecar(time: string, url: string, resolvedTime: string): Promise<void> {
+		const u = new URL(url);
+		const root = this.cacheDirForJob(time, bareHost(u.hostname));
+		await fs.mkdir(root, { recursive: true });
+		await fs.writeFile(join(root, ".resolved-time"), resolvedTime);
+	}
+
+	private async readResolvedTime(time: string, hostname: string): Promise<string | undefined> {
+		const root = this.cacheDirForJob(time, bareHost(hostname));
+		try {
+			const raw = await fs.readFile(join(root, ".resolved-time"), "utf-8");
+			const trimmed = raw.trim();
+			return /^\d{14}$/.test(trimmed) ? trimmed : undefined;
+		} catch {
+			return undefined;
+		}
 	}
 
 	async writeNotFoundSentinel(time: string, url: string): Promise<void> {
