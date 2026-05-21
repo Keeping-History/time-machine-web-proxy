@@ -6,6 +6,7 @@ jest.mock("node:fs", () => ({
 		unlink: jest.fn(),
 		access: jest.fn(),
 		rm: jest.fn(),
+		mkdir: jest.fn(),
 	},
 }));
 
@@ -108,6 +109,80 @@ describe("CacheService.lookup (v2)", () => {
 		const svc = makeService();
 		const result = await svc.lookup("https://example.com/file.unknownext", TIME);
 		expect(result?.contentType).toBe("application/octet-stream");
+	});
+});
+
+describe("CacheService.writeNotFoundSentinel + sentinel-aware lookup", () => {
+	const TIME = "20200101000000";
+	const URL = "https://example.com/about";
+
+	it("writes a sentinel file at <root>/.notfound/<sha256-prefix>", async () => {
+		(mockFs.mkdir as jest.Mock).mockResolvedValue(undefined);
+		(mockFs.writeFile as jest.Mock).mockResolvedValue(undefined);
+		const svc = makeService();
+		await svc.writeNotFoundSentinel(TIME, URL);
+
+		expect(mockFs.mkdir).toHaveBeenCalledTimes(1);
+		expect(mockFs.writeFile).toHaveBeenCalledTimes(1);
+		const writtenPath = (mockFs.writeFile as jest.Mock).mock.calls[0][0] as string;
+		expect(writtenPath).toMatch(
+			/^\/tmp\/cache\/v2\/20200101000000\/example\.com\/\.notfound\/[0-9a-f]{16}$/,
+		);
+		const mkdirPath = (mockFs.mkdir as jest.Mock).mock.calls[0][0] as string;
+		expect(mkdirPath).toBe("/tmp/cache/v2/20200101000000/example.com/.notfound");
+	});
+
+	it("derives different sentinel keys for different URLs at the same host+time", async () => {
+		(mockFs.mkdir as jest.Mock).mockResolvedValue(undefined);
+		(mockFs.writeFile as jest.Mock).mockResolvedValue(undefined);
+		const svc = makeService();
+		await svc.writeNotFoundSentinel(TIME, "https://example.com/a");
+		await svc.writeNotFoundSentinel(TIME, "https://example.com/b");
+		const a = (mockFs.writeFile as jest.Mock).mock.calls[0][0] as string;
+		const b = (mockFs.writeFile as jest.Mock).mock.calls[1][0] as string;
+		expect(a).not.toBe(b);
+	});
+
+	it("lookup throws {status: 404} when sentinel exists for the URL", async () => {
+		// file access fails; sentinel access succeeds.
+		(mockFs.access as jest.Mock).mockImplementation((p: string) => {
+			if (p.includes("/.notfound/")) return Promise.resolve(undefined);
+			return Promise.reject(Object.assign(new Error("ENOENT"), { code: "ENOENT" }));
+		});
+		const svc = makeService();
+		await expect(svc.lookup(URL, TIME)).rejects.toMatchObject({
+			status: 404,
+		});
+	});
+
+	it("lookup returns null when neither file nor sentinel exists (unchanged miss path)", async () => {
+		(mockFs.access as jest.Mock).mockRejectedValue(
+			Object.assign(new Error("ENOENT"), { code: "ENOENT" }),
+		);
+		const svc = makeService();
+		const result = await svc.lookup(URL, TIME);
+		expect(result).toBeNull();
+	});
+
+	it("lookup returns HIT when file exists, even if sentinel could exist (file wins)", async () => {
+		// File access succeeds — sentinel check should not be reached.
+		(mockFs.access as jest.Mock).mockResolvedValue(undefined);
+		const svc = makeService();
+		const result = await svc.lookup("https://example.com/about.html", TIME);
+		expect(result?.absPath).toBe("/tmp/cache/v2/20200101000000/example.com/about.html");
+		// Exactly one fs.access call (for the file) — sentinel not consulted.
+		expect(mockFs.access).toHaveBeenCalledTimes(1);
+	});
+
+	it("sentinel keyed by full URL: same path, different query string → different sentinels", async () => {
+		(mockFs.mkdir as jest.Mock).mockResolvedValue(undefined);
+		(mockFs.writeFile as jest.Mock).mockResolvedValue(undefined);
+		const svc = makeService();
+		await svc.writeNotFoundSentinel(TIME, "https://example.com/x?a=1");
+		await svc.writeNotFoundSentinel(TIME, "https://example.com/x?a=2");
+		const a = (mockFs.writeFile as jest.Mock).mock.calls[0][0] as string;
+		const b = (mockFs.writeFile as jest.Mock).mock.calls[1][0] as string;
+		expect(a).not.toBe(b);
 	});
 });
 

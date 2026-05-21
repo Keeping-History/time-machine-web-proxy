@@ -1,6 +1,7 @@
+import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
 import type { IncomingMessage, ServerResponse } from "node:http";
-import { extname, join, resolve, sep } from "node:path";
+import { dirname, extname, join, resolve, sep } from "node:path";
 import { lookup as mimeLookup } from "mime-types";
 import type pino from "pino";
 import type { Config } from "../models/config";
@@ -45,8 +46,35 @@ export class CacheService {
 			const contentType = mimeLookup(extname(abs)) || "application/octet-stream";
 			return { absPath: abs, contentType };
 		} catch {
+			// File miss — fall through to sentinel check.
+		}
+		const sentinel = this.sentinelPath(time, url);
+		try {
+			await fs.access(sentinel);
+		} catch {
 			return null;
 		}
+		throw Object.assign(new Error("Not in archive"), { status: 404 });
+	}
+
+	async writeNotFoundSentinel(time: string, url: string): Promise<void> {
+		const abs = this.sentinelPath(time, url);
+		await fs.mkdir(dirname(abs), { recursive: true });
+		await fs.writeFile(abs, "");
+	}
+
+	private sentinelPath(time: string, url: string): string {
+		const u = new URL(url);
+		const root = this.cacheDirForJob(time, u.hostname);
+		const key = createHash("sha256")
+			.update(`${u.protocol}//${u.host}${u.pathname}${u.search}`)
+			.digest("hex")
+			.slice(0, 16);
+		const abs = resolve(root, ".notfound", key);
+		if (!abs.startsWith(root + sep)) {
+			throw Object.assign(new Error("Sentinel path traversal rejected"), { status: 400 });
+		}
+		return abs;
 	}
 
 	/**
