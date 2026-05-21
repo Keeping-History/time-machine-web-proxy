@@ -23,5 +23,20 @@ services:
       timeout: 3s
       retries: 5
 
+  bullboard:
+    # deadly0/bull-board is published as linux/amd64 only.
+    # Pin platform so Docker Desktop on ARM Macs runs it under emulation
+    # (Rosetta/qemu) instead of failing the pull.
+    platform: linux/amd64
+    image: deadly0/bull-board:latest
+    ports:
+      - "3008:3000"
+    environment:
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - BULL_VERSION=BULLMQ
+    depends_on:
+      - redis
+
 volumes:
   timemachine-cache:
