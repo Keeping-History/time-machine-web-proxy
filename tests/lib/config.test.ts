@@ -33,6 +33,8 @@ describe("loadConfig", () => {
 		delete process.env.OUTBOUND_PROXY_URL;
 		delete process.env.OUTBOUND_PROXY_USERNAME;
 		delete process.env.OUTBOUND_PROXY_PASSWORD;
+		delete process.env.SNAPSHOT_WINDOW_DAYS;
+		delete process.env.ALLOW_LATER_FALLBACK;
 
 		const config = loadConfig();
 
@@ -55,6 +57,55 @@ describe("loadConfig", () => {
 		expect(config.outboundProxyUrl).toBe("");
 		expect(config.outboundProxyUsername).toBe("");
 		expect(config.outboundProxyPassword).toBe("");
+		expect(config.snapshotWindowDays).toEqual([30, 365, 3650, 0]);
+		expect(config.allowLaterFallback).toBe(false);
+	});
+
+	it("parses SNAPSHOT_WINDOW_DAYS CSV into number[]", () => {
+		process.env.SNAPSHOT_WINDOW_DAYS = "7,30,90,0";
+		expect(loadConfig().snapshotWindowDays).toEqual([7, 30, 90, 0]);
+	});
+
+	it("trims whitespace in SNAPSHOT_WINDOW_DAYS entries", () => {
+		process.env.SNAPSHOT_WINDOW_DAYS = " 7 , 30 , 90 ";
+		expect(loadConfig().snapshotWindowDays).toEqual([7, 30, 90]);
+	});
+
+	it("throws on non-numeric SNAPSHOT_WINDOW_DAYS entries", () => {
+		process.env.SNAPSHOT_WINDOW_DAYS = "30,abc,90";
+		expect(() => loadConfig()).toThrow(/SNAPSHOT_WINDOW_DAYS/);
+	});
+
+	it("throws on negative SNAPSHOT_WINDOW_DAYS entries", () => {
+		process.env.SNAPSHOT_WINDOW_DAYS = "30,-1,90";
+		expect(() => loadConfig()).toThrow(/SNAPSHOT_WINDOW_DAYS/);
+	});
+
+	it("throws on empty SNAPSHOT_WINDOW_DAYS", () => {
+		process.env.SNAPSHOT_WINDOW_DAYS = "";
+		expect(() => loadConfig()).toThrow(/SNAPSHOT_WINDOW_DAYS/);
+	});
+
+	it("treats ALLOW_LATER_FALLBACK=true (case-insensitive) as true", () => {
+		process.env.ALLOW_LATER_FALLBACK = "true";
+		expect(loadConfig().allowLaterFallback).toBe(true);
+
+		process.env.ALLOW_LATER_FALLBACK = "TRUE";
+		expect(loadConfig().allowLaterFallback).toBe(true);
+
+		process.env.ALLOW_LATER_FALLBACK = "True";
+		expect(loadConfig().allowLaterFallback).toBe(true);
+	});
+
+	it("treats any ALLOW_LATER_FALLBACK value other than true as false", () => {
+		process.env.ALLOW_LATER_FALLBACK = "false";
+		expect(loadConfig().allowLaterFallback).toBe(false);
+
+		process.env.ALLOW_LATER_FALLBACK = "yes";
+		expect(loadConfig().allowLaterFallback).toBe(false);
+
+		process.env.ALLOW_LATER_FALLBACK = "1";
+		expect(loadConfig().allowLaterFallback).toBe(false);
 	});
 
 	it("reads values from env vars", () => {

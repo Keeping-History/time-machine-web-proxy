@@ -30,6 +30,8 @@ const config: Config = {
 	outboundProxyUrl: "",
 	outboundProxyUsername: "",
 	outboundProxyPassword: "",
+	snapshotWindowDays: [30, 365, 3650, 0],
+	allowLaterFallback: false,
 };
 
 const makeService = () => {

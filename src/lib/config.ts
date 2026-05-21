@@ -1,6 +1,18 @@
 import { mkdirSync } from "node:fs";
 import type { Config } from "../models/config";
 
+const parseSnapshotWindowDays = (csv: string): number[] => {
+	const parts = csv.split(",").map((s) => s.trim());
+	if (parts.length === 0 || parts.some((s) => s === "")) {
+		throw new Error(`Invalid SNAPSHOT_WINDOW_DAYS: empty entry in "${csv}"`);
+	}
+	const parsed = parts.map((s) => Number.parseInt(s, 10));
+	if (parsed.some((n) => !Number.isFinite(n) || n < 0)) {
+		throw new Error(`Invalid SNAPSHOT_WINDOW_DAYS: "${csv}" — must be non-negative integers`);
+	}
+	return parsed;
+};
+
 export function loadConfig(): Config {
 	const hostname = process.env.LISTENER ?? "0.0.0.0";
 	const port = Number(process.env.TIMEMACHINE_PORT) || 8765;
@@ -33,6 +45,10 @@ export function loadConfig(): Config {
 		outboundProxyUrl: process.env.OUTBOUND_PROXY_URL ?? "",
 		outboundProxyUsername: process.env.OUTBOUND_PROXY_USERNAME ?? "",
 		outboundProxyPassword: process.env.OUTBOUND_PROXY_PASSWORD ?? "",
+		snapshotWindowDays: parseSnapshotWindowDays(
+			process.env.SNAPSHOT_WINDOW_DAYS ?? "30,365,3650,0",
+		),
+		allowLaterFallback: process.env.ALLOW_LATER_FALLBACK?.toLowerCase() === "true",
 	};
 }
 

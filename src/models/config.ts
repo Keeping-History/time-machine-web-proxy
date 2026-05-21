@@ -24,4 +24,8 @@ export interface Config {
 	outboundProxyUrl: string;
 	outboundProxyUsername: string;
 	outboundProxyPassword: string;
+
+	// — Snapshot timestamp resolver —
+	snapshotWindowDays: number[];
+	allowLaterFallback: boolean;
 }
