@@ -304,6 +304,76 @@ describe("rewriteHtmlUrls — schemes left alone", () => {
 		const r = rewriteHtmlUrls(`<a href="#top">x</a>`, TARGET, TIME);
 		expect(r).toContain(`href="#top"`);
 	});
+
+	it.each([
+		["sms:+15551234", "sms"],
+		["ftp://example.com/x", "ftp"],
+		["geo:37.78,-122.4", "geo"],
+		["ws://example.com/sock", "ws"],
+		["wss://example.com/sock", "wss"],
+		["magnet:?xt=urn:btih:abc", "magnet"],
+		["view-source:http://example.com/", "view-source"],
+		["chrome://settings/", "chrome"],
+		["file:///etc/hosts", "file"],
+		["blob:https://example.com/abc", "blob"],
+		["about:blank", "about"],
+	])("leaves %s URLs untouched (scheme %s)", (uri) => {
+		const r = rewriteHtmlUrls(`<a href="${uri}">x</a>`, TARGET, TIME);
+		expect(r).toContain(`href="${uri}"`);
+	});
+});
+
+describe("rewriteHtmlUrls — <base href> handling", () => {
+	it("strips the <base> tag from the output", () => {
+		const html = `<html><head><base href="https://cdn.example.com/"></head><body></body></html>`;
+		const r = rewriteHtmlUrls(html, TARGET, TIME);
+		expect(r).not.toMatch(/<base\b/i);
+	});
+
+	it("honors <base href> as the effective base for relative-URL resolution", () => {
+		const html = `<html><head><base href="https://cdn.example.com/"></head><body><a href="/x">x</a></body></html>`;
+		// Without honoring base, relative "/x" would resolve against TARGET
+		// (www.apple.com). With base honored, it resolves against cdn.example.com.
+		const r = rewriteHtmlUrls(html, TARGET, TIME);
+		expect(r).toContain(`/web/${TIME}/https://cdn.example.com/x`);
+		expect(r).not.toContain(`/web/${TIME}/http://www.apple.com/x`);
+	});
+});
+
+describe("rewriteHtmlUrls — <meta http-equiv='refresh'>", () => {
+	it("rewrites the url= portion of meta refresh content", () => {
+		const html = `<meta http-equiv="refresh" content="5;url=/foo">`;
+		const r = rewriteHtmlUrls(html, TARGET, TIME);
+		expect(r).toContain(`/web/${TIME}/http://www.apple.com/foo`);
+	});
+
+	it("leaves meta refresh without url= unchanged", () => {
+		const html = `<meta http-equiv="refresh" content="5">`;
+		const r = rewriteHtmlUrls(html, TARGET, TIME);
+		expect(r).toContain(`content="5"`);
+	});
+
+	it("does not touch non-refresh meta tags", () => {
+		const html = `<meta name="description" content="visit /home">`;
+		const r = rewriteHtmlUrls(html, TARGET, TIME);
+		expect(r).toContain(`content="visit /home"`);
+	});
+});
+
+describe("rewriteHtmlUrls — extended URL-bearing attributes", () => {
+	it.each([
+		[`<blockquote cite="/q">x</blockquote>`, "cite"],
+		[`<q cite="/q">x</q>`, "cite"],
+		[`<del cite="/q">x</del>`, "cite"],
+		[`<ins cite="/q">x</ins>`, "cite"],
+		[`<html manifest="/app.appcache"></html>`, "manifest"],
+		[`<body background="/bg.png"></body>`, "background"],
+		[`<table background="/tbg.png"></table>`, "background"],
+		[`<img longdesc="/desc.html" src="/i.png">`, "longdesc"],
+	])("rewrites %s (%s)", (html, attr) => {
+		const r = rewriteHtmlUrls(html, TARGET, TIME);
+		expect(r).toMatch(new RegExp(`${attr}="\\/web\\/\\d{14}\\/`));
+	});
 });
 
 describe("rewriteHtmlUrls — output is path-based", () => {
