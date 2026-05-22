@@ -24,8 +24,7 @@ services:
       retries: 5
 
   bullboard:
-    platform: linux/amd64
-    image: deadly0/bull-board:latest
+    image: venatum/bull-board:latest
     ports:
       - "3008:3000"
     environment:
@@ -33,7 +32,7 @@ services:
       - REDIS_PORT=6379
       - BULL_VERSION=BULLMQ
       # Must match BULLMQ_PREFIX in the timemachine service (default "tm").
-      # deadly0/bull-board defaults to "bull" and shows zero queues otherwise.
+      # Default is "bull" — without this override no queues appear.
       - BULL_PREFIX=tm
     depends_on:
       - redis
