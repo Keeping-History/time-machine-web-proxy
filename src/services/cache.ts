@@ -8,12 +8,6 @@ import type { Config } from "../models/config";
 
 const ROOT_VERSION = "v2";
 
-// Strip a leading "www." so cache reads share a directory with worker writes —
-// the worker uses normalizeBaseUrlInput().bareHost, which removes the same prefix.
-// Without this, http://www.apple.com writes land in <root>/apple.com/ while
-// lookup misses at <root>/www.apple.com/.
-const bareHost = (host: string): string => host.replace(/^www\./, "");
-
 export interface CacheHit {
 	absPath: string;
 	contentType: string;
@@ -35,7 +29,10 @@ export class CacheService {
 	async lookup(url: string, time: string): Promise<CacheHit | null> {
 		if (!this.config.cacheEnabled) return null;
 		const u = new URL(url);
-		const root = this.cacheDirForJob(time, bareHost(u.hostname));
+		// Cache key uses the hostname verbatim. www.example.com and example.com
+		// are deliberately stored as separate entries because they may serve
+		// different content; collapsing them would poison the cache.
+		const root = this.cacheDirForJob(time, u.hostname);
 		// Decode the pathname so percent-encoded traversal sequences (e.g. %2e%2e%2f)
 		// are normalized before path.resolve, allowing the startsWith guard below
 		// to catch them. URL's own pathname normalization only handles literal "..".
@@ -45,23 +42,38 @@ export class CacheService {
 		} catch {
 			throw Object.assign(new Error("Malformed URL pathname"), { status: 400 });
 		}
-		const rel = decoded === "/" || decoded.endsWith("/") ? `${decoded}index.html` : decoded;
-		const abs = resolve(root, `.${rel}`);
-		if (abs !== root && !abs.startsWith(root + sep)) {
+		const isDirStyle = decoded === "/" || decoded.endsWith("/");
+		const primaryRel = isDirStyle ? `${decoded}index.html` : decoded;
+		const primaryAbs = resolve(root, `.${primaryRel}`);
+		if (primaryAbs !== root && !primaryAbs.startsWith(root + sep)) {
 			throw Object.assign(new Error("Path traversal rejected"), { status: 400 });
 		}
-		let fileExists = false;
 		try {
-			await fs.access(abs);
-			fileExists = true;
-		} catch {
-			// File miss — fall through to sentinel check.
-		}
-		if (fileExists) {
-			const contentType = mimeLookup(extname(abs)) || "application/octet-stream";
+			await fs.access(primaryAbs);
+			const contentType = mimeLookup(extname(primaryAbs)) || "application/octet-stream";
 			const archiveTime = await this.readResolvedTime(time, u.hostname);
-			return { absPath: abs, contentType, archiveTime };
+			return { absPath: primaryAbs, contentType, archiveTime };
+		} catch {
+			/* fall through to directory-index fallback */
 		}
+		// Directory-index fallback: the Wayback downloader saves `http://host/mac`
+		// as `<root>/mac/index.html`. Without this probe, a request for `/mac`
+		// (no trailing slash) would miss even when the page is cached.
+		if (!isDirStyle) {
+			const fallbackAbs = resolve(root, `.${decoded}/index.html`);
+			if (fallbackAbs !== root && !fallbackAbs.startsWith(root + sep)) {
+				throw Object.assign(new Error("Path traversal rejected"), { status: 400 });
+			}
+			try {
+				await fs.access(fallbackAbs);
+				const archiveTime = await this.readResolvedTime(time, u.hostname);
+				return { absPath: fallbackAbs, contentType: "text/html", archiveTime };
+			} catch {
+				/* fall through to sentinel check */
+			}
+		}
+		// Negative-cache sentinel: worker writes one when CDX confirms 404.
+		// Lookup throws 404 instead of returning null so the proxy stops re-queuing.
 		const sentinel = this.sentinelPath(time, url);
 		try {
 			await fs.access(sentinel);
@@ -73,13 +85,13 @@ export class CacheService {
 
 	async writeResolvedTimeSidecar(time: string, url: string, resolvedTime: string): Promise<void> {
 		const u = new URL(url);
-		const root = this.cacheDirForJob(time, bareHost(u.hostname));
+		const root = this.cacheDirForJob(time, u.hostname);
 		await fs.mkdir(root, { recursive: true });
 		await fs.writeFile(join(root, ".resolved-time"), resolvedTime);
 	}
 
 	private async readResolvedTime(time: string, hostname: string): Promise<string | undefined> {
-		const root = this.cacheDirForJob(time, bareHost(hostname));
+		const root = this.cacheDirForJob(time, hostname);
 		try {
 			const raw = await fs.readFile(join(root, ".resolved-time"), "utf-8");
 			const trimmed = raw.trim();
@@ -97,7 +109,7 @@ export class CacheService {
 
 	private sentinelPath(time: string, url: string): string {
 		const u = new URL(url);
-		const root = this.cacheDirForJob(time, bareHost(u.hostname));
+		const root = this.cacheDirForJob(time, u.hostname);
 		const key = createHash("sha256")
 			.update(`${u.protocol}//${u.host}${u.pathname}${u.search}`)
 			.digest("hex")
