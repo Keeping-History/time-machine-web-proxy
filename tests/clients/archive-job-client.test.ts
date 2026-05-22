@@ -47,8 +47,28 @@ function makeLogger(): pino.Logger {
 	} as unknown as pino.Logger;
 }
 
-function makeEvents(): Record<string, unknown> {
-	return {};
+interface FakeEvents {
+	on: jest.Mock;
+	off: jest.Mock;
+	handlers: Record<string, Array<(args: unknown) => void>>;
+	emit(event: string, payload: unknown): void;
+}
+
+function makeEvents(): FakeEvents {
+	const handlers: Record<string, Array<(args: unknown) => void>> = {};
+	const events: FakeEvents = {
+		handlers,
+		on: jest.fn((event: string, handler: (args: unknown) => void) => {
+			(handlers[event] ??= []).push(handler);
+		}),
+		off: jest.fn((event: string, handler: (args: unknown) => void) => {
+			handlers[event] = (handlers[event] ?? []).filter((h) => h !== handler);
+		}),
+		emit(event, payload) {
+			for (const h of handlers[event] ?? []) h(payload);
+		},
+	};
+	return events;
 }
 
 function makeClient(
@@ -62,7 +82,7 @@ function makeClient(
 	client: ArchiveJobClient;
 	exactQueue: FakeQueue;
 	crawlQueue: FakeQueue;
-	exactEvents: Record<string, unknown>;
+	exactEvents: FakeEvents;
 	logger: pino.Logger;
 } {
 	const exactQueue = overrides.exactQueue ?? makeFakeQueue();
@@ -178,6 +198,119 @@ describe("ArchiveJobClient.enqueueExactAndWait", () => {
 		await client.enqueueExactAndWait("http://example.com/", TIME);
 		await client.enqueueExactAndWait("https://example.com/", TIME);
 		expect(exactQueue.add).toHaveBeenCalledTimes(2);
+	});
+
+	it("forwards QueueEvents 'progress' to the onProgress callback (filtered by this job's id)", async () => {
+		const expectedId = expectedExactJobId(TARGET_URL, TIME);
+		const job: FakeJob = makeFakeJob(expectedId);
+		const exactQueue: FakeQueue = { add: jest.fn().mockResolvedValue(job) };
+		const { client, exactEvents } = makeClient({ exactQueue });
+		const onProgress = jest.fn();
+		// Resolve the wait only after we've had a chance to emit progress.
+		let resolveWait: () => void = () => undefined;
+		job.waitUntilFinished.mockImplementation(
+			() =>
+				new Promise<void>((res) => {
+					resolveWait = res;
+				}),
+		);
+		const pending = client.enqueueExactAndWait(TARGET_URL, TIME, onProgress);
+		await Promise.resolve();
+		const progress = {
+			stage: "resolved",
+			jobId: expectedId,
+			queue: "archive-exact" as const,
+			ts: 1,
+			resolved: "20200115000000",
+		};
+		exactEvents.emit("progress", { jobId: expectedId, data: progress });
+		expect(onProgress).toHaveBeenCalledWith(progress);
+		resolveWait();
+		await pending;
+	});
+
+	it("does NOT forward progress events for OTHER jobs sharing the same QueueEvents stream", async () => {
+		const ownId = expectedExactJobId(TARGET_URL, TIME);
+		const job: FakeJob = makeFakeJob(ownId);
+		const exactQueue: FakeQueue = { add: jest.fn().mockResolvedValue(job) };
+		const { client, exactEvents } = makeClient({ exactQueue });
+		const onProgress = jest.fn();
+		let resolveWait: () => void = () => undefined;
+		job.waitUntilFinished.mockImplementation(
+			() =>
+				new Promise<void>((res) => {
+					resolveWait = res;
+				}),
+		);
+		const pending = client.enqueueExactAndWait(TARGET_URL, TIME, onProgress);
+		await Promise.resolve();
+		exactEvents.emit("progress", {
+			jobId: "some-other-job",
+			data: { stage: "resolved", jobId: "some-other-job", queue: "archive-exact", ts: 1 },
+		});
+		expect(onProgress).not.toHaveBeenCalled();
+		resolveWait();
+		await pending;
+	});
+
+	it("unsubscribes the progress handler after waitUntilFinished resolves", async () => {
+		const expectedId = expectedExactJobId(TARGET_URL, TIME);
+		const job: FakeJob = makeFakeJob(expectedId);
+		const exactQueue: FakeQueue = { add: jest.fn().mockResolvedValue(job) };
+		const { client, exactEvents } = makeClient({ exactQueue });
+		const onProgress = jest.fn();
+		await client.enqueueExactAndWait(TARGET_URL, TIME, onProgress);
+		expect(exactEvents.off).toHaveBeenCalledWith("progress", expect.any(Function));
+		// After unsubscribe, late emissions must not reach the callback.
+		exactEvents.emit("progress", {
+			jobId: expectedId,
+			data: { stage: "download_done", jobId: expectedId, queue: "archive-exact", ts: 2 },
+		});
+		expect(onProgress).not.toHaveBeenCalled();
+	});
+
+	it("unsubscribes even when waitUntilFinished rejects", async () => {
+		const expectedId = expectedExactJobId(TARGET_URL, TIME);
+		const job: FakeJob = {
+			id: expectedId,
+			waitUntilFinished: jest.fn().mockRejectedValue(new Error("boom")),
+		};
+		const exactQueue: FakeQueue = { add: jest.fn().mockResolvedValue(job) };
+		const { client, exactEvents } = makeClient({ exactQueue });
+		const onProgress = jest.fn();
+		await expect(
+			client.enqueueExactAndWait(TARGET_URL, TIME, onProgress),
+		).rejects.toThrow("boom");
+		expect(exactEvents.off).toHaveBeenCalledWith("progress", expect.any(Function));
+	});
+
+	it("ignores progress payloads that don't match the JobProgress shape", async () => {
+		const expectedId = expectedExactJobId(TARGET_URL, TIME);
+		const job: FakeJob = makeFakeJob(expectedId);
+		const exactQueue: FakeQueue = { add: jest.fn().mockResolvedValue(job) };
+		const { client, exactEvents } = makeClient({ exactQueue });
+		const onProgress = jest.fn();
+		let resolveWait: () => void = () => undefined;
+		job.waitUntilFinished.mockImplementation(
+			() =>
+				new Promise<void>((res) => {
+					resolveWait = res;
+				}),
+		);
+		const pending = client.enqueueExactAndWait(TARGET_URL, TIME, onProgress);
+		await Promise.resolve();
+		// Numeric progress (legacy BullMQ shape) — not a JobProgress object.
+		exactEvents.emit("progress", { jobId: expectedId, data: 42 });
+		exactEvents.emit("progress", { jobId: expectedId, data: null });
+		expect(onProgress).not.toHaveBeenCalled();
+		resolveWait();
+		await pending;
+	});
+
+	it("does NOT subscribe to progress events when no onProgress callback is provided", async () => {
+		const { client, exactEvents } = makeClient();
+		await client.enqueueExactAndWait(TARGET_URL, TIME);
+		expect(exactEvents.on).not.toHaveBeenCalledWith("progress", expect.any(Function));
 	});
 });
 

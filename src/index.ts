@@ -21,12 +21,19 @@ async function main(): Promise<void> {
 	// mutation; this is the single call site. The await ensures startup probes
 	// complete (and throw if all proxies are unreachable) before we go further.
 	const bootLogger = createLogger();
-	await installOutboundProxy(config, bootLogger);
+	const outboundProxy = await installOutboundProxy(config, bootLogger);
 
-	const dependencies = new Dependencies(config);
+	const dependencies = new Dependencies(config, outboundProxy);
 	const { logger, shutdown, proxy, cache, validator } = dependencies.get();
-	const service = new TimeMachineService(config, proxy, cache, validator, shutdown, logger, () =>
-		dependencies.close(),
+	const service = new TimeMachineService(
+		config,
+		proxy,
+		cache,
+		validator,
+		shutdown,
+		logger,
+		() => dependencies.close(),
+		() => dependencies.getStatus(),
 	);
 
 	service.start();

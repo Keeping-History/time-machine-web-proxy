@@ -1,7 +1,7 @@
 import { promises as fs } from "node:fs";
 import type IORedis from "ioredis";
 import type pino from "pino";
-import type { ArchiveJobClientPort } from "../clients/archive-job-client";
+import type { ArchiveJobClientPort, JobProgressListener } from "../clients/archive-job-client";
 import { dayWindow } from "../lib/archive-time";
 import { rewriteCssUrls, rewriteHtmlUrls, stripWaybackToolbar } from "../lib/url-rewriter";
 import { isHostWhitelisted } from "../lib/url-validator";
@@ -14,7 +14,6 @@ import type { CacheService } from "./cache";
 // the size-preflight from misclassifying transient slowness as "skip crawl".
 const CDX_TIMEOUT_MS = 30_000;
 const HOST_BUDGET_TTL_S = 86_400;
-const HOST_BUDGET_KEY_PREFIX = "tm:crawl:budget:";
 
 interface StatusError extends Error {
 	status: number;
@@ -42,18 +41,32 @@ export class ProxyService {
 		private readonly cache: CacheService,
 		private readonly archiveJobClient: ArchiveJobClientPort,
 		private readonly logger: pino.Logger,
-		private readonly config: Pick<Config, "proxyBase" | "whitelistHosts" | "crawlMaxCdxPages">,
+		private readonly config: Pick<
+			Config,
+			"whitelistHosts" | "crawlMaxCdxPages" | "bullmqPrefix" | "domainCrawlEnabled"
+		>,
 		private readonly redis: IORedis | null = null,
 	) {}
 
-	async fetch(targetUrl: string, time: string): Promise<ProxyResult> {
+	async fetch(
+		targetUrl: string,
+		time: string,
+		onProgress?: JobProgressListener,
+	): Promise<ProxyResult> {
 		const u = new URL(targetUrl);
 		let hit = await this.cache.lookup(targetUrl, time);
 		let cacheStatus: "HIT" | "MISS" = "HIT";
 
 		if (!hit) {
 			this.logger.info({ targetUrl, time }, "[CACHE MISS] enqueueing exact-url job");
-			await this.archiveJobClient.enqueueExactAndWait(targetUrl, time);
+			// Only forward onProgress when defined so the client receives a clean
+			// 2-arg call in the no-callback case (avoids leaking `undefined` into
+			// jest.toHaveBeenCalledWith assertions and matches the spec).
+			if (onProgress) {
+				await this.archiveJobClient.enqueueExactAndWait(targetUrl, time, onProgress);
+			} else {
+				await this.archiveJobClient.enqueueExactAndWait(targetUrl, time);
+			}
 			hit = await this.cache.lookup(targetUrl, time);
 			cacheStatus = "MISS";
 			if (!hit) {
@@ -70,19 +83,19 @@ export class ProxyService {
 
 		if (isHtml) {
 			const stripped = stripWaybackToolbar(raw.toString("utf-8"));
-			body = rewriteHtmlUrls(stripped, targetUrl, this.config.proxyBase, time);
+			body = rewriteHtmlUrls(stripped, targetUrl, time);
 			if (cacheStatus === "MISS") {
 				void this.maybeEnqueueDomainCrawl(u.hostname, time);
 			}
 		} else if (isCss) {
-			body = rewriteCssUrls(raw.toString("utf-8"), targetUrl, this.config.proxyBase, time);
+			body = rewriteCssUrls(raw.toString("utf-8"), targetUrl, time);
 		}
 
 		return {
 			contentType: hit.contentType,
 			archiveUrl: targetUrl,
 			originalUrl: targetUrl,
-			archiveTime: time,
+			archiveTime: hit.archiveTime ?? time,
 			body,
 			cache: cacheStatus,
 		};
@@ -107,7 +120,10 @@ export class ProxyService {
 			}
 
 			if (this.redis) {
-				const key = `${HOST_BUDGET_KEY_PREFIX}${host}`;
+				// Sibling namespace to the BullMQ prefix (separator "-" not ":") so
+				// bull-board's "<prefix>:*" queue-discovery scan doesn't surface this
+				// as a phantom queue.
+				const key = `${this.config.bullmqPrefix}-budget:crawl:${host}`;
 				const setRes = await this.redis.set(key, "1", "EX", HOST_BUDGET_TTL_S, "NX");
 				if (setRes !== "OK") {
 					this.logger.debug({ host }, "[crawl-skip] budget already consumed");
@@ -133,6 +149,52 @@ export class ProxyService {
 		}
 	}
 
+	/**
+	 * Explicit (admin-triggered) domain crawl. Unlike `maybeEnqueueDomainCrawl`,
+	 * this:
+	 *   - Throws status errors instead of swallowing them — the caller is an
+	 *     HTTP endpoint that needs a concrete response code.
+	 *   - Bypasses the per-host 24h Redis budget. The budget exists to throttle
+	 *     fire-and-forget side-effects of foreground requests; an explicit admin
+	 *     action shouldn't inherit that throttle.
+	 *   - STILL enforces the whitelist — that's a security boundary, not a rate-limit.
+	 *   - STILL respects `DOMAIN_CRAWL_ENABLED` as the kill switch.
+	 *
+	 * `opts.skipPreflight` — when true, skips the CDX page-count cap check. Useful
+	 * when archive.org is rejecting/timing-out CDX requests from your egress IP
+	 * but the downloader path still works. Trade-off: you lose the runaway-crawl
+	 * guard, so the admin must know the target host's size or risk a multi-hour
+	 * download. Always opt-in; never on by default.
+	 */
+	async triggerDomainCrawl(
+		host: string,
+		time: string,
+		opts: { skipPreflight?: boolean } = {},
+	): Promise<void> {
+		if (!this.config.domainCrawlEnabled) {
+			throw statusError("Domain crawl is disabled (DOMAIN_CRAWL_ENABLED=false)", 503);
+		}
+		if (!isHostWhitelisted(`https://${host}`, this.config.whitelistHosts)) {
+			throw statusError("Host not whitelisted", 403);
+		}
+		if (opts.skipPreflight) {
+			this.logger.warn(
+				{ host, time },
+				"[crawl] preflight SKIPPED by admin — runaway-crawl guard disabled for this request",
+			);
+		} else {
+			const pages = await this.cdxPageCount(host, time);
+			if (pages > this.config.crawlMaxCdxPages) {
+				throw statusError(
+					`Crawl too large: ${pages} CDX pages > ${this.config.crawlMaxCdxPages} cap`,
+					413,
+				);
+			}
+			this.logger.info({ host, time, pages }, "[crawl] explicit enqueue (preflight ok)");
+		}
+		await this.archiveJobClient.enqueueDomainCrawl(host, time);
+	}
+
 	private async cdxPageCount(host: string, time: string): Promise<number> {
 		// Widen to the calendar day of `time` so CDX counts captures across the
 		// day instead of the exact second (which virtually never matches and
@@ -142,10 +204,41 @@ export class ProxyService {
 		const u =
 			`https://web.archive.org/cdx/search/cdx?url=${encodeURIComponent(`${host}/*`)}` +
 			`&from=${from}&to=${to}&output=json&showNumPages=true`;
-		const r = await fetch(u, { signal: AbortSignal.timeout(CDX_TIMEOUT_MS) });
+		let r: Response;
+		try {
+			r = await fetch(u, { signal: AbortSignal.timeout(CDX_TIMEOUT_MS) });
+		} catch (e) {
+			// Node's fetch (undici) wraps the real failure in a generic
+			// `TypeError: fetch failed` whose `.cause` holds the actual error
+			// (DNS, ECONNREFUSED, TLS, AbortError on timeout, etc.). Surface it
+			// so the caller (and the JSON error body on POST /crawl) shows the
+			// reason, not just the wrapper.
+			throw new Error(`CDX preflight network error: ${describeFetchError(e)}`, {
+				cause: e,
+			});
+		}
 		if (!r.ok) throw new Error(`CDX preflight ${r.status}`);
 		const txt = (await r.text()).trim();
 		const n = Number.parseInt(txt, 10);
 		return Number.isFinite(n) ? n : 0;
 	}
+}
+
+/**
+ * Unwraps a fetch failure into a human-readable string. Handles undici's
+ * `TypeError: fetch failed` (which puts the real cause on `.cause`) plus
+ * AbortError (timeout) and plain Error fallbacks.
+ */
+function describeFetchError(e: unknown): string {
+	if (e instanceof Error && e.name === "TimeoutError") return "timed out";
+	const cause = (e as { cause?: unknown })?.cause;
+	if (cause instanceof Error) {
+		// Common system-error shapes from libc/undici. The `code` is the most
+		// useful single token (ENOTFOUND, ECONNREFUSED, EAI_AGAIN, ECONNRESET);
+		// the message adds the address/port when present.
+		const code = (cause as { code?: string }).code;
+		return code ? `${code} (${cause.message})` : cause.message;
+	}
+	if (e instanceof Error) return e.message;
+	return String(e);
 }

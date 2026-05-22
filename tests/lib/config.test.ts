@@ -30,11 +30,12 @@ describe("loadConfig", () => {
 		delete process.env.WORKER_RATE_LIMIT_PER_SEC;
 		delete process.env.DOWNLOADER_THREADS_COUNT;
 		delete process.env.CRAWL_MAX_CDX_PAGES;
-		delete process.env.OUTBOUND_PROXY_URLS;
-		delete process.env.OUTBOUND_PROXY_CHOOSER;
+		delete process.env.OUTBOUND_PROXY_URL;
 		delete process.env.OUTBOUND_PROXY_USERNAME;
 		delete process.env.OUTBOUND_PROXY_PASSWORD;
-		delete process.env.OUTBOUND_PROXY_COOLDOWN_SECONDS;
+		delete process.env.SNAPSHOT_WINDOW_DAYS;
+		delete process.env.ALLOW_LATER_FALLBACK;
+		delete process.env.ASSET_LATER_FALLBACK;
 
 		const config = loadConfig();
 
@@ -55,10 +56,88 @@ describe("loadConfig", () => {
 		expect(config.downloaderThreadsCount).toBe(3);
 		expect(config.crawlMaxCdxPages).toBe(50);
 		expect(config.outboundProxyUrls).toEqual([]);
-		expect(config.outboundProxyChooser).toBe("sequential");
 		expect(config.outboundProxyUsername).toBe("");
 		expect(config.outboundProxyPassword).toBe("");
-		expect(config.outboundProxyCooldownMs).toBe(60_000);
+		expect(config.snapshotWindowDays).toEqual([30, 365, 3650, 0]);
+		// Direct URLs default to strict at-or-before: the user typed a time
+		// and should see the page state at that time, not a drifted later one.
+		expect(config.allowLaterFallback).toBe(false);
+		// Assets default to bidirectional closest: sub-resources rarely line
+		// up at the page's exact requested timestamp, so the proxy mirrors
+		// web.archive.org's own "nearest snapshot" behavior for them.
+		expect(config.assetLaterFallback).toBe(true);
+	});
+
+	it("parses SNAPSHOT_WINDOW_DAYS CSV into number[]", () => {
+		process.env.SNAPSHOT_WINDOW_DAYS = "7,30,90,0";
+		expect(loadConfig().snapshotWindowDays).toEqual([7, 30, 90, 0]);
+	});
+
+	it("trims whitespace in SNAPSHOT_WINDOW_DAYS entries", () => {
+		process.env.SNAPSHOT_WINDOW_DAYS = " 7 , 30 , 90 ";
+		expect(loadConfig().snapshotWindowDays).toEqual([7, 30, 90]);
+	});
+
+	it("throws on non-numeric SNAPSHOT_WINDOW_DAYS entries", () => {
+		process.env.SNAPSHOT_WINDOW_DAYS = "30,abc,90";
+		expect(() => loadConfig()).toThrow(/SNAPSHOT_WINDOW_DAYS/);
+	});
+
+	it("throws on negative SNAPSHOT_WINDOW_DAYS entries", () => {
+		process.env.SNAPSHOT_WINDOW_DAYS = "30,-1,90";
+		expect(() => loadConfig()).toThrow(/SNAPSHOT_WINDOW_DAYS/);
+	});
+
+	it("throws on empty SNAPSHOT_WINDOW_DAYS", () => {
+		process.env.SNAPSHOT_WINDOW_DAYS = "";
+		expect(() => loadConfig()).toThrow(/SNAPSHOT_WINDOW_DAYS/);
+	});
+
+	it("treats ALLOW_LATER_FALLBACK=true (case-insensitive) as true — only opt-in value", () => {
+		process.env.ALLOW_LATER_FALLBACK = "true";
+		expect(loadConfig().allowLaterFallback).toBe(true);
+
+		process.env.ALLOW_LATER_FALLBACK = "TRUE";
+		expect(loadConfig().allowLaterFallback).toBe(true);
+
+		process.env.ALLOW_LATER_FALLBACK = "True";
+		expect(loadConfig().allowLaterFallback).toBe(true);
+	});
+
+	it("treats any ALLOW_LATER_FALLBACK value other than 'true' as false (default-off for direct URLs)", () => {
+		process.env.ALLOW_LATER_FALLBACK = "false";
+		expect(loadConfig().allowLaterFallback).toBe(false);
+
+		process.env.ALLOW_LATER_FALLBACK = "yes";
+		expect(loadConfig().allowLaterFallback).toBe(false);
+
+		process.env.ALLOW_LATER_FALLBACK = "1";
+		expect(loadConfig().allowLaterFallback).toBe(false);
+
+		process.env.ALLOW_LATER_FALLBACK = "";
+		expect(loadConfig().allowLaterFallback).toBe(false);
+	});
+
+	it("treats ASSET_LATER_FALLBACK=false (case-insensitive) as false — only opt-out value", () => {
+		process.env.ASSET_LATER_FALLBACK = "false";
+		expect(loadConfig().assetLaterFallback).toBe(false);
+
+		process.env.ASSET_LATER_FALLBACK = "FALSE";
+		expect(loadConfig().assetLaterFallback).toBe(false);
+
+		process.env.ASSET_LATER_FALLBACK = "False";
+		expect(loadConfig().assetLaterFallback).toBe(false);
+	});
+
+	it("treats any ASSET_LATER_FALLBACK value other than 'false' as true (default-on for assets)", () => {
+		process.env.ASSET_LATER_FALLBACK = "true";
+		expect(loadConfig().assetLaterFallback).toBe(true);
+
+		process.env.ASSET_LATER_FALLBACK = "yes";
+		expect(loadConfig().assetLaterFallback).toBe(true);
+
+		process.env.ASSET_LATER_FALLBACK = "";
+		expect(loadConfig().assetLaterFallback).toBe(true);
 	});
 
 	it("reads values from env vars", () => {
@@ -150,7 +229,7 @@ describe("loadConfig", () => {
 		expect(config.crawlMaxCdxPages).toBe(100);
 	});
 
-	it("reads a single outbound proxy URL from OUTBOUND_PROXY_URLS", () => {
+	it("reads outbound proxy env vars", () => {
 		process.env.OUTBOUND_PROXY_URLS = "http://proxymesh.example.com:31280";
 		process.env.OUTBOUND_PROXY_USERNAME = "user";
 		process.env.OUTBOUND_PROXY_PASSWORD = "secret";
@@ -160,67 +239,5 @@ describe("loadConfig", () => {
 		expect(config.outboundProxyUrls).toEqual(["http://proxymesh.example.com:31280"]);
 		expect(config.outboundProxyUsername).toBe("user");
 		expect(config.outboundProxyPassword).toBe("secret");
-	});
-
-	it("parses OUTBOUND_PROXY_URLS as a CSV, trimming whitespace and dropping empties", () => {
-		process.env.OUTBOUND_PROXY_URLS =
-			"http://a.example.com:31280, http://b.example.com:31280 ,,http://c.example.com:31280";
-
-		const config = loadConfig();
-
-		expect(config.outboundProxyUrls).toEqual([
-			"http://a.example.com:31280",
-			"http://b.example.com:31280",
-			"http://c.example.com:31280",
-		]);
-	});
-
-	it("defaults outboundProxyChooser to 'sequential' when unset", () => {
-		delete process.env.OUTBOUND_PROXY_CHOOSER;
-		expect(loadConfig().outboundProxyChooser).toBe("sequential");
-	});
-
-	it("parses OUTBOUND_PROXY_CHOOSER case-insensitively", () => {
-		process.env.OUTBOUND_PROXY_CHOOSER = "Sequential";
-		expect(loadConfig().outboundProxyChooser).toBe("sequential");
-
-		process.env.OUTBOUND_PROXY_CHOOSER = "RANDOM";
-		expect(loadConfig().outboundProxyChooser).toBe("random");
-
-		process.env.OUTBOUND_PROXY_CHOOSER = "random";
-		expect(loadConfig().outboundProxyChooser).toBe("random");
-	});
-
-	it("throws on unknown OUTBOUND_PROXY_CHOOSER value", () => {
-		process.env.OUTBOUND_PROXY_CHOOSER = "roundrobin";
-		expect(() => loadConfig()).toThrow(/OUTBOUND_PROXY_CHOOSER must be "sequential" or "random"/);
-	});
-
-	it("defaults outboundProxyCooldownMs to 60_000 when unset", () => {
-		delete process.env.OUTBOUND_PROXY_COOLDOWN_SECONDS;
-		expect(loadConfig().outboundProxyCooldownMs).toBe(60_000);
-	});
-
-	it("parses OUTBOUND_PROXY_COOLDOWN_SECONDS as seconds and converts to ms", () => {
-		process.env.OUTBOUND_PROXY_COOLDOWN_SECONDS = "30";
-		expect(loadConfig().outboundProxyCooldownMs).toBe(30_000);
-
-		process.env.OUTBOUND_PROXY_COOLDOWN_SECONDS = "120";
-		expect(loadConfig().outboundProxyCooldownMs).toBe(120_000);
-	});
-
-	it("accepts 0 as a valid OUTBOUND_PROXY_COOLDOWN_SECONDS (disables cooldown)", () => {
-		process.env.OUTBOUND_PROXY_COOLDOWN_SECONDS = "0";
-		expect(loadConfig().outboundProxyCooldownMs).toBe(0);
-	});
-
-	it("throws on negative OUTBOUND_PROXY_COOLDOWN_SECONDS", () => {
-		process.env.OUTBOUND_PROXY_COOLDOWN_SECONDS = "-5";
-		expect(() => loadConfig()).toThrow(/non-negative/);
-	});
-
-	it("throws on non-numeric OUTBOUND_PROXY_COOLDOWN_SECONDS", () => {
-		process.env.OUTBOUND_PROXY_COOLDOWN_SECONDS = "abc";
-		expect(() => loadConfig()).toThrow(/non-negative/);
 	});
 });

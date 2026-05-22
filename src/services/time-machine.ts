@@ -3,8 +3,9 @@ import type pino from "pino";
 import { type WebSocket, WebSocketServer } from "ws";
 import { errorHasStatus } from "../lib/errors";
 import type { ShutdownController } from "../lib/shutdown";
-import { sanitizeTimeParam, unwrapNestedProxyUrl } from "../lib/url-rewriter";
+import { parseWaybackPath, sanitizeTimeParam, unwrapNestedProxyUrl } from "../lib/url-rewriter";
 import type { Config } from "../models/config";
+import type { JobProgress } from "../models/job-progress";
 import { isWsRequest, type WsRequest, type WsResponse } from "../models/websocket";
 import type { CacheService } from "./cache";
 import type { ProxyService } from "./proxy";
@@ -27,6 +28,9 @@ export class TimeMachineService {
 		private readonly shutdown: ShutdownController,
 		private readonly logger: pino.Logger,
 		private readonly onStop?: () => Promise<void>,
+		/** Optional status provider for GET /status. When omitted the endpoint
+		 * is unavailable (404). Wired by Dependencies.getStatus in production. */
+		private readonly getStatus?: () => Promise<unknown>,
 	) {}
 
 	start(): Promise<void> {
@@ -77,6 +81,49 @@ export class TimeMachineService {
 		await this.onStop?.();
 	}
 
+	private async handleCrawlEnqueue(
+		req: IncomingMessage,
+		res: ServerResponse,
+		start: number,
+	): Promise<void> {
+		const u = new URL(req.url ?? "/", "http://localhost");
+		const host = u.searchParams.get("host");
+		let time: string;
+		try {
+			time = sanitizeTimeParam(u.searchParams.get("time"), this.config.defaultTime);
+		} catch (e) {
+			const msg = e instanceof Error ? e.message : "Invalid time parameter";
+			res.writeHead(400).end(msg);
+			this.logRequest(req, 400, start);
+			return;
+		}
+		// Hostname charset: letters, digits, dots, hyphens. Reject everything else
+		// up-front so we don't smuggle path/query/auth segments into the host slot
+		// (which would later land in the cache directory layout and CDX URL).
+		if (!host || !/^[a-z0-9](?:[a-z0-9.-]{0,253}[a-z0-9])?$/i.test(host)) {
+			res.writeHead(400).end("Invalid or missing host");
+			this.logRequest(req, 400, start);
+			return;
+		}
+		// Opt-in: skip the CDX size preflight. Only "true" (case-insensitive)
+		// counts as opt-in — typos like "yes"/"1" must NOT silently disable the
+		// safety net.
+		const skipPreflight = (u.searchParams.get("skip_preflight") ?? "").toLowerCase() === "true";
+		try {
+			await this.proxy.triggerDomainCrawl(host, time, { skipPreflight });
+			res.setHeader("Content-Type", "application/json");
+			res.writeHead(202).end(JSON.stringify({ host, time, preflightSkipped: skipPreflight }));
+			this.logRequest(req, 202, start);
+		} catch (e) {
+			const status = errorHasStatus(e) ? e.status : 500;
+			const message = e instanceof Error ? e.message : "crawl enqueue failed";
+			if (status >= 500) this.logger.error({ error: e }, "[TimeMachine] crawl enqueue failed");
+			res.setHeader("Content-Type", "application/json");
+			res.writeHead(status).end(JSON.stringify({ error: message }));
+			this.logRequest(req, status, start);
+		}
+	}
+
 	private setCorsHeaders(req: IncomingMessage, res: ServerResponse): void {
 		const origin = req.headers.origin;
 		const allowed = this.config.allowedOrigins;
@@ -84,7 +131,7 @@ export class TimeMachineService {
 			res.setHeader("Access-Control-Allow-Origin", allowed.includes("*") ? "*" : origin);
 		}
 		res.setHeader("Access-Control-Allow-Methods", "GET, DELETE, OPTIONS");
-		res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+		res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, Accept");
 		res.setHeader(
 			"Access-Control-Expose-Headers",
 			"X-Archive-Url, X-Original-Url, X-Archive-Time, X-Cache",
@@ -104,6 +151,34 @@ export class TimeMachineService {
 				durationMs: Date.now() - start,
 			});
 			return;
+		}
+
+		if (req.method === "GET") {
+			const { pathname } = new URL(req.url ?? "/", "http://localhost");
+			if (pathname === "/status") {
+				if (!this.getStatus) {
+					res.writeHead(404).end("Status endpoint not available");
+					this.logRequest(req, 404, start);
+					return;
+				}
+				try {
+					const status = await this.getStatus();
+					res.setHeader("Content-Type", "application/json");
+					res.writeHead(200).end(JSON.stringify(status));
+					this.logRequest(req, 200, start);
+				} catch (e) {
+					this.logger.error({ error: e }, "[TimeMachine] status probe failed");
+					res.setHeader("Content-Type", "application/json");
+					res
+						.writeHead(500)
+						.end(
+							JSON.stringify({ error: e instanceof Error ? e.message : "status probe failed" }),
+						);
+					this.logRequest(req, 500, start);
+				}
+				return;
+			}
+			// Other GETs fall through to the existing /web/{ts}/{url} + ?url= flow.
 		}
 
 		if (req.method === "DELETE") {
@@ -129,16 +204,52 @@ export class TimeMachineService {
 			return;
 		}
 
-		const reqUrl = new URL(req.url ?? "/", "http://localhost");
-		let targetUrl = reqUrl.searchParams.get("url");
-		let time: string;
-		try {
-			time = sanitizeTimeParam(reqUrl.searchParams.get("time"), this.config.defaultTime);
-		} catch (e) {
-			const msg = e instanceof Error ? e.message : "Invalid time parameter";
-			res.writeHead(400).end(msg);
-			this.logRequest(req, 400, start);
+		if (req.method === "POST") {
+			// Admin-triggered domain crawl. Shares the cache-clear token because
+			// both are operator endpoints with the same threat model; if you need
+			// finer-grained auth, split CACHE_CLEAR_TOKEN into two env vars.
+			const { pathname } = new URL(req.url ?? "/", `http://localhost`);
+			if (pathname === "/crawl") {
+				if (!this.config.cacheClearToken) {
+					res.writeHead(403).end("Crawl management not enabled");
+					this.logRequest(req, 403, start);
+					return;
+				}
+				const auth = req.headers.authorization ?? "";
+				if (auth !== `Bearer ${this.config.cacheClearToken}`) {
+					res.writeHead(401).end("Unauthorized");
+					this.logRequest(req, 401, start);
+					return;
+				}
+				await this.handleCrawlEnqueue(req, res, start);
+				return;
+			}
+			res.writeHead(404).end("Not found");
+			this.logRequest(req, 404, start);
 			return;
+		}
+
+		let targetUrl: string | null;
+		let time: string;
+
+		// Path-based input: /web/{14-digit-ts}{mod?}_/{url}. Parse against the
+		// raw req.url so the target URL's own query string is preserved (a
+		// `new URL()` parse would split on the first `?` and steal it).
+		const pathParsed = parseWaybackPath(req.url ?? "/");
+		if (pathParsed) {
+			targetUrl = pathParsed.url;
+			time = pathParsed.time;
+		} else {
+			const reqUrl = new URL(req.url ?? "/", "http://localhost");
+			targetUrl = reqUrl.searchParams.get("url");
+			try {
+				time = sanitizeTimeParam(reqUrl.searchParams.get("time"), this.config.defaultTime);
+			} catch (e) {
+				const msg = e instanceof Error ? e.message : "Invalid time parameter";
+				res.writeHead(400).end(msg);
+				this.logRequest(req, 400, start);
+				return;
+			}
 		}
 
 		if (targetUrl) {
@@ -170,6 +281,15 @@ export class TimeMachineService {
 			return;
 		}
 
+		// Negotiate SSE on Accept: text/event-stream. When the client opts in,
+		// progress events are streamed before a final `result`/`error` event
+		// and the connection closes. Otherwise a single buffered response is
+		// returned as before.
+		if (this.wantsEventStream(req)) {
+			await this.sseHandler(req, res, targetUrl, time, start);
+			return;
+		}
+
 		try {
 			const result = await this.proxy.fetch(targetUrl, time);
 			res.setHeader("Content-Type", result.contentType);
@@ -189,6 +309,67 @@ export class TimeMachineService {
 				this.logger.error({ error: e }, "[TimeMachine] Upstream request failed");
 				res.writeHead(500).end("TimeMachine error: upstream request failed");
 			}
+			this.logRequest(req, status, start);
+		}
+	}
+
+	private wantsEventStream(req: IncomingMessage): boolean {
+		const accept = req.headers.accept;
+		if (typeof accept !== "string") return false;
+		return accept.split(",").some((part) => part.trim().startsWith("text/event-stream"));
+	}
+
+	private async sseHandler(
+		req: IncomingMessage,
+		res: ServerResponse,
+		targetUrl: string,
+		time: string,
+		start: number,
+	): Promise<void> {
+		// Headers must flush before any data so EventSource consumers see the
+		// stream begin immediately. Once flushed we can't change status, so
+		// errors are reported as `event: error` frames rather than HTTP codes.
+		res.writeHead(200, {
+			"Content-Type": "text/event-stream",
+			"Cache-Control": "no-cache, no-transform",
+			Connection: "keep-alive",
+			"X-Accel-Buffering": "no",
+		});
+
+		const writeEvent = (event: string, data: unknown): void => {
+			if (res.writableEnded) return;
+			res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+		};
+
+		// Forward progress events from the proxy/worker to the client. Body is
+		// excluded — final result frame carries the body.
+		const onProgress = (p: JobProgress): void => writeEvent("progress", p);
+
+		try {
+			const result = await this.proxy.fetch(targetUrl, time, onProgress);
+			const bodyStr =
+				typeof result.body === "string" ? result.body : result.body.toString("base64");
+			writeEvent("result", {
+				body: bodyStr,
+				bodyEncoding: typeof result.body === "string" ? "utf8" : "base64",
+				contentType: result.contentType,
+				archiveUrl: result.archiveUrl,
+				originalUrl: result.originalUrl,
+				archiveTime: result.archiveTime,
+				cache: result.cache,
+			});
+			res.end();
+			this.logRequest(req, 200, start);
+		} catch (e) {
+			const status = errorHasStatus(e) ? e.status : 500;
+			if (status >= 500) {
+				this.logger.error({ error: e }, "[TimeMachine SSE] Upstream request failed");
+			}
+			writeEvent("error", {
+				status,
+				message: e instanceof Error ? e.message : "Upstream request failed",
+			});
+			res.end();
 			this.logRequest(req, status, start);
 		}
 	}
@@ -278,8 +459,19 @@ export class TimeMachineService {
 				return;
 			}
 
+			const onProgress = (p: JobProgress): void => {
+				if (ws.readyState !== ws.OPEN) return;
+				ws.send(
+					JSON.stringify({
+						type: "progress",
+						id: msg.id,
+						progress: p,
+					} as WsResponse),
+				);
+			};
+
 			this.proxy
-				.fetch(targetUrl, time)
+				.fetch(targetUrl, time, onProgress)
 				.then((result) => {
 					if (ws.readyState !== ws.OPEN) return;
 					const bodyStr =

@@ -135,43 +135,57 @@ describe("installOutboundProxy", () => {
 			expect(infoSpy.mock.calls.some((c) => c[1] === "[outbound-proxy] installed")).toBe(true);
 		});
 
-		it("throws when EVERY probe fails (transport error)", async () => {
+		it("installs rotator with every agent in cooldown when EVERY probe fails (transport error)", async () => {
 			mockRequestImpl(async () => {
 				throw new Error("ECONNREFUSED");
 			});
 			const { logger, errorSpy } = makeLogger();
-			await expect(
-				installOutboundProxy(
-					makeConfig({
-						outboundProxyUrls: ["http://a.example.com:31280", "http://b.example.com:31280"],
-					}),
-					logger,
-				),
-			).rejects.toThrow(/all 2 configured proxies failed connectivity probe.*ECONNREFUSED/);
-			expect(setGlobalDispatcherMock).not.toHaveBeenCalled();
+			await installOutboundProxy(
+				makeConfig({
+					outboundProxyUrls: ["http://a.example.com:31280", "http://b.example.com:31280"],
+				}),
+				logger,
+			);
+			expect(setGlobalDispatcherMock).toHaveBeenCalledTimes(1);
+			expect(setGlobalDispatcherMock.mock.calls[0][0]).toBeInstanceOf(RotatingProxyDispatcher);
 			// Each failed proxy logs an error
 			expect(
 				errorSpy.mock.calls.filter((c) => c[1] === "[outbound-proxy] startup probe failed").length,
 			).toBe(2);
+			// The "all probes failed → install anyway" warning fires once.
+			expect(
+				errorSpy.mock.calls.filter((c) =>
+					typeof c[1] === "string" && c[1].startsWith("[outbound-proxy] all startup probes failed"),
+				).length,
+			).toBe(1);
+			// Both agents seeded in cooldown.
+			expect(
+				errorSpy.mock.calls.filter(
+					(c) => c[1] === "[outbound-proxy] proxy taken out of rotation",
+				).length,
+			).toBe(2);
 		});
 
-		it("throws when EVERY probe fails (proxy 407 auth)", async () => {
+		it("installs rotator with every agent in cooldown when EVERY probe fails (proxy 407 auth)", async () => {
 			mockRequestImpl(async () => ({
 				statusCode: 407,
 				body: { dump: jest.fn().mockResolvedValue(undefined) },
 			}));
-			const { logger } = makeLogger();
-			await expect(
-				installOutboundProxy(
-					makeConfig({
-						outboundProxyUrls: ["http://a.example.com:31280"],
-						outboundProxyUsername: "alice",
-						outboundProxyPassword: "wrong",
-					}),
-					logger,
-				),
-			).rejects.toThrow(/407.*auth failed/);
-			expect(setGlobalDispatcherMock).not.toHaveBeenCalled();
+			const { logger, errorSpy } = makeLogger();
+			await installOutboundProxy(
+				makeConfig({
+					outboundProxyUrls: ["http://a.example.com:31280"],
+					outboundProxyUsername: "alice",
+					outboundProxyPassword: "wrong",
+				}),
+				logger,
+			);
+			expect(setGlobalDispatcherMock).toHaveBeenCalledTimes(1);
+			expect(
+				errorSpy.mock.calls.filter((c) =>
+					typeof c[1] === "string" && c[1].startsWith("[outbound-proxy] all startup probes failed"),
+				).length,
+			).toBe(1);
 		});
 
 		it("installs when some probes succeed; failed agents are seeded in cooldown", async () => {
@@ -348,6 +362,47 @@ describe("RotatingProxyDispatcher", () => {
 					logger: silentLogger(),
 				}),
 		).toThrow(/at least one agent/);
+	});
+
+	it("getStatus() reports every agent as healthy with 0 cooldown when freshly constructed", () => {
+		const built = makeBuilt(2);
+		// biome-ignore lint/suspicious/noExplicitAny: test stubs satisfy Dispatcher shape
+		const d = new RotatingProxyDispatcher(built as any, "sequential", {
+			baseCooldownMs: 1000,
+			logger: silentLogger(),
+		});
+		const status = d.getStatus();
+		expect(status).toEqual([
+			{ host: "proxy0.example.com:31280", healthy: true, cooldownRemainingMs: 0 },
+			{ host: "proxy1.example.com:31280", healthy: true, cooldownRemainingMs: 0 },
+		]);
+	});
+
+	it("getStatus() reports a failed agent as unhealthy with nonzero cooldownRemainingMs", () => {
+		// markFailedExternally is the same code path that the dispatch-failure
+		// branch uses, so testing through it gives us the production state
+		// machine without needing to simulate a full dispatch.
+		const built = makeBuilt(2);
+		// biome-ignore lint/suspicious/noExplicitAny: test stubs satisfy Dispatcher shape
+		const d = new RotatingProxyDispatcher(built as any, "sequential", {
+			baseCooldownMs: 60_000,
+			logger: silentLogger(),
+		});
+		d.markFailedExternally("proxy0.example.com:31280", "test");
+		const status = d.getStatus();
+		expect(status[0]).toMatchObject({
+			host: "proxy0.example.com:31280",
+			healthy: false,
+		});
+		// Cooldown is the base value; allow a small drift for test execution time.
+		expect(status[0].cooldownRemainingMs).toBeGreaterThan(50_000);
+		expect(status[0].cooldownRemainingMs).toBeLessThanOrEqual(60_000);
+		// Second agent is untouched — still healthy.
+		expect(status[1]).toEqual({
+			host: "proxy1.example.com:31280",
+			healthy: true,
+			cooldownRemainingMs: 0,
+		});
 	});
 
 	it("sequential mode visits each healthy agent in order then wraps", () => {

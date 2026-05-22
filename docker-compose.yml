@@ -23,5 +23,19 @@ services:
       timeout: 3s
       retries: 5
 
+  bullboard:
+    image: venatum/bull-board:latest
+    ports:
+      - "3008:3000"
+    environment:
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - BULL_VERSION=BULLMQ
+      # Must match BULLMQ_PREFIX in the timemachine service (default "tm").
+      # Default is "bull" — without this override no queues appear.
+      - BULL_PREFIX=tm
+    depends_on:
+      - redis
+
 volumes:
   timemachine-cache:

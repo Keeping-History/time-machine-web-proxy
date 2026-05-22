@@ -1,6 +1,7 @@
+import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
 import type { IncomingMessage, ServerResponse } from "node:http";
-import { extname, join, resolve, sep } from "node:path";
+import { dirname, extname, join, resolve, sep } from "node:path";
 import { lookup as mimeLookup } from "mime-types";
 import type pino from "pino";
 import type { Config } from "../models/config";
@@ -10,6 +11,9 @@ const ROOT_VERSION = "v2";
 export interface CacheHit {
 	absPath: string;
 	contentType: string;
+	// Resolved snapshot timestamp from the worker's CDX search, if a sidecar
+	// was written. Falls back to undefined for legacy cache files (pre-sidecar).
+	archiveTime?: string;
 }
 
 export class CacheService {
@@ -47,7 +51,8 @@ export class CacheService {
 		try {
 			await fs.access(primaryAbs);
 			const contentType = mimeLookup(extname(primaryAbs)) || "application/octet-stream";
-			return { absPath: primaryAbs, contentType };
+			const archiveTime = await this.readResolvedTime(time, u.hostname);
+			return { absPath: primaryAbs, contentType, archiveTime };
 		} catch {
 			/* fall through to directory-index fallback */
 		}
@@ -61,12 +66,59 @@ export class CacheService {
 			}
 			try {
 				await fs.access(fallbackAbs);
-				return { absPath: fallbackAbs, contentType: "text/html" };
+				const archiveTime = await this.readResolvedTime(time, u.hostname);
+				return { absPath: fallbackAbs, contentType: "text/html", archiveTime };
 			} catch {
-				return null;
+				/* fall through to sentinel check */
 			}
 		}
-		return null;
+		// Negative-cache sentinel: worker writes one when CDX confirms 404.
+		// Lookup throws 404 instead of returning null so the proxy stops re-queuing.
+		const sentinel = this.sentinelPath(time, url);
+		try {
+			await fs.access(sentinel);
+		} catch {
+			return null;
+		}
+		throw Object.assign(new Error("Not in archive"), { status: 404 });
+	}
+
+	async writeResolvedTimeSidecar(time: string, url: string, resolvedTime: string): Promise<void> {
+		const u = new URL(url);
+		const root = this.cacheDirForJob(time, u.hostname);
+		await fs.mkdir(root, { recursive: true });
+		await fs.writeFile(join(root, ".resolved-time"), resolvedTime);
+	}
+
+	private async readResolvedTime(time: string, hostname: string): Promise<string | undefined> {
+		const root = this.cacheDirForJob(time, hostname);
+		try {
+			const raw = await fs.readFile(join(root, ".resolved-time"), "utf-8");
+			const trimmed = raw.trim();
+			return /^\d{14}$/.test(trimmed) ? trimmed : undefined;
+		} catch {
+			return undefined;
+		}
+	}
+
+	async writeNotFoundSentinel(time: string, url: string): Promise<void> {
+		const abs = this.sentinelPath(time, url);
+		await fs.mkdir(dirname(abs), { recursive: true });
+		await fs.writeFile(abs, "");
+	}
+
+	private sentinelPath(time: string, url: string): string {
+		const u = new URL(url);
+		const root = this.cacheDirForJob(time, u.hostname);
+		const key = createHash("sha256")
+			.update(`${u.protocol}//${u.host}${u.pathname}${u.search}`)
+			.digest("hex")
+			.slice(0, 16);
+		const abs = resolve(root, ".notfound", key);
+		if (!abs.startsWith(root + sep)) {
+			throw Object.assign(new Error("Sentinel path traversal rejected"), { status: 400 });
+		}
+		return abs;
 	}
 
 	/**

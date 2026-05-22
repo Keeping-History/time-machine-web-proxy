@@ -37,6 +37,8 @@ const baseConfig = {
 	proxyPrefix: "",
 	whitelistHosts: "*",
 	crawlMaxCdxPages: 50,
+	bullmqPrefix: "tm",
+	domainCrawlEnabled: true,
 } as unknown as Config;
 
 const makeCache = (lookupImpl?: jest.Mock): jest.Mocked<CacheService> =>
@@ -88,8 +90,10 @@ describe("ProxyService.fetch — cache HIT", () => {
 		expect(result.contentType).toBe("text/html");
 		expect(client.enqueueExactAndWait).not.toHaveBeenCalled();
 		expect(client.enqueueDomainCrawl).not.toHaveBeenCalled();
-		// rewriteArchiveLinks turns /web/.../http://... into proxyBase/?url=...
-		expect(String(result.body)).toContain("http://localhost:8080/?url=");
+		// rewriteHtmlUrls emits /web/<ts>/<originalUrl> — the proxy host must
+		// NOT appear in rewritten attribute values (output is path-based).
+		expect(String(result.body)).toContain("/web/20200101000000/http://example.com/x");
+		expect(String(result.body)).not.toMatch(/href="https?:\/\//);
 	});
 
 	it("returns CSS with rewriteCssUrls applied; no job enqueued", async () => {
@@ -103,7 +107,29 @@ describe("ProxyService.fetch — cache HIT", () => {
 		expect(result.cache).toBe("HIT");
 		expect(result.contentType).toBe("text/css");
 		expect(client.enqueueExactAndWait).not.toHaveBeenCalled();
-		expect(String(result.body)).toContain("http://localhost:8080/?url=");
+		expect(String(result.body)).toContain("/web/20200101000000/http://example.com/bg.png");
+	});
+
+	it("surfaces hit.archiveTime via result.archiveTime when sidecar exists", async () => {
+		const cache = makeCache(
+			jest.fn().mockResolvedValue({ ...htmlHit, archiveTime: "20010822231227" }),
+		);
+		const client = makeClient();
+		mockedReadFile.mockResolvedValue(Buffer.from(HTML_BODY));
+		const svc = new ProxyService(cache, client, logger, baseConfig);
+
+		const result = await svc.fetch(TARGET_HTML_URL, TIME);
+		expect(result.archiveTime).toBe("20010822231227");
+	});
+
+	it("falls back to requested time when hit.archiveTime is undefined (legacy file)", async () => {
+		const cache = makeCache(jest.fn().mockResolvedValue(htmlHit));
+		const client = makeClient();
+		mockedReadFile.mockResolvedValue(Buffer.from(HTML_BODY));
+		const svc = new ProxyService(cache, client, logger, baseConfig);
+
+		const result = await svc.fetch(TARGET_HTML_URL, TIME);
+		expect(result.archiveTime).toBe(TIME);
 	});
 
 	it("returns binary body as a raw Buffer (no rewrite)", async () => {
@@ -143,7 +169,8 @@ describe("ProxyService.fetch — cache MISS", () => {
 		expect(result.cache).toBe("MISS");
 		expect(client.enqueueExactAndWait).toHaveBeenCalledWith(TARGET_HTML_URL, TIME);
 		expect(lookup).toHaveBeenCalledTimes(2);
-		expect(String(result.body)).toContain("http://localhost:8080/?url=");
+		expect(String(result.body)).toContain("/web/20200101000000/http://example.com/x");
+		expect(String(result.body)).not.toMatch(/href="https?:\/\//);
 	});
 
 	it("throws Error{status:502} when cache is still empty after job completes", async () => {
@@ -154,6 +181,41 @@ describe("ProxyService.fetch — cache MISS", () => {
 
 		await expect(svc.fetch(TARGET_HTML_URL, TIME)).rejects.toMatchObject({ status: 502 });
 		expect(client.enqueueExactAndWait).toHaveBeenCalledTimes(1);
+	});
+
+	it("propagates {status:404} from cache.lookup after job completes (sentinel-driven)", async () => {
+		const lookup = jest
+			.fn<Promise<CacheHit | null>, [string, string]>()
+			.mockResolvedValueOnce(null)
+			.mockRejectedValueOnce(Object.assign(new Error("Not in archive"), { status: 404 }));
+		const cache = makeCache(lookup);
+		const client = makeClient();
+		const svc = new ProxyService(cache, client, logger, baseConfig);
+
+		await expect(svc.fetch(TARGET_HTML_URL, TIME)).rejects.toMatchObject({ status: 404 });
+		expect(client.enqueueExactAndWait).toHaveBeenCalledTimes(1);
+	});
+
+	it("propagates {status:404} from the FIRST cache.lookup (sentinel already present)", async () => {
+		// A previous request established the sentinel; this request short-circuits
+		// at the first lookup without ever enqueueing.
+		const cache = makeCache(
+			jest.fn().mockRejectedValue(Object.assign(new Error("Not in archive"), { status: 404 })),
+		);
+		const client = makeClient();
+		const svc = new ProxyService(cache, client, logger, baseConfig);
+
+		await expect(svc.fetch(TARGET_HTML_URL, TIME)).rejects.toMatchObject({ status: 404 });
+		expect(client.enqueueExactAndWait).not.toHaveBeenCalled();
+	});
+
+	it("still throws 502 when lookup returns null (no sentinel) after job completes", async () => {
+		const lookup = jest.fn().mockResolvedValue(null);
+		const cache = makeCache(lookup);
+		const client = makeClient();
+		const svc = new ProxyService(cache, client, logger, baseConfig);
+
+		await expect(svc.fetch(TARGET_HTML_URL, TIME)).rejects.toMatchObject({ status: 502 });
 	});
 
 	it("propagates the job rejection when enqueueExactAndWait rejects", async () => {
@@ -195,7 +257,7 @@ describe("ProxyService.fetch — domain crawl fire-and-forget", () => {
 		await new Promise((r) => setImmediate(r));
 
 		expect(client.enqueueDomainCrawl).toHaveBeenCalledWith("example.com", TIME);
-		expect(redis.set).toHaveBeenCalledWith("tm:crawl:budget:example.com", "1", "EX", 86_400, "NX");
+		expect(redis.set).toHaveBeenCalledWith("tm-budget:crawl:example.com", "1", "EX", 86_400, "NX");
 	});
 
 	it("does NOT fire crawl on cache HIT", async () => {
@@ -385,5 +447,174 @@ describe("ProxyService.fetch — domain crawl fire-and-forget", () => {
 		await new Promise((r) => setImmediate(r));
 
 		expect(client.enqueueDomainCrawl).toHaveBeenCalledWith("example.com", TIME);
+	});
+});
+
+// --- Explicit (admin-triggered) domain crawl --------------------------------
+
+describe("ProxyService.triggerDomainCrawl — explicit admin enqueue", () => {
+	const cdxOk = (count = 10) =>
+		Promise.resolve({ ok: true, text: () => Promise.resolve(String(count)) });
+
+	it("enqueues a crawl when whitelist passes and CDX page count is within cap", async () => {
+		// Happy path. Unlike the fire-and-forget side-effect, this MUST surface
+		// the success path to the caller — no swallowed errors.
+		const cache = makeCache();
+		const client = makeClient();
+		mockedFetch.mockReturnValue(cdxOk(10));
+		const svc = new ProxyService(cache, client, logger, {
+			...baseConfig,
+			whitelistHosts: "example.com",
+		});
+
+		await expect(svc.triggerDomainCrawl("example.com", TIME)).resolves.toBeUndefined();
+		expect(client.enqueueDomainCrawl).toHaveBeenCalledWith("example.com", TIME);
+	});
+
+	it("throws {status:503} when DOMAIN_CRAWL_ENABLED is false (kill switch honored)", async () => {
+		const cache = makeCache();
+		const client = makeClient();
+		const svc = new ProxyService(cache, client, logger, {
+			...baseConfig,
+			domainCrawlEnabled: false,
+		});
+
+		await expect(svc.triggerDomainCrawl("example.com", TIME)).rejects.toMatchObject({
+			status: 503,
+		});
+		// MUST not touch CDX or the client when the kill switch is off.
+		expect(mockedFetch).not.toHaveBeenCalled();
+		expect(client.enqueueDomainCrawl).not.toHaveBeenCalled();
+	});
+
+	it("throws {status:403} when host is not in WHITELIST_HOSTS", async () => {
+		const cache = makeCache();
+		const client = makeClient();
+		const svc = new ProxyService(cache, client, logger, {
+			...baseConfig,
+			whitelistHosts: "other.com",
+		});
+
+		await expect(svc.triggerDomainCrawl("example.com", TIME)).rejects.toMatchObject({
+			status: 403,
+		});
+		expect(client.enqueueDomainCrawl).not.toHaveBeenCalled();
+	});
+
+	it("throws {status:413} when CDX page count exceeds crawlMaxCdxPages", async () => {
+		// Safety net: an admin asking for an oversize crawl gets a clear 413,
+		// not a silent runaway job.
+		const cache = makeCache();
+		const client = makeClient();
+		mockedFetch.mockReturnValue(cdxOk(75));
+		const svc = new ProxyService(cache, client, logger, {
+			...baseConfig,
+			whitelistHosts: "example.com",
+			crawlMaxCdxPages: 50,
+		});
+
+		await expect(svc.triggerDomainCrawl("example.com", TIME)).rejects.toMatchObject({
+			status: 413,
+		});
+		expect(client.enqueueDomainCrawl).not.toHaveBeenCalled();
+	});
+
+	it("surfaces the underlying network cause when CDX preflight throws (no generic 'fetch failed')", async () => {
+		// undici masks the real failure in a `TypeError: fetch failed` whose
+		// `.cause` is the actual SystemError (ENOTFOUND, ECONNREFUSED, …). The
+		// describeFetchError helper unwraps it so the operator sees what
+		// actually broke instead of a useless wrapper message.
+		const cause = Object.assign(new Error("getaddrinfo ENOTFOUND web.archive.org"), {
+			code: "ENOTFOUND",
+		});
+		const wrapped = Object.assign(new TypeError("fetch failed"), { cause });
+		mockedFetch.mockRejectedValue(wrapped);
+		const cache = makeCache();
+		const client = makeClient();
+		const svc = new ProxyService(cache, client, logger, {
+			...baseConfig,
+			whitelistHosts: "example.com",
+		});
+
+		await expect(svc.triggerDomainCrawl("example.com", TIME)).rejects.toThrow(/ENOTFOUND/);
+		await expect(svc.triggerDomainCrawl("example.com", TIME)).rejects.toThrow(
+			/CDX preflight network error/,
+		);
+		// And the cause is preserved on the thrown error for upstream loggers.
+		await expect(svc.triggerDomainCrawl("example.com", TIME)).rejects.toMatchObject({
+			cause: wrapped,
+		});
+	});
+
+	it("skipPreflight:true bypasses CDX size check and enqueues without calling fetch", async () => {
+		// Escape hatch for when archive.org's CDX endpoint is refusing our IP
+		// but the downloader path still works. Admin opts in explicitly via the
+		// HTTP query param; we must NOT touch fetch at all here, so the
+		// preflight-induced ECONNREFUSED can't bubble up.
+		const cache = makeCache();
+		const client = makeClient();
+		mockedFetch.mockImplementation(() => {
+			throw new Error("fetch must not be called when skipPreflight is true");
+		});
+		const svc = new ProxyService(cache, client, logger, {
+			...baseConfig,
+			whitelistHosts: "example.com",
+		});
+
+		await svc.triggerDomainCrawl("example.com", TIME, { skipPreflight: true });
+
+		expect(mockedFetch).not.toHaveBeenCalled();
+		expect(client.enqueueDomainCrawl).toHaveBeenCalledWith("example.com", TIME);
+	});
+
+	it("skipPreflight:true still enforces the whitelist (security boundary, not a rate-limit)", async () => {
+		// Even with the size-cap bypass, an admin can't crawl arbitrary hosts.
+		const cache = makeCache();
+		const client = makeClient();
+		const svc = new ProxyService(cache, client, logger, {
+			...baseConfig,
+			whitelistHosts: "other.com",
+		});
+
+		await expect(
+			svc.triggerDomainCrawl("example.com", TIME, { skipPreflight: true }),
+		).rejects.toMatchObject({ status: 403 });
+		expect(client.enqueueDomainCrawl).not.toHaveBeenCalled();
+	});
+
+	it("skipPreflight:true still respects the DOMAIN_CRAWL_ENABLED kill switch", async () => {
+		const cache = makeCache();
+		const client = makeClient();
+		const svc = new ProxyService(cache, client, logger, {
+			...baseConfig,
+			domainCrawlEnabled: false,
+		});
+
+		await expect(
+			svc.triggerDomainCrawl("example.com", TIME, { skipPreflight: true }),
+		).rejects.toMatchObject({ status: 503 });
+		expect(client.enqueueDomainCrawl).not.toHaveBeenCalled();
+	});
+
+	it("does NOT consult the Redis 24h budget — explicit admin action bypasses throttle", async () => {
+		// The fire-and-forget path takes a SET NX EX lock per host; the explicit
+		// path must not. Verify by passing a redis whose `set` would refuse the
+		// lock — the trigger must still enqueue.
+		const cache = makeCache();
+		const client = makeClient();
+		mockedFetch.mockReturnValue(cdxOk(10));
+		const redis = makeRedis(null); // SET NX would fail if consulted
+		const svc = new ProxyService(
+			cache,
+			client,
+			logger,
+			{ ...baseConfig, whitelistHosts: "example.com" },
+			redis as unknown as import("ioredis").default,
+		);
+
+		await svc.triggerDomainCrawl("example.com", TIME);
+
+		expect(client.enqueueDomainCrawl).toHaveBeenCalledWith("example.com", TIME);
+		expect(redis.set).not.toHaveBeenCalled();
 	});
 });

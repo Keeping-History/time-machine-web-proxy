@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import type { Queue, QueueEvents } from "bullmq";
 import type pino from "pino";
+import { isJobProgress, type JobProgress } from "../models/job-progress";
 import type { DomainCrawlJob, ExactUrlJob } from "../queue/jobs";
 
 /**
@@ -50,13 +51,19 @@ const CRAWL_JOB_OPTS = {
  */
 const WAIT_TIMEOUT_MS = 200_000;
 
+export type JobProgressListener = (progress: JobProgress) => void;
+
 /**
  * Narrow port that ProxyService depends on. The concrete BullMQ-backed
  * implementation below satisfies this shape, and Dependencies (TASK-010)
  * can swap in a real or stub instance without breaking ProxyService.
  */
 export interface ArchiveJobClientPort {
-	enqueueExactAndWait(url: string, time: string): Promise<void>;
+	enqueueExactAndWait(
+		url: string,
+		time: string,
+		onProgress?: JobProgressListener,
+	): Promise<void>;
 	enqueueDomainCrawl(host: string, time: string): Promise<void>;
 }
 
@@ -64,17 +71,20 @@ export interface ArchiveJobClientPort {
  * BullMQ producer for archive jobs.
  *
  * - `enqueueExactAndWait` is BLOCKING — caller awaits the foreground
- *   download via `QueueEvents.waitUntilFinished`.
+ *   download via `QueueEvents.waitUntilFinished`. An optional `onProgress`
+ *   callback receives JobProgress payloads as the worker advances through
+ *   stages (picked_up → availability_start → resolved → download_start →
+ *   download_file* → download_done).
  * - `enqueueDomainCrawl` is FIRE-AND-FORGET — caller does not await
  *   completion; suppressed entirely when `domainCrawlEnabled` is false.
+ *   Crawl progress is still emitted by the worker (visible in Bull Board /
+ *   server logs) but no per-call callback is exposed because there's no
+ *   foreground waiter to forward to.
  *
  * SSRF policy: this is the transport/producer layer. It does NOT enforce
  * URL policy. The caller (TimeMachineService.validateTargetUrl) is
  * responsible for rejecting private/internal hosts and disallowed
- * protocols BEFORE the URL ever reaches this client. Jobs carry the
- * ORIGINAL target URL (the worker in TASK-007 feeds it through
- * `normalizeBaseUrlInput`); attempting to enforce a Wayback-prefix here
- * was the wrong shape — flagged and resolved in TASK-009.
+ * protocols BEFORE the URL ever reaches this client.
  */
 export class ArchiveJobClient implements ArchiveJobClientPort {
 	constructor(
@@ -85,14 +95,47 @@ export class ArchiveJobClient implements ArchiveJobClientPort {
 		private readonly domainCrawlEnabled: boolean,
 	) {}
 
-	async enqueueExactAndWait(url: string, time: string): Promise<void> {
+	async enqueueExactAndWait(
+		url: string,
+		time: string,
+		onProgress?: JobProgressListener,
+	): Promise<void> {
 		const jobId = exactJobId(url, time);
 		const job = await this.exactQueue.add("exact", { url, time }, { ...EXACT_JOB_OPTS, jobId });
 		this.logger.debug(
 			{ jobId: job.id, url, time },
 			"[archive-job-client] enqueued exact, awaiting",
 		);
-		await job.waitUntilFinished(this.exactEvents, WAIT_TIMEOUT_MS);
+
+		// Subscribe to QueueEvents 'progress' filtered by our jobId. BullMQ emits
+		// `{ jobId, data }` where data is the JobProgress we passed to
+		// updateProgress in the worker. Unsubscribe in finally so a hung
+		// callback can't leak listeners across calls.
+		const progressHandler = ({
+			jobId: evJobId,
+			data,
+		}: {
+			jobId: string;
+			data: unknown;
+		}): void => {
+			if (evJobId !== job.id) return;
+			if (!onProgress) return;
+			if (!isJobProgress(data)) return;
+			try {
+				onProgress(data);
+			} catch (e) {
+				this.logger.warn(
+					{ jobId: evJobId, err: e instanceof Error ? e.message : String(e) },
+					"[archive-job-client] onProgress callback threw",
+				);
+			}
+		};
+		if (onProgress) this.exactEvents.on("progress", progressHandler);
+		try {
+			await job.waitUntilFinished(this.exactEvents, WAIT_TIMEOUT_MS);
+		} finally {
+			if (onProgress) this.exactEvents.off("progress", progressHandler);
+		}
 	}
 
 	async enqueueDomainCrawl(host: string, time: string): Promise<void> {

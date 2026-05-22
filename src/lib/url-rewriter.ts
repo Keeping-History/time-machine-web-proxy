@@ -1,17 +1,128 @@
-import { type HTMLElement, parse } from "node-html-parser";
+import { parse, serialize, type DefaultTreeAdapterTypes } from "parse5";
 
-// Schemes that must NEVER be proxied — data URIs, mail links, JS pseudo-URLs,
-// dial/SMS handlers, opaque protocols. The list is conservative; anything not
-// matched falls through to the http(s) check inside toProxyUrl.
-const NON_PROXYABLE_SCHEME_RE =
-	/^(data|mailto|javascript|tel|sms|blob|about|file|ftp|geo|ws|wss|magnet|view-source|chrome|safari-extension):/i;
+type Node = DefaultTreeAdapterTypes.Node;
+type Element = DefaultTreeAdapterTypes.Element;
+type TextNode = DefaultTreeAdapterTypes.TextNode;
+type ParentNode = DefaultTreeAdapterTypes.ParentNode;
 
-// Wayback URLs look like `https://web.archive.org/web/<timestamp>[flags]/<original>`.
-// The downloader runs in `rewrite_mode: "as-is"`, but the saved HTML can still
-// contain Wayback URLs in places the downloader didn't touch — unwrap them so
-// the proxy target is always the ORIGINAL URL with the user's requested time.
-const WAYBACK_PREFIX_RE =
-	/^https?:\/\/web\.archive\.org\/web\/\d{1,14}(?:[^/]*)?\/(https?:\/\/.+)$/i;
+const RE_LEADING_WHITESPACE = /^[\s\t\r\n]+</i;
+const RE_WAYBACK_JS_HEAD = /((?:<head[^>]*>))[\s\S]*?<!-- End Wayback Rewrite JS Include -->/i;
+const RE_WAYBACK_JS_HTML = /((?:<html[^>]*>))[\s\S]*?<!-- End Wayback Rewrite JS Include -->/i;
+const RE_WAYBACK_TOOLBAR =
+	/<!-- BEGIN WAYBACK TOOLBAR INSERT -->[\s\S]*?<!-- END WAYBACK TOOLBAR INSERT -->/gi;
+
+// Wayback archive URL (absolute or path-relative), with optional 1-3 char
+// content-type modifier (im_, cs_, js_, if_, fw_, …) between timestamp and
+// the original URL. Capture: (timestamp, originalUrl).
+const RE_ARCHIVE_URL =
+	/^(?:https?:\/\/web\.archive\.org)?\/web\/(\d{1,14})(?:[a-z]{1,3}_)?\/(https?:\/\/.+)$/i;
+
+// Proxy path-format request: /web/{14-digit-ts}{optional 1-3 char mod}_/{url}.
+// Modifier (if present) is tolerated and discarded — the proxy serves the
+// same rewritten payload regardless of asset type. URL is captured raw so
+// the caller can append req.url's query string to preserve the target's
+// own ?foo=bar parameters.
+const RE_WAYBACK_PATH = /^\/web\/(\d{14})(?:[a-z]{1,3}_)?\/(.+)$/i;
+
+// Extensions whose presence flips the snapshot resolver to bidirectional
+// ("closest snapshot") mode. Asset captures rarely line up with the
+// page-level requested timestamp, so a strict at-or-before match would
+// 404 sub-resources that exist a few hours/days later. HTML pages and
+// extensionless paths stay strict so the user sees the page state they
+// asked for. Lowercased; case-insensitive match in isAssetUrl.
+const ASSET_EXTENSIONS = new Set([
+	"gif",
+	"jpg",
+	"jpeg",
+	"png",
+	"webp",
+	"svg",
+	"ico",
+	"bmp",
+	"tiff",
+	"avif",
+	"css",
+	"js",
+	"mjs",
+	"map",
+	"woff",
+	"woff2",
+	"ttf",
+	"eot",
+	"otf",
+	"mp3",
+	"mp4",
+	"webm",
+	"ogg",
+	"wav",
+	"flac",
+	"m4a",
+	"m4v",
+	"pdf",
+]);
+
+export const isAssetUrl = (url: string): boolean => {
+	let pathname: string;
+	try {
+		pathname = new URL(url).pathname;
+	} catch {
+		return false;
+	}
+	const lastSlash = pathname.lastIndexOf("/");
+	const lastSegment = lastSlash === -1 ? pathname : pathname.slice(lastSlash + 1);
+	const lastDot = lastSegment.lastIndexOf(".");
+	if (lastDot <= 0) return false;
+	return ASSET_EXTENSIONS.has(lastSegment.slice(lastDot + 1).toLowerCase());
+};
+
+const RE_CSS_URL = /(url\s*\(\s*['"]?)([^'")]+?)(['"]?\s*\))/gi;
+
+// Schemes/anchors that must never be rewritten — opaque or non-network
+// protocols whose semantics break if proxied. List ported from main:
+// covers data URIs, mail/JS/dial/SMS handlers, blob/about/file/ftp,
+// websockets, magnet links, and platform/extension-internal URIs.
+const RE_SKIP_PREFIX =
+	/^(?:data:|mailto:|javascript:|tel:|sms:|blob:|about:|file:|ftp:|geo:|ws:|wss:|magnet:|view-source:|chrome:|safari-extension:|#)/i;
+
+// Tag → URL-bearing attributes. `<base>` is intentionally excluded: its href
+// is honored as the effective base for relative-URL resolution inside
+// rewriteHtmlUrls, then the tag is REMOVED entirely so the live browser
+// can't fall back to the archived origin for any unrewritten refs.
+const TAG_URL_ATTRS: Record<string, readonly string[]> = {
+	a: ["href"],
+	area: ["href"],
+	audio: ["src"],
+	blockquote: ["cite"],
+	body: ["background"],
+	button: ["formaction"],
+	del: ["cite"],
+	embed: ["src"],
+	form: ["action"],
+	frame: ["src", "longdesc"],
+	html: ["manifest"],
+	iframe: ["src", "longdesc"],
+	img: ["src", "srcset", "longdesc"],
+	input: ["src", "formaction"],
+	ins: ["cite"],
+	link: ["href"],
+	object: ["data"],
+	q: ["cite"],
+	script: ["src"],
+	source: ["src", "srcset"],
+	table: ["background"],
+	td: ["background"],
+	th: ["background"],
+	track: ["src"],
+	tr: ["background"],
+	video: ["poster", "src"],
+};
+
+const SRCSET_ATTRS = new Set(["srcset"]);
+
+// `<meta http-equiv="refresh" content="<delay>;url=<url>">`. The URL portion
+// may be absent (refresh same page) — return unchanged then. Case-insensitive
+// on the `url=` separator; tolerates surrounding single/double quotes.
+const META_REFRESH_RE = /^(\s*\d+\s*;\s*url\s*=\s*)(.+?)\s*$/i;
 
 export const sanitizeTimeParam = (rawTime: string | null, defaultTime: string): string => {
 	if (!rawTime) return defaultTime;
@@ -26,7 +137,10 @@ export const unwrapNestedProxyUrl = (
 ): { url: string; time: string } => {
 	try {
 		const nested = new URL(url);
-		if (nested.hostname === proxyBaseHostname && nested.searchParams.has("url")) {
+		if (nested.hostname !== proxyBaseHostname) return { url, time: fallbackTime };
+
+		// Legacy /?url=<enc>&time=<ts> format
+		if (nested.searchParams.has("url")) {
 			const inner = nested.searchParams.get("url");
 			if (inner) {
 				const innerTime = nested.searchParams.get("time");
@@ -36,6 +150,14 @@ export const unwrapNestedProxyUrl = (
 				};
 			}
 		}
+
+		// New /web/<ts>/<url> format. Append nested.search so the target URL's
+		// own query string (which lives on the proxy URL after path-based
+		// rewriting) is preserved.
+		const pathMatch = nested.pathname.match(RE_WAYBACK_PATH);
+		if (pathMatch) {
+			return { url: `${pathMatch[2]}${nested.search}`, time: pathMatch[1] };
+		}
 	} catch {
 		/* not a valid absolute URL — use as-is */
 	}
@@ -43,95 +165,59 @@ export const unwrapNestedProxyUrl = (
 };
 
 /**
- * Build a proxy URL from a raw reference encountered in archived HTML/CSS.
- * Returns null for non-proxyable refs (data:, mailto:, javascript:, tel:,
- * fragments, non-http(s) URLs). Resolves relative refs against `pageUrl`.
- * Unwraps any Wayback prefix so the proxy target is always the ORIGINAL URL.
+ * Parse the proxy's path-based input format `/web/{ts}{mod?}_/{url}`.
+ *
+ * Pass the raw `req.url` (NOT a value that has been through `new URL()`)
+ * so the target URL's own query string is preserved untouched — `new URL()`
+ * would split at the first `?` and treat the target's query as the proxy's.
+ *
+ * Returns null when the path does not match this format.
  */
-function toProxyUrl(
-	ref: string | undefined | null,
-	pageUrl: string,
-	proxyBase: string,
-	time: string,
-): string | null {
-	if (!ref) return null;
-	const trimmed = ref.trim();
-	if (!trimmed) return null;
-	if (trimmed.startsWith("#")) return null;
-	if (NON_PROXYABLE_SCHEME_RE.test(trimmed)) return null;
-	let resolved: URL;
+export const parseWaybackPath = (rawReqUrl: string): { time: string; url: string } | null => {
+	const m = rawReqUrl.match(RE_WAYBACK_PATH);
+	return m ? { time: m[1], url: m[2] } : null;
+};
+
+const buildProxyUrl = (originalUrl: string, time: string): string =>
+	`/web/${time}/${originalUrl}`;
+
+const rewriteOneUrl = (raw: string, targetUrl: string, fallbackTime: string): string => {
+	if (!raw) return raw;
+	const trimmed = raw.trim();
+	if (!trimmed || RE_SKIP_PREFIX.test(trimmed)) return raw;
+
+	const archive = trimmed.match(RE_ARCHIVE_URL);
+	if (archive) return buildProxyUrl(archive[2], archive[1]);
+
 	try {
-		resolved = new URL(trimmed, pageUrl);
+		const resolved = new URL(trimmed, targetUrl);
+		if (resolved.protocol !== "http:" && resolved.protocol !== "https:") return raw;
+		return buildProxyUrl(resolved.toString(), fallbackTime);
 	} catch {
-		return null;
+		return raw;
 	}
-	if (resolved.protocol !== "http:" && resolved.protocol !== "https:") return null;
-	let target = resolved.href;
-	const wb = target.match(WAYBACK_PREFIX_RE);
-	if (wb) target = wb[1];
-	return `${proxyBase}/?url=${encodeURIComponent(target)}&time=${time}`;
-}
+};
 
-// HTML attributes by tag that carry URLs. We intentionally exclude <base>:
-// the rewriter strips it entirely (rewritten URLs are absolute proxy URLs,
-// and a stray base href would send any unrewritten refs to the live web).
-const URL_ATTRS_BY_TAG: ReadonlyMap<string, readonly string[]> = new Map([
-	["a", ["href"]],
-	["area", ["href"]],
-	["link", ["href"]],
-	["img", ["src", "longdesc"]],
-	["iframe", ["src", "longdesc"]],
-	["frame", ["src", "longdesc"]],
-	["embed", ["src"]],
-	["input", ["src", "formaction"]],
-	["button", ["formaction"]],
-	["track", ["src"]],
-	["video", ["src", "poster"]],
-	["audio", ["src"]],
-	["source", ["src"]],
-	["script", ["src"]],
-	["object", ["data"]],
-	["form", ["action"]],
-	["blockquote", ["cite"]],
-	["q", ["cite"]],
-	["del", ["cite"]],
-	["ins", ["cite"]],
-	["html", ["manifest"]],
-	["body", ["background"]],
-	["table", ["background"]],
-	["td", ["background"]],
-	["th", ["background"]],
-	["tr", ["background"]],
-]);
-
-const SRCSET_TAGS = ["img", "source"] as const;
-
-function rewriteSrcset(value: string, pageUrl: string, proxyBase: string, time: string): string {
-	return value
+const rewriteSrcsetValue = (srcset: string, targetUrl: string, time: string): string =>
+	srcset
 		.split(",")
-		.map((entry) => {
-			const trimmed = entry.trim();
-			if (!trimmed) return entry;
-			const space = trimmed.search(/\s/);
-			const url = space === -1 ? trimmed : trimmed.slice(0, space);
-			const descriptor = space === -1 ? "" : trimmed.slice(space);
-			const proxied = toProxyUrl(url, pageUrl, proxyBase, time);
-			return proxied ? `${proxied}${descriptor}` : entry;
+		.map((part) => {
+			const trimmed = part.trim();
+			if (!trimmed) return "";
+			const match = trimmed.match(/^(\S+)(\s+.+)?$/);
+			if (!match) return trimmed;
+			return `${rewriteOneUrl(match[1], targetUrl, time)}${match[2] ?? ""}`;
 		})
+		.filter(Boolean)
 		.join(", ");
-}
 
-// `<meta http-equiv="refresh" content="<delay>;url=<url>">`. The URL portion
-// may be absent (refresh same page) — return unchanged then. Case-insensitive
-// on the `url=` separator; tolerates surrounding single/double quotes.
-const META_REFRESH_RE = /^(\s*\d+\s*;\s*url\s*=\s*)(.+?)\s*$/i;
+export const rewriteCssUrls = (css: string, targetUrl: string, time: string): string =>
+	css.replace(RE_CSS_URL, (_, before, url, after) => {
+		const rewritten = rewriteOneUrl(url, targetUrl, time);
+		return `${before}${rewritten}${after}`;
+	});
 
-function rewriteMetaRefresh(
-	content: string,
-	pageUrl: string,
-	proxyBase: string,
-	time: string,
-): string {
+const rewriteMetaRefresh = (content: string, targetUrl: string, time: string): string => {
 	const m = content.match(META_REFRESH_RE);
 	if (!m) return content;
 	const prefix = m[1];
@@ -141,137 +227,88 @@ function rewriteMetaRefresh(
 		quote = url[0];
 		url = url.slice(1, -1);
 	}
-	const proxied = toProxyUrl(url, pageUrl, proxyBase, time);
-	if (!proxied) return content;
-	return `${prefix}${quote}${proxied}${quote}`;
-}
+	return `${prefix}${quote}${rewriteOneUrl(url, targetUrl, time)}${quote}`;
+};
 
-// CSS `url(...)` — handles quoted (single/double) and unquoted forms.
-const CSS_URL_RE = /url\(\s*(['"]?)([^'")]+?)\1\s*\)/gi;
+const isElement = (node: Node): node is Element =>
+	typeof (node as Partial<Element>).tagName === "string";
 
-export function rewriteCssUrls(
-	css: string,
-	pageUrl: string,
-	proxyBase: string,
-	time: string,
-): string {
-	return css.replace(CSS_URL_RE, (match, quote, raw) => {
-		const proxied = toProxyUrl(raw, pageUrl, proxyBase, time);
-		if (!proxied) return match;
-		return `url(${quote}${proxied}${quote})`;
+const isTextNode = (node: Node): node is TextNode => node.nodeName === "#text";
+
+const hasChildNodes = (node: Node): node is ParentNode =>
+	Array.isArray((node as Partial<ParentNode>).childNodes);
+
+// Honor any <base href> the archived page set (the original browser would
+// have done the same), then return the new effective base. Removes the
+// <base> tag(s) from the tree so the live browser can't fall back to the
+// archived origin for any unrewritten refs.
+const consumeBaseTag = (node: Node, currentBase: string): string => {
+	let effectiveBase = currentBase;
+	if (!hasChildNodes(node)) return effectiveBase;
+	const remaining = node.childNodes.filter((child) => {
+		if (isElement(child) && child.tagName.toLowerCase() === "base") {
+			const hrefAttr = child.attrs.find((a) => a.name === "href");
+			if (hrefAttr?.value) {
+				try {
+					effectiveBase = new URL(hrefAttr.value, currentBase).href;
+				} catch {
+					/* keep currentBase */
+				}
+			}
+			return false;
+		}
+		if (hasChildNodes(child)) {
+			effectiveBase = consumeBaseTag(child, effectiveBase);
+		}
+		return true;
 	});
-}
+	node.childNodes = remaining;
+	return effectiveBase;
+};
 
-/**
- * Rewrite every URL reference in `html` to point at the TimeMachine proxy.
- *
- * - URL-bearing attributes (href, src, srcset, action, formaction, poster,
- *   data, manifest, background, cite, longdesc) on the standard HTML tags
- *   are resolved against the effective base and replaced with absolute
- *   proxy URLs.
- * - `<meta http-equiv="refresh">` is parsed and the URL portion is rewritten.
- * - `<style>` blocks and inline `style=""` attributes have their `url(...)`
- *   refs rewritten via {@link rewriteCssUrls}.
- * - Any `<base href>` set by the archived page is honored as the effective
- *   base for relative-URL resolution, then the `<base>` tag is REMOVED from
- *   the output. We never want the live browser resolving against the
- *   original origin — all emitted URLs are absolute proxy URLs.
- *
- * JS string literals (`window.location = "…"` etc.) are intentionally not
- * rewritten — safe rewriting requires AST parsing of arbitrary JavaScript,
- * which is out of scope.
- */
-export function rewriteHtmlUrls(
-	html: string,
-	pageUrl: string,
-	proxyBase: string,
-	time: string,
-): string {
-	const root = parse(html);
+const isMetaRefresh = (el: Element): boolean => {
+	if (el.tagName.toLowerCase() !== "meta") return false;
+	const httpEquiv = el.attrs.find((a) => a.name === "http-equiv");
+	return httpEquiv?.value.toLowerCase() === "refresh";
+};
 
-	// Honor any <base href> the archived page set (the original browser would
-	// have done the same), then remove the <base> tag from the output.
-	let effectiveBase = pageUrl;
-	for (const b of root.querySelectorAll("base")) {
-		const href = b.getAttribute("href");
-		if (href) {
-			try {
-				effectiveBase = new URL(href, pageUrl).href;
-			} catch {
-				/* malformed base href — keep pageUrl */
+const visit = (node: Node, targetUrl: string, time: string): void => {
+	if (isElement(node)) {
+		const tag = node.tagName.toLowerCase();
+		const urlAttrs = TAG_URL_ATTRS[tag];
+		const metaRefresh = isMetaRefresh(node);
+		for (const attr of node.attrs) {
+			if (urlAttrs?.includes(attr.name)) {
+				attr.value = SRCSET_ATTRS.has(attr.name)
+					? rewriteSrcsetValue(attr.value, targetUrl, time)
+					: rewriteOneUrl(attr.value, targetUrl, time);
+			} else if (metaRefresh && attr.name === "content") {
+				attr.value = rewriteMetaRefresh(attr.value, targetUrl, time);
+			} else if (attr.name === "style") {
+				attr.value = rewriteCssUrls(attr.value, targetUrl, time);
 			}
 		}
-		b.remove();
-	}
-
-	for (const [tag, attrs] of URL_ATTRS_BY_TAG) {
-		for (const el of root.querySelectorAll(tag)) {
-			for (const attr of attrs) {
-				const v = el.getAttribute(attr);
-				if (!v) continue;
-				const proxied = toProxyUrl(v, effectiveBase, proxyBase, time);
-				if (proxied) el.setAttribute(attr, proxied);
+		if (tag === "style") {
+			for (const child of node.childNodes) {
+				if (isTextNode(child)) {
+					child.value = rewriteCssUrls(child.value, targetUrl, time);
+				}
 			}
 		}
 	}
-
-	for (const tag of SRCSET_TAGS) {
-		for (const el of root.querySelectorAll(tag)) {
-			const v = el.getAttribute("srcset");
-			if (v) el.setAttribute("srcset", rewriteSrcset(v, effectiveBase, proxyBase, time));
-		}
+	if (hasChildNodes(node)) {
+		for (const child of node.childNodes) visit(child, targetUrl, time);
 	}
+};
 
-	for (const m of root.querySelectorAll("meta")) {
-		const equiv = m.getAttribute("http-equiv");
-		if (equiv && equiv.toLowerCase() === "refresh") {
-			const c = m.getAttribute("content");
-			if (c) m.setAttribute("content", rewriteMetaRefresh(c, effectiveBase, proxyBase, time));
-		}
-	}
+export const rewriteHtmlUrls = (html: string, targetUrl: string, time: string): string => {
+	const doc = parse(html);
+	// <base href> handling first so its effective base is used during visit().
+	const effectiveBase = consumeBaseTag(doc, targetUrl);
+	visit(doc, effectiveBase, time);
+	return serialize(doc);
+};
 
-	for (const s of root.querySelectorAll("style")) {
-		const css = s.innerHTML;
-		if (css) s.set_content(rewriteCssUrls(css, effectiveBase, proxyBase, time));
-	}
-
-	// Inline style="" — walk the tree once. node-html-parser doesn't expose a
-	// global attribute selector, so we recurse over element nodes.
-	const visit = (node: HTMLElement): void => {
-		const style = node.getAttribute("style");
-		if (style) node.setAttribute("style", rewriteCssUrls(style, effectiveBase, proxyBase, time));
-		for (const child of node.childNodes) {
-			if ((child as { nodeType?: number }).nodeType === 1) {
-				visit(child as HTMLElement);
-			}
-		}
-	};
-	for (const child of root.childNodes) {
-		if ((child as { nodeType?: number }).nodeType === 1) {
-			visit(child as HTMLElement);
-		}
-	}
-
-	return root.toString();
-}
-
-const RE_LEADING_WHITESPACE = /^[\s\t\r\n]+</i;
-const RE_WAYBACK_JS_HEAD = /((?:<head[^>]*>))[\s\S]*?<!-- End Wayback Rewrite JS Include -->/i;
-const RE_WAYBACK_JS_HTML = /((?:<html[^>]*>))[\s\S]*?<!-- End Wayback Rewrite JS Include -->/i;
-const RE_WAYBACK_TOOLBAR =
-	/<!-- BEGIN WAYBACK TOOLBAR INSERT -->[\s\S]*?<!-- END WAYBACK TOOLBAR INSERT -->/gi;
-
-/**
- * Strip Wayback Machine markers the downloader sometimes leaves behind:
- *   - the toolbar HTML block,
- *   - the JS rewrite include in <head> / <html>,
- *   - leading whitespace before the first tag.
- *
- * Does NOT inject a `<base href>` (it used to). The URL rewriter emits
- * absolute proxy URLs for every reference, and a stray <base> pointing at
- * the original origin would send any unrewritten relative reference (e.g.
- * inside JavaScript) to the live web.
- */
 export const stripWaybackToolbar = (html: string): string =>
 	html
 		.replace(RE_LEADING_WHITESPACE, "<")

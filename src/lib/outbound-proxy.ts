@@ -49,8 +49,11 @@ export const PROXY_ERROR_STATUS = new Set([407, 502, 503, 504]);
  * Credentials (if any) are applied to every URL in the list and URL-encoded
  * into each agent's uri. The password is never logged.
  */
-export async function installOutboundProxy(cfg: ProxyConfig, logger: pino.Logger): Promise<void> {
-	if (cfg.outboundProxyUrls.length === 0) return;
+export async function installOutboundProxy(
+	cfg: ProxyConfig,
+	logger: pino.Logger,
+): Promise<RotatingProxyDispatcher | null> {
+	if (cfg.outboundProxyUrls.length === 0) return null;
 
 	const hasUser = !!cfg.outboundProxyUsername;
 	const hasPass = !!cfg.outboundProxyPassword;
@@ -85,11 +88,17 @@ export async function installOutboundProxy(cfg: ProxyConfig, logger: pino.Logger
 
 	const anyOk = probeResults.some((r) => r.ok);
 	if (!anyOk) {
+		// A transient startup failure (e.g. DNS hiccup) shouldn't crash the worker
+		// and take the BullMQ producer with it. Install all agents in cooldown and
+		// let the rotator's re-probe loop restore them. Until at least one becomes
+		// healthy, outbound dispatch will throw "no healthy proxy available" per
+		// request — a runtime degradation, not a boot crash.
 		const summary = probeResults
 			.map((r) => (r.ok ? `${r.host} (ok)` : `${r.host} (${r.reason})`))
 			.join(", ");
-		throw new Error(
-			`OUTBOUND_PROXY_URLS: all ${probeResults.length} configured proxies failed connectivity probe to ${PROBE_URL}: ${summary}`,
+		logger.error(
+			{ count: probeResults.length, summary },
+			"[outbound-proxy] all startup probes failed; installing rotator with every agent in cooldown — re-probe will restore",
 		);
 	}
 
@@ -115,6 +124,7 @@ export async function installOutboundProxy(cfg: ProxyConfig, logger: pino.Logger
 		},
 		"[outbound-proxy] installed",
 	);
+	return rotator;
 }
 
 interface BuiltUri {
@@ -290,6 +300,25 @@ export class RotatingProxyDispatcher extends Dispatcher {
 		const entry = this.#agents.find((a) => a.host === host);
 		if (!entry) return;
 		this.#markFailed(entry, reason);
+	}
+
+	/**
+	 * Snapshot of per-agent health for the /status endpoint. `healthy` matches
+	 * the same eligibility logic as `#pick`: an agent counts as healthy when
+	 * its cooldown has expired, even if the re-probe timer hasn't restored
+	 * `cooldownExpiresAt` to null yet.
+	 */
+	getStatus(): Array<{ host: string; healthy: boolean; cooldownRemainingMs: number }> {
+		const now = Date.now();
+		return this.#agents.map((e) => {
+			const expiresAt = e.cooldownExpiresAt;
+			const remaining = expiresAt === null ? 0 : Math.max(0, expiresAt - now);
+			return {
+				host: e.host,
+				healthy: expiresAt === null || expiresAt <= now,
+				cooldownRemainingMs: remaining,
+			};
+		});
 	}
 
 	#pick(): ProxyEntry | null {
