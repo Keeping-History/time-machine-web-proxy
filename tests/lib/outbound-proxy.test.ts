@@ -364,6 +364,47 @@ describe("RotatingProxyDispatcher", () => {
 		).toThrow(/at least one agent/);
 	});
 
+	it("getStatus() reports every agent as healthy with 0 cooldown when freshly constructed", () => {
+		const built = makeBuilt(2);
+		// biome-ignore lint/suspicious/noExplicitAny: test stubs satisfy Dispatcher shape
+		const d = new RotatingProxyDispatcher(built as any, "sequential", {
+			baseCooldownMs: 1000,
+			logger: silentLogger(),
+		});
+		const status = d.getStatus();
+		expect(status).toEqual([
+			{ host: "proxy0.example.com:31280", healthy: true, cooldownRemainingMs: 0 },
+			{ host: "proxy1.example.com:31280", healthy: true, cooldownRemainingMs: 0 },
+		]);
+	});
+
+	it("getStatus() reports a failed agent as unhealthy with nonzero cooldownRemainingMs", () => {
+		// markFailedExternally is the same code path that the dispatch-failure
+		// branch uses, so testing through it gives us the production state
+		// machine without needing to simulate a full dispatch.
+		const built = makeBuilt(2);
+		// biome-ignore lint/suspicious/noExplicitAny: test stubs satisfy Dispatcher shape
+		const d = new RotatingProxyDispatcher(built as any, "sequential", {
+			baseCooldownMs: 60_000,
+			logger: silentLogger(),
+		});
+		d.markFailedExternally("proxy0.example.com:31280", "test");
+		const status = d.getStatus();
+		expect(status[0]).toMatchObject({
+			host: "proxy0.example.com:31280",
+			healthy: false,
+		});
+		// Cooldown is the base value; allow a small drift for test execution time.
+		expect(status[0].cooldownRemainingMs).toBeGreaterThan(50_000);
+		expect(status[0].cooldownRemainingMs).toBeLessThanOrEqual(60_000);
+		// Second agent is untouched — still healthy.
+		expect(status[1]).toEqual({
+			host: "proxy1.example.com:31280",
+			healthy: true,
+			cooldownRemainingMs: 0,
+		});
+	});
+
 	it("sequential mode visits each healthy agent in order then wraps", () => {
 		const built = makeBuilt(3);
 		// biome-ignore lint/suspicious/noExplicitAny: test stubs satisfy Dispatcher shape

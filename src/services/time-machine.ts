@@ -28,6 +28,9 @@ export class TimeMachineService {
 		private readonly shutdown: ShutdownController,
 		private readonly logger: pino.Logger,
 		private readonly onStop?: () => Promise<void>,
+		/** Optional status provider for GET /status. When omitted the endpoint
+		 * is unavailable (404). Wired by Dependencies.getStatus in production. */
+		private readonly getStatus?: () => Promise<unknown>,
 	) {}
 
 	start(): Promise<void> {
@@ -148,6 +151,34 @@ export class TimeMachineService {
 				durationMs: Date.now() - start,
 			});
 			return;
+		}
+
+		if (req.method === "GET") {
+			const { pathname } = new URL(req.url ?? "/", "http://localhost");
+			if (pathname === "/status") {
+				if (!this.getStatus) {
+					res.writeHead(404).end("Status endpoint not available");
+					this.logRequest(req, 404, start);
+					return;
+				}
+				try {
+					const status = await this.getStatus();
+					res.setHeader("Content-Type", "application/json");
+					res.writeHead(200).end(JSON.stringify(status));
+					this.logRequest(req, 200, start);
+				} catch (e) {
+					this.logger.error({ error: e }, "[TimeMachine] status probe failed");
+					res.setHeader("Content-Type", "application/json");
+					res
+						.writeHead(500)
+						.end(
+							JSON.stringify({ error: e instanceof Error ? e.message : "status probe failed" }),
+						);
+					this.logRequest(req, 500, start);
+				}
+				return;
+			}
+			// Other GETs fall through to the existing /web/{ts}/{url} + ?url= flow.
 		}
 
 		if (req.method === "DELETE") {

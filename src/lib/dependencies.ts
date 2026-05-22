@@ -3,12 +3,14 @@ import type IORedis from "ioredis";
 import type pino from "pino";
 import { ArchiveJobClient } from "../clients/archive-job-client";
 import type { Config } from "../models/config";
+import type { SystemStatus } from "../models/status";
 import { attachQueueLogger, startArchiveWorkers } from "../queue/archive-worker";
 import { type DomainCrawlJob, type ExactUrlJob, QUEUE_CRAWL, QUEUE_EXACT } from "../queue/jobs";
 import { CacheService } from "../services/cache";
 import { ProxyService } from "../services/proxy";
 import type { UrlValidatorModule } from "../services/time-machine";
 import { createLogger } from "./logger";
+import type { RotatingProxyDispatcher } from "./outbound-proxy";
 import { createRedis } from "./redis";
 import { ShutdownController } from "./shutdown";
 import { resolveSnapshotTimestamp } from "./snapshot-resolver";
@@ -49,8 +51,10 @@ export interface DependencyStore {
  */
 export class Dependencies {
 	private readonly deps: DependencyStore;
+	private readonly outboundProxy: RotatingProxyDispatcher | null;
 
-	constructor(config: Config) {
+	constructor(config: Config, outboundProxy: RotatingProxyDispatcher | null = null) {
+		this.outboundProxy = outboundProxy;
 		const logger = createLogger();
 		const shutdown = new ShutdownController();
 		const redis = createRedis(config.redisUrl);
@@ -131,6 +135,30 @@ export class Dependencies {
 		return this.deps;
 	}
 
+	/**
+	 * Aggregated operational status for the /status endpoint. All probes are
+	 * read-only and tolerate partial failures: each section is best-effort so
+	 * an unhealthy queue can't mask the rest of the report.
+	 */
+	async getStatus(): Promise<SystemStatus> {
+		const { redis, exactQueue, crawlQueue } = this.deps;
+		const [exactCounts, crawlCounts] = await Promise.all([
+			safeJobCounts(exactQueue),
+			safeJobCounts(crawlQueue),
+		]);
+		return {
+			redis: { status: (redis as IORedis & { status?: string }).status ?? "unknown" },
+			outboundProxies: {
+				configured: this.outboundProxy !== null,
+				agents: this.outboundProxy?.getStatus() ?? [],
+			},
+			queues: {
+				[QUEUE_EXACT]: exactCounts,
+				[QUEUE_CRAWL]: crawlCounts,
+			},
+		};
+	}
+
 	async close(): Promise<void> {
 		const { workers, exactQueue, crawlQueue, exactEvents, crawlEvents, redis } = this.deps;
 		// 1. Drain workers first so in-flight jobs complete
@@ -144,5 +172,28 @@ export class Dependencies {
 		]);
 		// 3. Quit Redis last (graceful QUIT after all subscribers disconnect)
 		await redis.quit();
+	}
+}
+
+/**
+ * BullMQ's `getJobCounts()` resolves a string-keyed object including any
+ * states we request. We always ask for the standard five so the response
+ * shape is stable. A queue that's mid-shutdown or whose Redis is down may
+ * reject — we surface zeros rather than 500'ing the whole /status call.
+ */
+async function safeJobCounts<T>(
+	queue: Queue<T>,
+): Promise<SystemStatus["queues"][string]> {
+	try {
+		const counts = await queue.getJobCounts("failed", "waiting", "active", "completed", "delayed");
+		return {
+			failed: counts.failed ?? 0,
+			waiting: counts.waiting ?? 0,
+			active: counts.active ?? 0,
+			completed: counts.completed ?? 0,
+			delayed: counts.delayed ?? 0,
+		};
+	} catch {
+		return { failed: 0, waiting: 0, active: 0, completed: 0, delayed: 0 };
 	}
 }

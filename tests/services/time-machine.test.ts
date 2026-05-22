@@ -45,6 +45,7 @@ const makeService = (
 	overrides: {
 		triggerDomainCrawl?: ProxyMock["triggerDomainCrawl"];
 		config?: Partial<Config>;
+		getStatus?: () => Promise<unknown>;
 	} = {},
 ) => {
 	const proxy = {
@@ -71,6 +72,8 @@ const makeService = (
 		validator,
 		shutdown,
 		logger,
+		undefined,
+		overrides.getStatus,
 	);
 	return { svc, proxy: proxy as unknown as ProxyMock };
 };
@@ -336,6 +339,102 @@ describe("TimeMachineService HTTP handler — SSE (Accept: text/event-stream)", 
 			expect(r.status).toBe(200);
 			expect(r.headers.get("content-type")).toContain("text/html");
 			expect(r.headers.get("content-type")).not.toContain("event-stream");
+		} finally {
+			await svc.stop();
+		}
+	});
+});
+
+describe("TimeMachineService HTTP handler — GET /status", () => {
+	const sampleStatus = {
+		redis: { status: "ready" },
+		outboundProxies: { configured: false, agents: [] },
+		queues: {
+			"archive-exact": { failed: 2, waiting: 0, active: 1, completed: 5, delayed: 0 },
+			"archive-crawl": { failed: 0, waiting: 0, active: 0, completed: 1, delayed: 0 },
+		},
+	};
+
+	it("returns 200 with JSON payload assembled by the injected getStatus callback", async () => {
+		const getStatus = jest.fn().mockResolvedValue(sampleStatus);
+		const { svc } = makeService(undefined, { getStatus });
+		const port = await startAndAwaitListening(svc);
+		try {
+			const r = await fetch(`http://127.0.0.1:${port}/status`);
+			expect(r.status).toBe(200);
+			expect(r.headers.get("content-type")).toContain("application/json");
+			expect(await r.json()).toEqual(sampleStatus);
+			expect(getStatus).toHaveBeenCalledTimes(1);
+		} finally {
+			await svc.stop();
+		}
+	});
+
+	it("does NOT require authentication (operational endpoint, no secrets leak)", async () => {
+		// /status is read-only and intentionally public — same convention as
+		// /health or /ready. Anyone can probe it; the response contains no
+		// credentials (proxy `host` field is already stripped of basic-auth).
+		const getStatus = jest.fn().mockResolvedValue(sampleStatus);
+		const { svc } = makeService(undefined, {
+			getStatus,
+			config: { cacheClearToken: "should-not-be-required" },
+		});
+		const port = await startAndAwaitListening(svc);
+		try {
+			const r = await fetch(`http://127.0.0.1:${port}/status`);
+			expect(r.status).toBe(200);
+		} finally {
+			await svc.stop();
+		}
+	});
+
+	it("returns 404 when no getStatus callback was supplied (endpoint disabled)", async () => {
+		// Backward compatibility: a TimeMachineService constructed without a
+		// status provider (e.g. in legacy boot paths) should not silently
+		// return an empty status — it should 404 so the caller knows the
+		// endpoint isn't wired.
+		const { svc } = makeService(undefined, {}); // no getStatus
+		const port = await startAndAwaitListening(svc);
+		try {
+			const r = await fetch(`http://127.0.0.1:${port}/status`);
+			expect(r.status).toBe(404);
+		} finally {
+			await svc.stop();
+		}
+	});
+
+	it("returns 500 with JSON error body when getStatus throws", async () => {
+		const getStatus = jest.fn().mockRejectedValue(new Error("redis unreachable"));
+		const { svc } = makeService(undefined, { getStatus });
+		const port = await startAndAwaitListening(svc);
+		try {
+			const r = await fetch(`http://127.0.0.1:${port}/status`);
+			expect(r.status).toBe(500);
+			expect(r.headers.get("content-type")).toContain("application/json");
+			expect((await r.json()).error).toBe("redis unreachable");
+		} finally {
+			await svc.stop();
+		}
+	});
+
+	it("does NOT intercept other GET routes — /web/{ts}/{url} still works", async () => {
+		// /status is matched on exact pathname so it can't shadow the
+		// path-based input format.
+		const fetchMock = jest.fn().mockResolvedValue({
+			contentType: "text/html",
+			archiveUrl: "http://example.com/",
+			originalUrl: "http://example.com/",
+			body: "<html>ok</html>",
+			cache: "HIT" as const,
+		});
+		const getStatus = jest.fn().mockResolvedValue(sampleStatus);
+		const { svc } = makeService(fetchMock, { getStatus });
+		const port = await startAndAwaitListening(svc);
+		try {
+			const r = await fetch(`http://127.0.0.1:${port}/web/20020401000000/http://example.com/`);
+			expect(r.status).toBe(200);
+			expect(fetchMock).toHaveBeenCalled();
+			expect(getStatus).not.toHaveBeenCalled();
 		} finally {
 			await svc.stop();
 		}
