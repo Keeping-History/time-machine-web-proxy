@@ -54,7 +54,7 @@ describe("loadConfig", () => {
 		expect(config.workerRateLimitPerSec).toBe(1);
 		expect(config.downloaderThreadsCount).toBe(3);
 		expect(config.crawlMaxCdxPages).toBe(50);
-		expect(config.outboundProxyUrl).toBe("");
+		expect(config.outboundProxyUrls).toEqual([]);
 		expect(config.outboundProxyUsername).toBe("");
 		expect(config.outboundProxyPassword).toBe("");
 		expect(config.snapshotWindowDays).toEqual([30, 365, 3650, 0]);
@@ -198,13 +198,13 @@ describe("loadConfig", () => {
 	});
 
 	it("reads outbound proxy env vars", () => {
-		process.env.OUTBOUND_PROXY_URL = "http://proxymesh.example.com:31280";
+		process.env.OUTBOUND_PROXY_URLS = "http://proxymesh.example.com:31280";
 		process.env.OUTBOUND_PROXY_USERNAME = "user";
 		process.env.OUTBOUND_PROXY_PASSWORD = "secret";
 
 		const config = loadConfig();
 
-		expect(config.outboundProxyUrl).toBe("http://proxymesh.example.com:31280");
+		expect(config.outboundProxyUrls).toEqual(["http://proxymesh.example.com:31280"]);
 		expect(config.outboundProxyUsername).toBe("user");
 		expect(config.outboundProxyPassword).toBe("secret");
 	});
