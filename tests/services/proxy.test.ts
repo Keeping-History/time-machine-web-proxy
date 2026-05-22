@@ -38,6 +38,7 @@ const baseConfig = {
 	whitelistHosts: "*",
 	crawlMaxCdxPages: 50,
 	bullmqPrefix: "tm",
+	domainCrawlEnabled: true,
 } as unknown as Config;
 
 const makeCache = (lookupImpl?: jest.Mock): jest.Mocked<CacheService> =>
@@ -446,5 +447,97 @@ describe("ProxyService.fetch — domain crawl fire-and-forget", () => {
 		await new Promise((r) => setImmediate(r));
 
 		expect(client.enqueueDomainCrawl).toHaveBeenCalledWith("example.com", TIME);
+	});
+});
+
+// --- Explicit (admin-triggered) domain crawl --------------------------------
+
+describe("ProxyService.triggerDomainCrawl — explicit admin enqueue", () => {
+	const cdxOk = (count = 10) =>
+		Promise.resolve({ ok: true, text: () => Promise.resolve(String(count)) });
+
+	it("enqueues a crawl when whitelist passes and CDX page count is within cap", async () => {
+		// Happy path. Unlike the fire-and-forget side-effect, this MUST surface
+		// the success path to the caller — no swallowed errors.
+		const cache = makeCache();
+		const client = makeClient();
+		mockedFetch.mockReturnValue(cdxOk(10));
+		const svc = new ProxyService(cache, client, logger, {
+			...baseConfig,
+			whitelistHosts: "example.com",
+		});
+
+		await expect(svc.triggerDomainCrawl("example.com", TIME)).resolves.toBeUndefined();
+		expect(client.enqueueDomainCrawl).toHaveBeenCalledWith("example.com", TIME);
+	});
+
+	it("throws {status:503} when DOMAIN_CRAWL_ENABLED is false (kill switch honored)", async () => {
+		const cache = makeCache();
+		const client = makeClient();
+		const svc = new ProxyService(cache, client, logger, {
+			...baseConfig,
+			domainCrawlEnabled: false,
+		});
+
+		await expect(svc.triggerDomainCrawl("example.com", TIME)).rejects.toMatchObject({
+			status: 503,
+		});
+		// MUST not touch CDX or the client when the kill switch is off.
+		expect(mockedFetch).not.toHaveBeenCalled();
+		expect(client.enqueueDomainCrawl).not.toHaveBeenCalled();
+	});
+
+	it("throws {status:403} when host is not in WHITELIST_HOSTS", async () => {
+		const cache = makeCache();
+		const client = makeClient();
+		const svc = new ProxyService(cache, client, logger, {
+			...baseConfig,
+			whitelistHosts: "other.com",
+		});
+
+		await expect(svc.triggerDomainCrawl("example.com", TIME)).rejects.toMatchObject({
+			status: 403,
+		});
+		expect(client.enqueueDomainCrawl).not.toHaveBeenCalled();
+	});
+
+	it("throws {status:413} when CDX page count exceeds crawlMaxCdxPages", async () => {
+		// Safety net: an admin asking for an oversize crawl gets a clear 413,
+		// not a silent runaway job.
+		const cache = makeCache();
+		const client = makeClient();
+		mockedFetch.mockReturnValue(cdxOk(75));
+		const svc = new ProxyService(cache, client, logger, {
+			...baseConfig,
+			whitelistHosts: "example.com",
+			crawlMaxCdxPages: 50,
+		});
+
+		await expect(svc.triggerDomainCrawl("example.com", TIME)).rejects.toMatchObject({
+			status: 413,
+		});
+		expect(client.enqueueDomainCrawl).not.toHaveBeenCalled();
+	});
+
+	it("does NOT consult the Redis 24h budget — explicit admin action bypasses throttle", async () => {
+		// The fire-and-forget path takes a SET NX EX lock per host; the explicit
+		// path must not. Verify by passing a redis whose `set` would refuse the
+		// lock — the trigger must still enqueue.
+		const cache = makeCache();
+		const client = makeClient();
+		mockedFetch.mockReturnValue(cdxOk(10));
+		const redis = makeRedis(null); // SET NX would fail if consulted
+		const svc = new ProxyService(
+			cache,
+			client,
+			logger,
+			{ ...baseConfig, whitelistHosts: "example.com" },
+			redis as unknown as import("ioredis").default,
+		);
+
+		await svc.triggerDomainCrawl("example.com", TIME);
+
+		expect(client.enqueueDomainCrawl).toHaveBeenCalledWith("example.com", TIME);
+		expect(redis.set).not.toHaveBeenCalled();
 	});
 });

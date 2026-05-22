@@ -43,7 +43,7 @@ export class ProxyService {
 		private readonly logger: pino.Logger,
 		private readonly config: Pick<
 			Config,
-			"whitelistHosts" | "crawlMaxCdxPages" | "bullmqPrefix"
+			"whitelistHosts" | "crawlMaxCdxPages" | "bullmqPrefix" | "domainCrawlEnabled"
 		>,
 		private readonly redis: IORedis | null = null,
 	) {}
@@ -147,6 +147,36 @@ export class ProxyService {
 				"[crawl-skip] enqueue failed",
 			);
 		}
+	}
+
+	/**
+	 * Explicit (admin-triggered) domain crawl. Unlike `maybeEnqueueDomainCrawl`,
+	 * this:
+	 *   - Throws status errors instead of swallowing them — the caller is an
+	 *     HTTP endpoint that needs a concrete response code.
+	 *   - Bypasses the per-host 24h Redis budget. The budget exists to throttle
+	 *     fire-and-forget side-effects of foreground requests; an explicit admin
+	 *     action shouldn't inherit that throttle.
+	 *   - STILL enforces the whitelist and `CRAWL_MAX_CDX_PAGES` cap — those are
+	 *     safety boundaries, not rate-limits.
+	 *   - STILL respects `DOMAIN_CRAWL_ENABLED` as the kill switch.
+	 */
+	async triggerDomainCrawl(host: string, time: string): Promise<void> {
+		if (!this.config.domainCrawlEnabled) {
+			throw statusError("Domain crawl is disabled (DOMAIN_CRAWL_ENABLED=false)", 503);
+		}
+		if (!isHostWhitelisted(`https://${host}`, this.config.whitelistHosts)) {
+			throw statusError("Host not whitelisted", 403);
+		}
+		const pages = await this.cdxPageCount(host, time);
+		if (pages > this.config.crawlMaxCdxPages) {
+			throw statusError(
+				`Crawl too large: ${pages} CDX pages > ${this.config.crawlMaxCdxPages} cap`,
+				413,
+			);
+		}
+		await this.archiveJobClient.enqueueDomainCrawl(host, time);
+		this.logger.info({ host, time, pages }, "[crawl] explicit enqueue");
 	}
 
 	private async cdxPageCount(host: string, time: string): Promise<number> {

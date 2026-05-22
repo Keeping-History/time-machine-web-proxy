@@ -38,15 +38,22 @@ const config: Config = {
 	assetLaterFallback: true,
 };
 
-type ProxyMock = jest.Mocked<Pick<ProxyService, "fetch">>;
+type ProxyMock = jest.Mocked<Pick<ProxyService, "fetch" | "triggerDomainCrawl">>;
 
-const makeService = (proxyFetch?: ProxyMock["fetch"]) => {
+const makeService = (
+	proxyFetch?: ProxyMock["fetch"],
+	overrides: {
+		triggerDomainCrawl?: ProxyMock["triggerDomainCrawl"];
+		config?: Partial<Config>;
+	} = {},
+) => {
 	const proxy = {
 		fetch: proxyFetch ?? jest.fn(),
 		fetchAndCacheImage: jest.fn(),
 		prefetchResources: jest.fn(),
 		prefetchResourceUrls: jest.fn(),
 		getCachedResourceUrls: jest.fn(),
+		triggerDomainCrawl: overrides.triggerDomainCrawl ?? jest.fn().mockResolvedValue(undefined),
 	} as unknown as ProxyService;
 	const cache = {
 		handleCacheClear: jest.fn(),
@@ -56,7 +63,15 @@ const makeService = (proxyFetch?: ProxyMock["fetch"]) => {
 		isHostWhitelisted: jest.fn(() => true),
 	};
 	const shutdown = new ShutdownController();
-	const svc = new TimeMachineService(config, proxy, cache, validator, shutdown, logger);
+	const effectiveConfig: Config = { ...config, ...overrides.config };
+	const svc = new TimeMachineService(
+		effectiveConfig,
+		proxy,
+		cache,
+		validator,
+		shutdown,
+		logger,
+	);
 	return { svc, proxy: proxy as unknown as ProxyMock };
 };
 
@@ -321,6 +336,214 @@ describe("TimeMachineService HTTP handler — SSE (Accept: text/event-stream)", 
 			expect(r.status).toBe(200);
 			expect(r.headers.get("content-type")).toContain("text/html");
 			expect(r.headers.get("content-type")).not.toContain("event-stream");
+		} finally {
+			await svc.stop();
+		}
+	});
+});
+
+describe("TimeMachineService HTTP handler — POST /crawl (admin)", () => {
+	const TOKEN = "secret-token";
+
+	it("returns 403 when CACHE_CLEAR_TOKEN is empty (endpoint disabled)", async () => {
+		const trigger = jest.fn().mockResolvedValue(undefined);
+		const { svc, proxy } = makeService(undefined, {
+			triggerDomainCrawl: trigger,
+			config: { cacheClearToken: "" },
+		});
+		const port = await startAndAwaitListening(svc);
+		try {
+			const r = await fetch(`http://127.0.0.1:${port}/crawl?host=example.com`, {
+				method: "POST",
+			});
+			expect(r.status).toBe(403);
+			// MUST NOT enqueue anything when the endpoint is administratively disabled.
+			expect(proxy.triggerDomainCrawl).not.toHaveBeenCalled();
+		} finally {
+			await svc.stop();
+		}
+	});
+
+	it("returns 401 when Authorization header is missing or wrong", async () => {
+		const trigger = jest.fn().mockResolvedValue(undefined);
+		const { svc, proxy } = makeService(undefined, {
+			triggerDomainCrawl: trigger,
+			config: { cacheClearToken: TOKEN },
+		});
+		const port = await startAndAwaitListening(svc);
+		try {
+			const noAuth = await fetch(`http://127.0.0.1:${port}/crawl?host=example.com`, {
+				method: "POST",
+			});
+			expect(noAuth.status).toBe(401);
+
+			const wrongAuth = await fetch(`http://127.0.0.1:${port}/crawl?host=example.com`, {
+				method: "POST",
+				headers: { Authorization: "Bearer wrong" },
+			});
+			expect(wrongAuth.status).toBe(401);
+
+			expect(proxy.triggerDomainCrawl).not.toHaveBeenCalled();
+		} finally {
+			await svc.stop();
+		}
+	});
+
+	it("returns 202 and enqueues the crawl on success", async () => {
+		const trigger = jest.fn().mockResolvedValue(undefined);
+		const { svc, proxy } = makeService(undefined, {
+			triggerDomainCrawl: trigger,
+			config: { cacheClearToken: TOKEN },
+		});
+		const port = await startAndAwaitListening(svc);
+		try {
+			const r = await fetch(
+				`http://127.0.0.1:${port}/crawl?host=example.com&time=20010913000000`,
+				{ method: "POST", headers: { Authorization: `Bearer ${TOKEN}` } },
+			);
+			expect(r.status).toBe(202);
+			expect(r.headers.get("content-type")).toContain("application/json");
+			const body = await r.json();
+			expect(body).toEqual({ host: "example.com", time: "20010913000000" });
+			expect(proxy.triggerDomainCrawl).toHaveBeenCalledWith("example.com", "20010913000000");
+		} finally {
+			await svc.stop();
+		}
+	});
+
+	it("defaults time to config.defaultTime when omitted", async () => {
+		// Mirrors GET behavior: omitting time falls back to ARCHIVE_TIME so an
+		// operator can curl a quick crawl without knowing the timestamp by heart.
+		const trigger = jest.fn().mockResolvedValue(undefined);
+		const { svc, proxy } = makeService(undefined, {
+			triggerDomainCrawl: trigger,
+			config: { cacheClearToken: TOKEN },
+		});
+		const port = await startAndAwaitListening(svc);
+		try {
+			const r = await fetch(`http://127.0.0.1:${port}/crawl?host=example.com`, {
+				method: "POST",
+				headers: { Authorization: `Bearer ${TOKEN}` },
+			});
+			expect(r.status).toBe(202);
+			expect(proxy.triggerDomainCrawl).toHaveBeenCalledWith("example.com", config.defaultTime);
+		} finally {
+			await svc.stop();
+		}
+	});
+
+	it("returns 400 when host is missing", async () => {
+		const trigger = jest.fn().mockResolvedValue(undefined);
+		const { svc, proxy } = makeService(undefined, {
+			triggerDomainCrawl: trigger,
+			config: { cacheClearToken: TOKEN },
+		});
+		const port = await startAndAwaitListening(svc);
+		try {
+			const r = await fetch(`http://127.0.0.1:${port}/crawl`, {
+				method: "POST",
+				headers: { Authorization: `Bearer ${TOKEN}` },
+			});
+			expect(r.status).toBe(400);
+			expect(proxy.triggerDomainCrawl).not.toHaveBeenCalled();
+		} finally {
+			await svc.stop();
+		}
+	});
+
+	it("returns 400 when host contains illegal characters (path/scheme smuggling)", async () => {
+		// Hostname must be a bare host. Reject anything with /, :, ?, # so a
+		// crafted "host" can't leak into the cache directory or the CDX URL.
+		const trigger = jest.fn().mockResolvedValue(undefined);
+		const { svc, proxy } = makeService(undefined, {
+			triggerDomainCrawl: trigger,
+			config: { cacheClearToken: TOKEN },
+		});
+		const port = await startAndAwaitListening(svc);
+		try {
+			const r = await fetch(
+				`http://127.0.0.1:${port}/crawl?host=${encodeURIComponent("example.com/etc/passwd")}`,
+				{ method: "POST", headers: { Authorization: `Bearer ${TOKEN}` } },
+			);
+			expect(r.status).toBe(400);
+			expect(proxy.triggerDomainCrawl).not.toHaveBeenCalled();
+		} finally {
+			await svc.stop();
+		}
+	});
+
+	it("returns 400 when time is supplied but not 14 digits", async () => {
+		const trigger = jest.fn().mockResolvedValue(undefined);
+		const { svc, proxy } = makeService(undefined, {
+			triggerDomainCrawl: trigger,
+			config: { cacheClearToken: TOKEN },
+		});
+		const port = await startAndAwaitListening(svc);
+		try {
+			const r = await fetch(`http://127.0.0.1:${port}/crawl?host=example.com&time=2001`, {
+				method: "POST",
+				headers: { Authorization: `Bearer ${TOKEN}` },
+			});
+			expect(r.status).toBe(400);
+			expect(proxy.triggerDomainCrawl).not.toHaveBeenCalled();
+		} finally {
+			await svc.stop();
+		}
+	});
+
+	it("propagates status errors from triggerDomainCrawl as the HTTP status", async () => {
+		// 403 (not whitelisted), 413 (too large), 503 (kill switch) — each must
+		// reach the client verbatim with a JSON error body.
+		const trigger = jest
+			.fn()
+			.mockRejectedValueOnce(Object.assign(new Error("Host not whitelisted"), { status: 403 }))
+			.mockRejectedValueOnce(Object.assign(new Error("Crawl too large"), { status: 413 }))
+			.mockRejectedValueOnce(
+				Object.assign(new Error("Domain crawl is disabled"), { status: 503 }),
+			);
+		const { svc } = makeService(undefined, {
+			triggerDomainCrawl: trigger,
+			config: { cacheClearToken: TOKEN },
+		});
+		const port = await startAndAwaitListening(svc);
+		try {
+			const headers = { Authorization: `Bearer ${TOKEN}` };
+			const r1 = await fetch(`http://127.0.0.1:${port}/crawl?host=a.com`, {
+				method: "POST",
+				headers,
+			});
+			expect(r1.status).toBe(403);
+			expect((await r1.json()).error).toMatch(/whitelist/i);
+
+			const r2 = await fetch(`http://127.0.0.1:${port}/crawl?host=b.com`, {
+				method: "POST",
+				headers,
+			});
+			expect(r2.status).toBe(413);
+			expect((await r2.json()).error).toMatch(/too large/i);
+
+			const r3 = await fetch(`http://127.0.0.1:${port}/crawl?host=c.com`, {
+				method: "POST",
+				headers,
+			});
+			expect(r3.status).toBe(503);
+			expect((await r3.json()).error).toMatch(/disabled/i);
+		} finally {
+			await svc.stop();
+		}
+	});
+
+	it("returns 404 for POST to a non-/crawl path (no fall-through to other handlers)", async () => {
+		const { svc } = makeService(undefined, {
+			config: { cacheClearToken: TOKEN },
+		});
+		const port = await startAndAwaitListening(svc);
+		try {
+			const r = await fetch(`http://127.0.0.1:${port}/something-else`, {
+				method: "POST",
+				headers: { Authorization: `Bearer ${TOKEN}` },
+			});
+			expect(r.status).toBe(404);
 		} finally {
 			await svc.stop();
 		}

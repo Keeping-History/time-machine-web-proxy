@@ -78,6 +78,45 @@ export class TimeMachineService {
 		await this.onStop?.();
 	}
 
+	private async handleCrawlEnqueue(
+		req: IncomingMessage,
+		res: ServerResponse,
+		start: number,
+	): Promise<void> {
+		const u = new URL(req.url ?? "/", "http://localhost");
+		const host = u.searchParams.get("host");
+		let time: string;
+		try {
+			time = sanitizeTimeParam(u.searchParams.get("time"), this.config.defaultTime);
+		} catch (e) {
+			const msg = e instanceof Error ? e.message : "Invalid time parameter";
+			res.writeHead(400).end(msg);
+			this.logRequest(req, 400, start);
+			return;
+		}
+		// Hostname charset: letters, digits, dots, hyphens. Reject everything else
+		// up-front so we don't smuggle path/query/auth segments into the host slot
+		// (which would later land in the cache directory layout and CDX URL).
+		if (!host || !/^[a-z0-9](?:[a-z0-9.-]{0,253}[a-z0-9])?$/i.test(host)) {
+			res.writeHead(400).end("Invalid or missing host");
+			this.logRequest(req, 400, start);
+			return;
+		}
+		try {
+			await this.proxy.triggerDomainCrawl(host, time);
+			res.setHeader("Content-Type", "application/json");
+			res.writeHead(202).end(JSON.stringify({ host, time }));
+			this.logRequest(req, 202, start);
+		} catch (e) {
+			const status = errorHasStatus(e) ? e.status : 500;
+			const message = e instanceof Error ? e.message : "crawl enqueue failed";
+			if (status >= 500) this.logger.error({ error: e }, "[TimeMachine] crawl enqueue failed");
+			res.setHeader("Content-Type", "application/json");
+			res.writeHead(status).end(JSON.stringify({ error: message }));
+			this.logRequest(req, status, start);
+		}
+	}
+
 	private setCorsHeaders(req: IncomingMessage, res: ServerResponse): void {
 		const origin = req.headers.origin;
 		const allowed = this.config.allowedOrigins;
@@ -123,6 +162,31 @@ export class TimeMachineService {
 				}
 				await this.cache.handleCacheClear(req, res);
 				this.logRequest(req, 200, start);
+				return;
+			}
+			res.writeHead(404).end("Not found");
+			this.logRequest(req, 404, start);
+			return;
+		}
+
+		if (req.method === "POST") {
+			// Admin-triggered domain crawl. Shares the cache-clear token because
+			// both are operator endpoints with the same threat model; if you need
+			// finer-grained auth, split CACHE_CLEAR_TOKEN into two env vars.
+			const { pathname } = new URL(req.url ?? "/", `http://localhost`);
+			if (pathname === "/crawl") {
+				if (!this.config.cacheClearToken) {
+					res.writeHead(403).end("Crawl management not enabled");
+					this.logRequest(req, 403, start);
+					return;
+				}
+				const auth = req.headers.authorization ?? "";
+				if (auth !== `Bearer ${this.config.cacheClearToken}`) {
+					res.writeHead(401).end("Unauthorized");
+					this.logRequest(req, 401, start);
+					return;
+				}
+				await this.handleCrawlEnqueue(req, res, start);
 				return;
 			}
 			res.writeHead(404).end("Not found");

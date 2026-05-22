@@ -48,7 +48,7 @@ The proxy listens on port `8765` by default.
 | `PROXY_PREFIX` | _(empty)_ | Optional path prefix appended between timestamp and URL |
 | `CACHE_DIR` | `/app/cache` | Root directory for cached responses. The v2 tree lives under `${CACHE_DIR}/v2/`. |
 | `CACHE_ENABLED` | `true` | Set to `false` to disable disk caching |
-| `CACHE_CLEAR_TOKEN` | _(empty)_ | Bearer token required to call `DELETE /cache`. If empty, the endpoint is unprotected. |
+| `CACHE_CLEAR_TOKEN` | _(empty)_ | Bearer token required to call admin endpoints (`DELETE /cache`, `POST /crawl`). If empty, both endpoints are disabled (return `403`). |
 | `CORS_ORIGIN` | `http://localhost:5173` | Allowed CORS origin (`*` for open) |
 | `WHITELIST_HOSTS` | `*` | Comma-separated list of allowed target hostnames (supports `*.example.com` wildcards). `*` allows all. |
 | `REDIS_URL` | `redis://localhost:6379` | ioredis connection URL for BullMQ |
@@ -131,6 +131,43 @@ Returns `401` if the token is missing or incorrect.
 ```json
 { "deleted": 12, "errors": 0 }
 ```
+
+---
+
+### `POST /crawl`
+
+Admin-triggered domain crawl. Enqueues an `archive-crawl` job for `<host>` over the calendar-day window of `<time>`, downloading every URL under `<host>/*` that the Wayback Machine has captured that day. Unlike the fire-and-forget crawls triggered by HTML cache misses, this endpoint:
+
+- **Bypasses** the per-host 24h Redis budget — explicit operator actions aren't rate-limited.
+- **Returns** concrete error status codes instead of swallowing failures.
+- **Still respects** `WHITELIST_HOSTS`, `CRAWL_MAX_CDX_PAGES`, and the `DOMAIN_CRAWL_ENABLED` kill switch.
+
+Uses the same `CACHE_CLEAR_TOKEN` for authentication (shared admin token; split into separate env vars if you need finer-grained auth).
+
+| Query param | Required | Description |
+|---|---|---|
+| `host` | Yes | Bare hostname (`example.com` or `www.example.com`). Only letters/digits/dots/hyphens — no scheme, path, or port. |
+| `time` | No | 14-digit Wayback timestamp. Defaults to `ARCHIVE_TIME`. Crawl window is the calendar day of this timestamp. |
+
+**Example:**
+
+```bash
+curl -X POST -H "Authorization: Bearer $CACHE_CLEAR_TOKEN" \
+  "http://localhost:8765/crawl?host=www.aol.com&time=20010913000000"
+```
+
+**Responses:**
+
+| Status | Meaning |
+|---|---|
+| `202 Accepted` | Job enqueued. Body: `{ "host": "...", "time": "..." }`. The crawl runs asynchronously on the worker. |
+| `400 Bad Request` | `host` missing or contains illegal characters; or `time` is not 14 digits. |
+| `401 Unauthorized` | Missing or wrong `Authorization` header. |
+| `403 Forbidden` | `CACHE_CLEAR_TOKEN` is empty (endpoint disabled) **or** host is not in `WHITELIST_HOSTS`. |
+| `413 Payload Too Large` | CDX preflight reports more pages than `CRAWL_MAX_CDX_PAGES`. Raise the cap or pick a narrower day. |
+| `503 Service Unavailable` | `DOMAIN_CRAWL_ENABLED=false` (kill switch). |
+
+Progress is observable via bull-board (see `docker-compose.yml`) or the BullMQ events on the `archive-crawl` queue.
 
 ---
 
