@@ -26,29 +26,52 @@ const RE_WAYBACK_PATH = /^\/web\/(\d{14})(?:[a-z]{1,3}_)?\/(.+)$/i;
 
 const RE_CSS_URL = /(url\s*\(\s*['"]?)([^'")]+?)(['"]?\s*\))/gi;
 
-// Schemes/anchors that must never be rewritten.
-const RE_SKIP_PREFIX = /^(?:data:|mailto:|tel:|javascript:|blob:|about:|#)/i;
+// Schemes/anchors that must never be rewritten — opaque or non-network
+// protocols whose semantics break if proxied. List ported from main:
+// covers data URIs, mail/JS/dial/SMS handlers, blob/about/file/ftp,
+// websockets, magnet links, and platform/extension-internal URIs.
+const RE_SKIP_PREFIX =
+	/^(?:data:|mailto:|javascript:|tel:|sms:|blob:|about:|file:|ftp:|geo:|ws:|wss:|magnet:|view-source:|chrome:|safari-extension:|#)/i;
 
+// Tag → URL-bearing attributes. `<base>` is intentionally excluded: its href
+// is honored as the effective base for relative-URL resolution inside
+// rewriteHtmlUrls, then the tag is REMOVED entirely so the live browser
+// can't fall back to the archived origin for any unrewritten refs.
 const TAG_URL_ATTRS: Record<string, readonly string[]> = {
 	a: ["href"],
 	area: ["href"],
 	audio: ["src"],
-	base: ["href"],
+	blockquote: ["cite"],
+	body: ["background"],
 	button: ["formaction"],
+	del: ["cite"],
 	embed: ["src"],
 	form: ["action"],
-	iframe: ["src"],
-	img: ["src", "srcset"],
+	frame: ["src", "longdesc"],
+	html: ["manifest"],
+	iframe: ["src", "longdesc"],
+	img: ["src", "srcset", "longdesc"],
 	input: ["src", "formaction"],
+	ins: ["cite"],
 	link: ["href"],
 	object: ["data"],
+	q: ["cite"],
 	script: ["src"],
 	source: ["src", "srcset"],
+	table: ["background"],
+	td: ["background"],
+	th: ["background"],
 	track: ["src"],
+	tr: ["background"],
 	video: ["poster", "src"],
 };
 
 const SRCSET_ATTRS = new Set(["srcset"]);
+
+// `<meta http-equiv="refresh" content="<delay>;url=<url>">`. The URL portion
+// may be absent (refresh same page) — return unchanged then. Case-insensitive
+// on the `url=` separator; tolerates surrounding single/double quotes.
+const META_REFRESH_RE = /^(\s*\d+\s*;\s*url\s*=\s*)(.+?)\s*$/i;
 
 export const sanitizeTimeParam = (rawTime: string | null, defaultTime: string): string => {
 	if (!rawTime) return defaultTime;
@@ -117,6 +140,7 @@ const rewriteOneUrl = (raw: string, targetUrl: string, fallbackTime: string): st
 
 	try {
 		const resolved = new URL(trimmed, targetUrl);
+		if (resolved.protocol !== "http:" && resolved.protocol !== "https:") return raw;
 		return buildProxyUrl(resolved.toString(), fallbackTime);
 	} catch {
 		return raw;
@@ -142,6 +166,19 @@ export const rewriteCssUrls = (css: string, targetUrl: string, time: string): st
 		return `${before}${rewritten}${after}`;
 	});
 
+const rewriteMetaRefresh = (content: string, targetUrl: string, time: string): string => {
+	const m = content.match(META_REFRESH_RE);
+	if (!m) return content;
+	const prefix = m[1];
+	let url = m[2];
+	let quote = "";
+	if ((url.startsWith('"') && url.endsWith('"')) || (url.startsWith("'") && url.endsWith("'"))) {
+		quote = url[0];
+		url = url.slice(1, -1);
+	}
+	return `${prefix}${quote}${rewriteOneUrl(url, targetUrl, time)}${quote}`;
+};
+
 const isElement = (node: Node): node is Element =>
 	typeof (node as Partial<Element>).tagName === "string";
 
@@ -150,15 +187,52 @@ const isTextNode = (node: Node): node is TextNode => node.nodeName === "#text";
 const hasChildNodes = (node: Node): node is ParentNode =>
 	Array.isArray((node as Partial<ParentNode>).childNodes);
 
+// Honor any <base href> the archived page set (the original browser would
+// have done the same), then return the new effective base. Removes the
+// <base> tag(s) from the tree so the live browser can't fall back to the
+// archived origin for any unrewritten refs.
+const consumeBaseTag = (node: Node, currentBase: string): string => {
+	let effectiveBase = currentBase;
+	if (!hasChildNodes(node)) return effectiveBase;
+	const remaining = node.childNodes.filter((child) => {
+		if (isElement(child) && child.tagName.toLowerCase() === "base") {
+			const hrefAttr = child.attrs.find((a) => a.name === "href");
+			if (hrefAttr?.value) {
+				try {
+					effectiveBase = new URL(hrefAttr.value, currentBase).href;
+				} catch {
+					/* keep currentBase */
+				}
+			}
+			return false;
+		}
+		if (hasChildNodes(child)) {
+			effectiveBase = consumeBaseTag(child, effectiveBase);
+		}
+		return true;
+	});
+	node.childNodes = remaining;
+	return effectiveBase;
+};
+
+const isMetaRefresh = (el: Element): boolean => {
+	if (el.tagName.toLowerCase() !== "meta") return false;
+	const httpEquiv = el.attrs.find((a) => a.name === "http-equiv");
+	return httpEquiv?.value.toLowerCase() === "refresh";
+};
+
 const visit = (node: Node, targetUrl: string, time: string): void => {
 	if (isElement(node)) {
 		const tag = node.tagName.toLowerCase();
 		const urlAttrs = TAG_URL_ATTRS[tag];
+		const metaRefresh = isMetaRefresh(node);
 		for (const attr of node.attrs) {
 			if (urlAttrs?.includes(attr.name)) {
 				attr.value = SRCSET_ATTRS.has(attr.name)
 					? rewriteSrcsetValue(attr.value, targetUrl, time)
 					: rewriteOneUrl(attr.value, targetUrl, time);
+			} else if (metaRefresh && attr.name === "content") {
+				attr.value = rewriteMetaRefresh(attr.value, targetUrl, time);
 			} else if (attr.name === "style") {
 				attr.value = rewriteCssUrls(attr.value, targetUrl, time);
 			}
@@ -178,7 +252,9 @@ const visit = (node: Node, targetUrl: string, time: string): void => {
 
 export const rewriteHtmlUrls = (html: string, targetUrl: string, time: string): string => {
 	const doc = parse(html);
-	visit(doc, targetUrl, time);
+	// <base href> handling first so its effective base is used during visit().
+	const effectiveBase = consumeBaseTag(doc, targetUrl);
+	visit(doc, effectiveBase, time);
 	return serialize(doc);
 };
 
