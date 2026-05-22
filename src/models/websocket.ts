@@ -1,3 +1,5 @@
+import type { JobProgress } from "./job-progress";
+
 export interface WsRequest {
 	type: "fetch";
 	id?: string;
@@ -12,7 +14,7 @@ export const isWsRequest = (v: unknown): v is WsRequest => {
 };
 
 export interface WsResponse {
-	type: "result" | "error";
+	type: "result" | "error" | "progress";
 	id?: string;
 	html?: string;
 	contentType?: string;
@@ -22,4 +24,5 @@ export interface WsResponse {
 	cache?: "HIT" | "MISS";
 	status?: number;
 	message?: string;
+	progress?: JobProgress;
 }

@@ -1,7 +1,7 @@
 import { promises as fs } from "node:fs";
 import type IORedis from "ioredis";
 import type pino from "pino";
-import type { ArchiveJobClientPort } from "../clients/archive-job-client";
+import type { ArchiveJobClientPort, JobProgressListener } from "../clients/archive-job-client";
 import { dayWindow } from "../lib/archive-time";
 import { rewriteCssUrls, rewriteHtmlUrls, stripWaybackToolbar } from "../lib/url-rewriter";
 import { isHostWhitelisted } from "../lib/url-validator";
@@ -48,14 +48,25 @@ export class ProxyService {
 		private readonly redis: IORedis | null = null,
 	) {}
 
-	async fetch(targetUrl: string, time: string): Promise<ProxyResult> {
+	async fetch(
+		targetUrl: string,
+		time: string,
+		onProgress?: JobProgressListener,
+	): Promise<ProxyResult> {
 		const u = new URL(targetUrl);
 		let hit = await this.cache.lookup(targetUrl, time);
 		let cacheStatus: "HIT" | "MISS" = "HIT";
 
 		if (!hit) {
 			this.logger.info({ targetUrl, time }, "[CACHE MISS] enqueueing exact-url job");
-			await this.archiveJobClient.enqueueExactAndWait(targetUrl, time);
+			// Only forward onProgress when defined so the client receives a clean
+			// 2-arg call in the no-callback case (avoids leaking `undefined` into
+			// jest.toHaveBeenCalledWith assertions and matches the spec).
+			if (onProgress) {
+				await this.archiveJobClient.enqueueExactAndWait(targetUrl, time, onProgress);
+			} else {
+				await this.archiveJobClient.enqueueExactAndWait(targetUrl, time);
+			}
 			hit = await this.cache.lookup(targetUrl, time);
 			cacheStatus = "MISS";
 			if (!hit) {

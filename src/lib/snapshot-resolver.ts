@@ -24,34 +24,62 @@ export async function resolveSnapshotTimestamp(o: ResolveOpts): Promise<string |
 		throw new Error(`Invalid 14-digit timestamp: ${o.requestedTime}`);
 	}
 	const f = o.fetchImpl ?? fetch;
+	// Tracks whether ANY CDX call returned a parseable response. A null result
+	// is only authoritative ("no snapshot exists") when we got at least one
+	// real answer. If every CDX call failed at the transport / non-OK / parse
+	// layer, we throw instead of returning null — otherwise the worker would
+	// write a sticky 404 sentinel for what was actually a transient outage.
+	const tracker: CdxTracker = { anyOk: false };
 
-	for (const days of o.windowsDays) {
-		const from = days === 0 ? null : shiftTimestamp(o.requestedTime, -days);
-		const ts = await pickInWindow(o.variants, from, o.requestedTime, "latest", f, o.logger);
-		if (ts !== null) {
-			o.logger.debug(
-				{ from, to: o.requestedTime, resolved: ts },
-				"[snapshot-resolver] backward hit",
+	if (o.allowLaterFallback) {
+		// Bidirectional closest: each window straddles requestedTime, and the
+		// closest snapshot (by absolute distance) wins. Matches web.archive.org's
+		// /web/<ts>/<url> behavior, which redirects to the nearest capture in
+		// either direction.
+		for (const days of o.windowsDays) {
+			const from = days === 0 ? null : shiftTimestamp(o.requestedTime, -days);
+			const to = days === 0 ? MAX_TIMESTAMP : shiftTimestamp(o.requestedTime, days);
+			const ts = await pickClosest(o.variants, from, to, o.requestedTime, f, o.logger, tracker);
+			if (ts !== null) {
+				o.logger.debug({ from, to, resolved: ts }, "[snapshot-resolver] bidirectional hit");
+				return ts;
+			}
+		}
+	} else {
+		// Strict at-or-before: only consider snapshots ≤ requestedTime. Opt-in
+		// via ALLOW_LATER_FALLBACK=false for callers that need to avoid
+		// "snapshot from the future" semantics.
+		for (const days of o.windowsDays) {
+			const from = days === 0 ? null : shiftTimestamp(o.requestedTime, -days);
+			const ts = await pickInWindow(
+				o.variants,
+				from,
+				o.requestedTime,
+				"latest",
+				f,
+				o.logger,
+				tracker,
 			);
-			return ts;
+			if (ts !== null) {
+				o.logger.debug(
+					{ from, to: o.requestedTime, resolved: ts },
+					"[snapshot-resolver] backward hit",
+				);
+				return ts;
+			}
 		}
 	}
 
-	if (!o.allowLaterFallback) return null;
-
-	for (const days of o.windowsDays) {
-		const to = days === 0 ? MAX_TIMESTAMP : shiftTimestamp(o.requestedTime, days);
-		const ts = await pickInWindow(o.variants, o.requestedTime, to, "earliest", f, o.logger);
-		if (ts !== null) {
-			o.logger.debug(
-				{ from: o.requestedTime, to, resolved: ts },
-				"[snapshot-resolver] forward hit",
-			);
-			return ts;
-		}
+	if (!tracker.anyOk) {
+		throw new Error(
+			"[snapshot-resolver] all CDX queries failed (transport/non-OK/parse) — refusing to claim 'no snapshot' on indeterminate state",
+		);
 	}
-
 	return null;
+}
+
+interface CdxTracker {
+	anyOk: boolean;
 }
 
 async function pickInWindow(
@@ -61,12 +89,37 @@ async function pickInWindow(
 	pick: "latest" | "earliest",
 	fetchImpl: typeof fetch,
 	logger: pino.Logger,
+	tracker: CdxTracker,
 ): Promise<string | null> {
-	const results = await Promise.all(variants.map((v) => cdxQuery(v, from, to, fetchImpl, logger)));
+	const results = await Promise.all(
+		variants.map((v) => cdxQuery(v, from, to, fetchImpl, logger, tracker)),
+	);
 	const all = results.flat();
 	if (all.length === 0) return null;
 	if (pick === "latest") return all.reduce((a, b) => (a > b ? a : b));
 	return all.reduce((a, b) => (a < b ? a : b));
+}
+
+async function pickClosest(
+	variants: string[],
+	from: string | null,
+	to: string,
+	requestedTime: string,
+	fetchImpl: typeof fetch,
+	logger: pino.Logger,
+	tracker: CdxTracker,
+): Promise<string | null> {
+	const results = await Promise.all(
+		variants.map((v) => cdxQuery(v, from, to, fetchImpl, logger, tracker)),
+	);
+	const all = results.flat();
+	if (all.length === 0) return null;
+	// 14-digit timestamps fit comfortably in JS Number (max ~3e13 << 2^53),
+	// so plain subtraction is exact.
+	const req = Number(requestedTime);
+	return all.reduce((best, ts) =>
+		Math.abs(Number(ts) - req) < Math.abs(Number(best) - req) ? ts : best,
+	);
 }
 
 async function cdxQuery(
@@ -75,6 +128,7 @@ async function cdxQuery(
 	to: string,
 	fetchImpl: typeof fetch,
 	logger: pino.Logger,
+	tracker: CdxTracker,
 ): Promise<string[]> {
 	const params = new URLSearchParams();
 	params.set("url", url);
@@ -108,6 +162,9 @@ async function cdxQuery(
 		logger.debug({ url }, "[snapshot-resolver] CDX malformed JSON");
 		return [];
 	}
+	// Successful, parseable response — this CDX endpoint is healthy, so the
+	// absence of results is authoritative even if other queries fail.
+	tracker.anyOk = true;
 	if (!Array.isArray(json) || json.length === 0) return [];
 	const rows =
 		Array.isArray(json[0]) && (json[0] as unknown[])[0] === "timestamp" ? json.slice(1) : json;

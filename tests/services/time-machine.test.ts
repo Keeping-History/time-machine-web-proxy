@@ -192,3 +192,137 @@ describe("TimeMachineService HTTP handler — path-based /web/{ts}/{url} input",
 		}
 	});
 });
+
+describe("TimeMachineService HTTP handler — SSE (Accept: text/event-stream)", () => {
+	const okResult = {
+		contentType: "text/html",
+		archiveUrl: "http://example.com/page",
+		originalUrl: "http://example.com/page",
+		archiveTime: "20020401000000",
+		body: "<html>ok</html>",
+		cache: "MISS" as const,
+	};
+
+	async function readSseBody(r: Response): Promise<string> {
+		// fetch() in Node 22 fully buffers when we await text(); good enough
+		// because the server closes the connection after the final event.
+		return r.text();
+	}
+
+	function parseEvents(body: string): Array<{ event: string; data: unknown }> {
+		const out: Array<{ event: string; data: unknown }> = [];
+		for (const block of body.split("\n\n")) {
+			const trimmed = block.trim();
+			if (!trimmed) continue;
+			let event = "message";
+			let dataLine = "";
+			for (const line of trimmed.split("\n")) {
+				if (line.startsWith("event:")) event = line.slice("event:".length).trim();
+				else if (line.startsWith("data:")) dataLine = line.slice("data:".length).trim();
+			}
+			let data: unknown = dataLine;
+			try {
+				data = JSON.parse(dataLine);
+			} catch {
+				/* leave as string */
+			}
+			out.push({ event, data });
+		}
+		return out;
+	}
+
+	it("responds with Content-Type: text/event-stream when Accept includes it", async () => {
+		const fetchMock = jest.fn().mockResolvedValue(okResult);
+		const { svc } = makeService(fetchMock);
+		const port = await startAndAwaitListening(svc);
+		try {
+			const r = await fetch(
+				`http://127.0.0.1:${port}/web/20020401000000/http://example.com/page`,
+				{ headers: { Accept: "text/event-stream" } },
+			);
+			expect(r.status).toBe(200);
+			expect(r.headers.get("content-type")).toContain("text/event-stream");
+			await readSseBody(r);
+		} finally {
+			await svc.stop();
+		}
+	});
+
+	it("emits progress events forwarded from ProxyService.fetch followed by a result event", async () => {
+		const fetchMock = jest.fn(async (_url: string, _time: string, onProgress?: (p: unknown) => void) => {
+			onProgress?.({
+				stage: "resolved",
+				jobId: "job-1",
+				queue: "archive-exact",
+				ts: 1,
+				resolved: "20020401000000",
+			});
+			onProgress?.({
+				stage: "download_done",
+				jobId: "job-1",
+				queue: "archive-exact",
+				ts: 2,
+			});
+			return okResult;
+		});
+		const { svc } = makeService(fetchMock as unknown as ProxyMock["fetch"]);
+		const port = await startAndAwaitListening(svc);
+		try {
+			const r = await fetch(
+				`http://127.0.0.1:${port}/web/20020401000000/http://example.com/page`,
+				{ headers: { Accept: "text/event-stream" } },
+			);
+			const events = parseEvents(await readSseBody(r));
+			const stages = events
+				.filter((e) => e.event === "progress")
+				.map((e) => (e.data as { stage: string }).stage);
+			expect(stages).toEqual(["resolved", "download_done"]);
+			const result = events.find((e) => e.event === "result");
+			expect(result).toBeDefined();
+			expect((result?.data as { contentType: string }).contentType).toBe("text/html");
+		} finally {
+			await svc.stop();
+		}
+	});
+
+	it("emits an error event when ProxyService.fetch rejects (no HTTP error code — headers already flushed)", async () => {
+		const err = Object.assign(new Error("upstream gone"), { status: 502 });
+		const fetchMock = jest.fn().mockRejectedValue(err);
+		const { svc } = makeService(fetchMock);
+		const port = await startAndAwaitListening(svc);
+		try {
+			const r = await fetch(
+				`http://127.0.0.1:${port}/web/20020401000000/http://example.com/page`,
+				{ headers: { Accept: "text/event-stream" } },
+			);
+			// Stream opens with 200 — error is delivered as a frame.
+			expect(r.status).toBe(200);
+			const events = parseEvents(await readSseBody(r));
+			const errEvent = events.find((e) => e.event === "error");
+			expect(errEvent).toBeDefined();
+			expect((errEvent?.data as { status: number; message: string }).status).toBe(502);
+			expect((errEvent?.data as { status: number; message: string }).message).toBe(
+				"upstream gone",
+			);
+		} finally {
+			await svc.stop();
+		}
+	});
+
+	it("uses the buffered (non-SSE) response when Accept omits text/event-stream", async () => {
+		const fetchMock = jest.fn().mockResolvedValue(okResult);
+		const { svc } = makeService(fetchMock);
+		const port = await startAndAwaitListening(svc);
+		try {
+			const r = await fetch(
+				`http://127.0.0.1:${port}/web/20020401000000/http://example.com/page`,
+				{ headers: { Accept: "text/html" } },
+			);
+			expect(r.status).toBe(200);
+			expect(r.headers.get("content-type")).toContain("text/html");
+			expect(r.headers.get("content-type")).not.toContain("event-stream");
+		} finally {
+			await svc.stop();
+		}
+	});
+});
