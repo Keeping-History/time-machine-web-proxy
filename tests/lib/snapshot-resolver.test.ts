@@ -74,7 +74,10 @@ describe("resolveSnapshotTimestamp", () => {
 	});
 
 	it("throws when every CDX query returns malformed JSON (proxy injecting HTML, etc.)", async () => {
-		const fetchImpl = jest.fn().mockResolvedValue(new Response("not json"));
+		// mockImplementation (not mockResolvedValue) so each call gets a fresh
+		// Response — retry consumes the body on each attempt, so a single
+		// shared Response instance would throw "body already used" on retry 2.
+		const fetchImpl = jest.fn().mockImplementation(async () => new Response("not json"));
 		await expect(
 			resolveSnapshotTimestamp({
 				variants: ["https://x/"],
@@ -102,13 +105,15 @@ describe("resolveSnapshotTimestamp", () => {
 	});
 
 	it("returns null (not throw) when at least one CDX succeeds with empty array — that's authoritative 'no snapshots'", async () => {
-		// Two variants: one transport-fails, one returns valid empty. The empty
-		// response is the "real" answer; the transient failure must not poison
-		// the resolver into throwing.
-		const fetchImpl = jest
-			.fn()
-			.mockRejectedValueOnce(new Error("network down"))
-			.mockResolvedValueOnce(new Response("[]"));
+		// Two variants: one persistently transport-fails (across retries),
+		// one returns valid empty. The empty response is the "real" answer;
+		// the transient failure must not poison the resolver into throwing.
+		// Per-URL impl (not Once) so retries on the broken variant keep
+		// failing instead of pulling the "ok" mock by accident.
+		const fetchImpl = jest.fn().mockImplementation(async (input: string) => {
+			if (input.includes("broken")) throw new Error("network down");
+			return new Response("[]");
+		});
 		const result = await resolveSnapshotTimestamp({
 			variants: ["https://broken/", "https://ok/"],
 			requestedTime: "20010101000000",
@@ -299,5 +304,195 @@ describe("resolveSnapshotTimestamp", () => {
 			}),
 		).rejects.toThrow(/timestamp/i);
 		expect(fetchImpl).not.toHaveBeenCalled();
+	});
+
+	// --- CDX retry/backoff ----------------------------------------------------
+
+	describe("CDX retry/backoff", () => {
+		// Tests in this block use jest.useFakeTimers() to skip the
+		// CDX_RETRY_BASE_DELAY_MS waits; without it each retry test would block
+		// for up to 1.5s real time.
+		beforeEach(() => {
+			jest.useFakeTimers();
+		});
+		afterEach(() => {
+			jest.useRealTimers();
+		});
+
+		async function runWithTimers<T>(p: Promise<T>): Promise<T> {
+			// Repeatedly flush microtasks + timers until the promise resolves.
+			// Each retry has a setTimeout(backoff) that must fire before the
+			// next attempt; jest's runAllTimersAsync drains the queue end-to-end.
+			let settled = false;
+			let value!: T;
+			let err: unknown;
+			p.then(
+				(v) => {
+					value = v;
+					settled = true;
+				},
+				(e) => {
+					err = e;
+					settled = true;
+				},
+			);
+			while (!settled) {
+				await jest.runAllTimersAsync();
+			}
+			if (err !== undefined) throw err;
+			return value;
+		}
+
+		it("retries on transport error and succeeds on the second attempt", async () => {
+			const fetchImpl = jest
+				.fn()
+				.mockRejectedValueOnce(new Error("ECONNRESET"))
+				.mockResolvedValueOnce(mkCdxResponse(["20010917000000"]));
+			const result = await runWithTimers(
+				resolveSnapshotTimestamp({
+					variants: ["https://x/"],
+					requestedTime: "20011001000000",
+					windowsDays: [30],
+					allowLaterFallback: false,
+					fetchImpl: fetchImpl as unknown as typeof fetch,
+					logger,
+				}),
+			);
+			expect(result).toBe("20010917000000");
+			expect(fetchImpl).toHaveBeenCalledTimes(2);
+		});
+
+		it("retries on 5xx status and succeeds on the second attempt", async () => {
+			const fetchImpl = jest
+				.fn()
+				.mockResolvedValueOnce(new Response("svc unavailable", { status: 503 }))
+				.mockResolvedValueOnce(mkCdxResponse(["20010917000000"]));
+			const result = await runWithTimers(
+				resolveSnapshotTimestamp({
+					variants: ["https://x/"],
+					requestedTime: "20011001000000",
+					windowsDays: [30],
+					allowLaterFallback: false,
+					fetchImpl: fetchImpl as unknown as typeof fetch,
+					logger,
+				}),
+			);
+			expect(result).toBe("20010917000000");
+			expect(fetchImpl).toHaveBeenCalledTimes(2);
+		});
+
+		it("retries on 429 (rate limit) and succeeds on the second attempt", async () => {
+			const fetchImpl = jest
+				.fn()
+				.mockResolvedValueOnce(new Response("rate limited", { status: 429 }))
+				.mockResolvedValueOnce(mkCdxResponse(["20010917000000"]));
+			const result = await runWithTimers(
+				resolveSnapshotTimestamp({
+					variants: ["https://x/"],
+					requestedTime: "20011001000000",
+					windowsDays: [30],
+					allowLaterFallback: false,
+					fetchImpl: fetchImpl as unknown as typeof fetch,
+					logger,
+				}),
+			);
+			expect(result).toBe("20010917000000");
+			expect(fetchImpl).toHaveBeenCalledTimes(2);
+		});
+
+		it("retries on malformed JSON and succeeds on the second attempt", async () => {
+			const fetchImpl = jest
+				.fn()
+				.mockResolvedValueOnce(new Response("<html>error</html>"))
+				.mockResolvedValueOnce(mkCdxResponse(["20010917000000"]));
+			const result = await runWithTimers(
+				resolveSnapshotTimestamp({
+					variants: ["https://x/"],
+					requestedTime: "20011001000000",
+					windowsDays: [30],
+					allowLaterFallback: false,
+					fetchImpl: fetchImpl as unknown as typeof fetch,
+					logger,
+				}),
+			);
+			expect(result).toBe("20010917000000");
+			expect(fetchImpl).toHaveBeenCalledTimes(2);
+		});
+
+		it("does NOT retry on 4xx non-429 (treats as authoritative non-OK)", async () => {
+			const fetchImpl = jest.fn().mockResolvedValue(new Response("not found", { status: 404 }));
+			await expect(
+				runWithTimers(
+					resolveSnapshotTimestamp({
+						variants: ["https://x/"],
+						requestedTime: "20010101000000",
+						windowsDays: [30],
+						allowLaterFallback: false,
+						fetchImpl: fetchImpl as unknown as typeof fetch,
+						logger,
+					}),
+				),
+			).rejects.toThrow(/all CDX queries failed/i);
+			// 1 variant × 1 window × 1 attempt (no retry on 4xx).
+			expect(fetchImpl).toHaveBeenCalledTimes(1);
+		});
+
+		it("gives up after CDX_RETRY_MAX_ATTEMPTS on persistent 500s and falls through to throw", async () => {
+			const fetchImpl = jest.fn().mockResolvedValue(new Response("boom", { status: 500 }));
+			await expect(
+				runWithTimers(
+					resolveSnapshotTimestamp({
+						variants: ["https://x/"],
+						requestedTime: "20010101000000",
+						windowsDays: [30],
+						allowLaterFallback: false,
+						fetchImpl: fetchImpl as unknown as typeof fetch,
+						logger,
+					}),
+				),
+			).rejects.toThrow(/all CDX queries failed/i);
+			// 1 variant × 1 window × 3 attempts (initial + 2 retries).
+			expect(fetchImpl).toHaveBeenCalledTimes(3);
+		});
+
+		it("gives up after CDX_RETRY_MAX_ATTEMPTS on persistent transport rejections", async () => {
+			const fetchImpl = jest.fn().mockRejectedValue(new Error("network down"));
+			await expect(
+				runWithTimers(
+					resolveSnapshotTimestamp({
+						variants: ["https://x/"],
+						requestedTime: "20010101000000",
+						windowsDays: [30],
+						allowLaterFallback: false,
+						fetchImpl: fetchImpl as unknown as typeof fetch,
+						logger,
+					}),
+				),
+			).rejects.toThrow(/all CDX queries failed/i);
+			expect(fetchImpl).toHaveBeenCalledTimes(3);
+		});
+
+		it("recovery scenario from the production bug — all variants 5xx then 200 on retry", async () => {
+			// Two variants. Both fail with 503 on attempt 1, both succeed on attempt 2.
+			// Before the retry change this would throw 'all CDX queries failed'.
+			const fetchImpl = jest
+				.fn()
+				.mockResolvedValueOnce(new Response("", { status: 503 })) // variant A, attempt 1
+				.mockResolvedValueOnce(new Response("", { status: 503 })) // variant B, attempt 1
+				.mockResolvedValueOnce(mkCdxResponse(["20010917000000"])) // variant A, attempt 2
+				.mockResolvedValueOnce(mkEmptyResponse()); // variant B, attempt 2
+			const result = await runWithTimers(
+				resolveSnapshotTimestamp({
+					variants: ["https://www.x/", "https://x/"],
+					requestedTime: "20011001000000",
+					windowsDays: [30],
+					allowLaterFallback: false,
+					fetchImpl: fetchImpl as unknown as typeof fetch,
+					logger,
+				}),
+			);
+			expect(result).toBe("20010917000000");
+			expect(fetchImpl).toHaveBeenCalledTimes(4);
+		});
 	});
 });

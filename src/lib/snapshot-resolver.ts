@@ -9,6 +9,19 @@ const TIMESTAMP_RE = /^\d{14}$/;
 // sporadic connect timeouts to web.archive.org under that ceiling, surfacing
 // to the user as a 500 even though the downloader could likely have succeeded.
 const CDX_TIMEOUT_MS = 30_000;
+// Per-cdxQuery retry budget. Transient transport failures, 429, 5xx, and
+// malformed JSON (Wayback's load-balancer occasionally returns an HTML error
+// page mid-incident) are retried with exponential backoff before the call
+// gives up and returns []. With 1 initial + 2 retries and a 500ms base, the
+// added wall-clock per failing call is at most 500 + 1000 = 1500ms — small
+// enough to fit comfortably under BullMQ's per-attempt budget.
+const CDX_RETRY_MAX_ATTEMPTS = 3;
+const CDX_RETRY_BASE_DELAY_MS = 500;
+
+const sleep = (ms: number): Promise<void> =>
+	new Promise((resolve) => setTimeout(resolve, ms));
+
+const isRetryableStatus = (status: number): boolean => status === 429 || status >= 500;
 
 export interface ResolveOpts {
 	variants: string[];
@@ -140,40 +153,60 @@ async function cdxQuery(
 	params.set("to", to);
 	const requestUrl = `${CDX_ENDPOINT}?${params.toString()}`;
 
-	let res: Response;
-	try {
-		res = await fetchImpl(requestUrl, { signal: AbortSignal.timeout(CDX_TIMEOUT_MS) });
-	} catch (e) {
-		logger.debug(
-			{ url, error: e instanceof Error ? e.message : String(e) },
-			"[snapshot-resolver] CDX fetch failed",
-		);
-		return [];
+	for (let attempt = 1; attempt <= CDX_RETRY_MAX_ATTEMPTS; attempt += 1) {
+		const isLastAttempt = attempt === CDX_RETRY_MAX_ATTEMPTS;
+
+		let res: Response;
+		try {
+			res = await fetchImpl(requestUrl, { signal: AbortSignal.timeout(CDX_TIMEOUT_MS) });
+		} catch (e) {
+			logger.debug(
+				{ url, attempt, error: e instanceof Error ? e.message : String(e) },
+				"[snapshot-resolver] CDX fetch failed",
+			);
+			if (isLastAttempt) return [];
+			await sleep(CDX_RETRY_BASE_DELAY_MS * 2 ** (attempt - 1));
+			continue;
+		}
+		if (!res.ok) {
+			logger.debug(
+				{ url, attempt, status: res.status },
+				"[snapshot-resolver] CDX non-OK",
+			);
+			// 4xx (except 429) are not transient — no amount of retry will fix
+			// a malformed query. Give up immediately so we don't waste budget.
+			if (!isRetryableStatus(res.status) || isLastAttempt) return [];
+			await sleep(CDX_RETRY_BASE_DELAY_MS * 2 ** (attempt - 1));
+			continue;
+		}
+		const text = await res.text();
+		let json: unknown;
+		try {
+			json = JSON.parse(text);
+		} catch {
+			logger.debug({ url, attempt }, "[snapshot-resolver] CDX malformed JSON");
+			if (isLastAttempt) return [];
+			await sleep(CDX_RETRY_BASE_DELAY_MS * 2 ** (attempt - 1));
+			continue;
+		}
+		// Successful, parseable response — this CDX endpoint is healthy, so the
+		// absence of results is authoritative even if other queries fail.
+		tracker.anyOk = true;
+		if (!Array.isArray(json) || json.length === 0) return [];
+		const rows =
+			Array.isArray(json[0]) && (json[0] as unknown[])[0] === "timestamp"
+				? json.slice(1)
+				: json;
+		const timestamps: string[] = [];
+		for (const row of rows) {
+			const ts = Array.isArray(row) ? row[0] : null;
+			if (typeof ts === "string" && TIMESTAMP_RE.test(ts)) timestamps.push(ts);
+		}
+		return timestamps;
 	}
-	if (!res.ok) {
-		logger.debug({ url, status: res.status }, "[snapshot-resolver] CDX non-OK");
-		return [];
-	}
-	const text = await res.text();
-	let json: unknown;
-	try {
-		json = JSON.parse(text);
-	} catch {
-		logger.debug({ url }, "[snapshot-resolver] CDX malformed JSON");
-		return [];
-	}
-	// Successful, parseable response — this CDX endpoint is healthy, so the
-	// absence of results is authoritative even if other queries fail.
-	tracker.anyOk = true;
-	if (!Array.isArray(json) || json.length === 0) return [];
-	const rows =
-		Array.isArray(json[0]) && (json[0] as unknown[])[0] === "timestamp" ? json.slice(1) : json;
-	const timestamps: string[] = [];
-	for (const row of rows) {
-		const ts = Array.isArray(row) ? row[0] : null;
-		if (typeof ts === "string" && TIMESTAMP_RE.test(ts)) timestamps.push(ts);
-	}
-	return timestamps;
+	// Unreachable: the loop body either returns or continues; the final
+	// iteration's `isLastAttempt` branches return [].
+	return [];
 }
 
 function shiftTimestamp(ts: string, deltaDays: number): string {
