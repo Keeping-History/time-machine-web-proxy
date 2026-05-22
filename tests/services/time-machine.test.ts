@@ -35,6 +35,7 @@ const config: Config = {
 	outboundProxyCooldownMs: 60_000,
 	snapshotWindowDays: [30, 365, 3650, 0],
 	allowLaterFallback: false,
+	assetLaterFallback: true,
 };
 
 type ProxyMock = jest.Mocked<Pick<ProxyService, "fetch">>;

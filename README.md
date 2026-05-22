@@ -58,8 +58,9 @@ The proxy listens on port `8765` by default.
 | `WORKER_RATE_LIMIT_PER_SEC` | `1` | Outbound request ceiling. `1`/sec → 60 req/min, which stays under Wayback's sustained-IP-block threshold. |
 | `DOWNLOADER_THREADS_COUNT` | `3` | `wayback-machine-downloader` internal threads per job |
 | `CRAWL_MAX_CDX_PAGES` | `50` | CDX preflight cap. At default (50 pages × ~3000 URLs/page) ≈ 150k URLs per crawl. |
-| `SNAPSHOT_WINDOW_DAYS` | `30,365,3650,0` | Widening search windows (in days) for finding the closest Wayback snapshot at-or-before the requested time. Tried in order; `0` = unbounded. CSV of non-negative integers. |
-| `ALLOW_LATER_FALLBACK` | `false` | When `true` and no snapshot exists at-or-before the requested time, fall back to the earliest snapshot **after** the requested time. Default is the strict "no later than" semantic — `404` when no earlier snapshot exists. |
+| `SNAPSHOT_WINDOW_DAYS` | `30,365,3650,0` | Widening search windows (in days) for finding the closest Wayback snapshot around the requested time. Tried in order; `0` = unbounded. CSV of non-negative integers. |
+| `ALLOW_LATER_FALLBACK` | `false` | Bidirectional ("closest snapshot in either direction") resolution for **direct/top-level URLs** (the URL the user typed). Default `false` = strict at-or-before: a user who asked for a specific time should see the page state at that time, not a drifted later capture. |
+| `ASSET_LATER_FALLBACK` | `true` | Bidirectional resolution for **asset URLs** (images, CSS, JS, fonts, media — classified by file extension). Default `true` because asset captures rarely align with the page's exact requested timestamp; strict at-or-before would 404 sub-resources that exist a few hours/days later. Mirrors web.archive.org's own sub-resource behavior. |
 | `OUTBOUND_PROXY_URLS` | _(empty)_ | CSV of HTTP/HTTPS proxy URLs for outbound Wayback fetches (e.g. `http://us-wa-load-balancer.proxymesh.com:31280`). One URL → single proxy; multiple URLs → rotation. Empty = direct. |
 | `OUTBOUND_PROXY_CHOOSER` | `sequential` | Rotation strategy when multiple `OUTBOUND_PROXY_URLS` are set: `sequential` (round-robin) or `random` (uniform per-request). Case-insensitive. Ignored when only one URL is provided. |
 | `OUTBOUND_PROXY_USERNAME` | _(empty)_ | Basic-auth username applied to every proxy URL. Empty = IP whitelist auth. |
@@ -79,10 +80,12 @@ Fetches a URL from the archive at the given timestamp and returns the response w
 | `url` | Yes | Full URL to fetch (e.g. `https://example.com`) |
 | `time` | No | 14-digit Wayback timestamp (`YYYYMMDDHHmmss`). Defaults to `ARCHIVE_TIME`. Interpreted as **"on or before this date"** — the proxy serves the closest snapshot whose Wayback timestamp is ≤ `time`. `X-Archive-Time` in the response reflects the actual snapshot timestamp, which may differ from the requested `time`. |
 
-**Snapshot resolution.** The worker pre-flights the CDX API with widening windows (`SNAPSHOT_WINDOW_DAYS`) and selects the latest snapshot ≤ requested time across all URL variants (https/http × bare/www). If no snapshot exists in any window:
+**Snapshot resolution.** The worker pre-flights the CDX API with widening windows (`SNAPSHOT_WINDOW_DAYS`) and selects the closest snapshot across all URL variants (https/http × bare/www). The resolver runs in one of two modes per request, picked from the URL's file extension:
 
-- With `ALLOW_LATER_FALLBACK=false` (default), the request returns `404 Not found in archive`.
-- With `ALLOW_LATER_FALLBACK=true`, the worker searches forward and serves the earliest snapshot **after** the requested time.
+- **Direct/top-level URLs** (HTML pages, extensionless paths, anything not in the asset-extension allowlist): governed by `ALLOW_LATER_FALLBACK`. Default `false` → strict at-or-before; returns `404 Not found in archive` if no snapshot exists at or before the requested time.
+- **Asset URLs** (`.gif`/`.png`/`.css`/`.js`/`.woff2`/`.mp4`/etc.): governed by `ASSET_LATER_FALLBACK`. Default `true` → bidirectional closest; the resolver picks whichever capture is nearest to the requested time in either direction.
+
+This asymmetric default means a user who navigates to a 2001-09-13 page sees the page captured **at or before** that date, but the page's images, CSS, and scripts can come from the closest capture in either direction — useful because asset captures are typically sparser than HTML captures and a strict match would 404 most sub-resources.
 
 **Negative caching.** A `404` result is cached as a zero-byte sentinel at `<CACHE_DIR>/v2/<time>/<host>/.notfound/<sha256-prefix>`. Subsequent requests for the same `(url, time)` short-circuit at the cache lookup — no CDX or downloader work. Sentinels are cleared along with cached files by `DELETE /cache` (including the `?domain=` filter).
 

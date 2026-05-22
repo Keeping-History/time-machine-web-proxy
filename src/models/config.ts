@@ -33,7 +33,15 @@ export interface Config {
 
 	// — Snapshot timestamp resolver —
 	snapshotWindowDays: number[];
+	/** Bidirectional ("closest snapshot") resolution for DIRECT/top-level URLs.
+	 *  Off by default: a user who typed a time wants the page state at that
+	 *  time, not a drifted later capture. Env: ALLOW_LATER_FALLBACK. */
 	allowLaterFallback: boolean;
+	/** Bidirectional resolution for ASSET URLs (images, CSS, JS, fonts, media).
+	 *  On by default: assets rarely line up at the page's exact requested
+	 *  timestamp, and serving the closest capture matches web.archive.org's
+	 *  own behavior for sub-resources. Env: ASSET_LATER_FALLBACK. */
+	assetLaterFallback: boolean;
 }
 
 export type OutboundProxyChooser = "sequential" | "random";

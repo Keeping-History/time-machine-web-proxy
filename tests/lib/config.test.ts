@@ -35,6 +35,7 @@ describe("loadConfig", () => {
 		delete process.env.OUTBOUND_PROXY_PASSWORD;
 		delete process.env.SNAPSHOT_WINDOW_DAYS;
 		delete process.env.ALLOW_LATER_FALLBACK;
+		delete process.env.ASSET_LATER_FALLBACK;
 
 		const config = loadConfig();
 
@@ -58,7 +59,13 @@ describe("loadConfig", () => {
 		expect(config.outboundProxyUsername).toBe("");
 		expect(config.outboundProxyPassword).toBe("");
 		expect(config.snapshotWindowDays).toEqual([30, 365, 3650, 0]);
+		// Direct URLs default to strict at-or-before: the user typed a time
+		// and should see the page state at that time, not a drifted later one.
 		expect(config.allowLaterFallback).toBe(false);
+		// Assets default to bidirectional closest: sub-resources rarely line
+		// up at the page's exact requested timestamp, so the proxy mirrors
+		// web.archive.org's own "nearest snapshot" behavior for them.
+		expect(config.assetLaterFallback).toBe(true);
 	});
 
 	it("parses SNAPSHOT_WINDOW_DAYS CSV into number[]", () => {
@@ -86,7 +93,7 @@ describe("loadConfig", () => {
 		expect(() => loadConfig()).toThrow(/SNAPSHOT_WINDOW_DAYS/);
 	});
 
-	it("treats ALLOW_LATER_FALLBACK=true (case-insensitive) as true", () => {
+	it("treats ALLOW_LATER_FALLBACK=true (case-insensitive) as true — only opt-in value", () => {
 		process.env.ALLOW_LATER_FALLBACK = "true";
 		expect(loadConfig().allowLaterFallback).toBe(true);
 
@@ -97,7 +104,7 @@ describe("loadConfig", () => {
 		expect(loadConfig().allowLaterFallback).toBe(true);
 	});
 
-	it("treats any ALLOW_LATER_FALLBACK value other than true as false", () => {
+	it("treats any ALLOW_LATER_FALLBACK value other than 'true' as false (default-off for direct URLs)", () => {
 		process.env.ALLOW_LATER_FALLBACK = "false";
 		expect(loadConfig().allowLaterFallback).toBe(false);
 
@@ -106,6 +113,31 @@ describe("loadConfig", () => {
 
 		process.env.ALLOW_LATER_FALLBACK = "1";
 		expect(loadConfig().allowLaterFallback).toBe(false);
+
+		process.env.ALLOW_LATER_FALLBACK = "";
+		expect(loadConfig().allowLaterFallback).toBe(false);
+	});
+
+	it("treats ASSET_LATER_FALLBACK=false (case-insensitive) as false — only opt-out value", () => {
+		process.env.ASSET_LATER_FALLBACK = "false";
+		expect(loadConfig().assetLaterFallback).toBe(false);
+
+		process.env.ASSET_LATER_FALLBACK = "FALSE";
+		expect(loadConfig().assetLaterFallback).toBe(false);
+
+		process.env.ASSET_LATER_FALLBACK = "False";
+		expect(loadConfig().assetLaterFallback).toBe(false);
+	});
+
+	it("treats any ASSET_LATER_FALLBACK value other than 'false' as true (default-on for assets)", () => {
+		process.env.ASSET_LATER_FALLBACK = "true";
+		expect(loadConfig().assetLaterFallback).toBe(true);
+
+		process.env.ASSET_LATER_FALLBACK = "yes";
+		expect(loadConfig().assetLaterFallback).toBe(true);
+
+		process.env.ASSET_LATER_FALLBACK = "";
+		expect(loadConfig().assetLaterFallback).toBe(true);
 	});
 
 	it("reads values from env vars", () => {

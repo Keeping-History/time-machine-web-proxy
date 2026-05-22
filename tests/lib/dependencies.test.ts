@@ -100,6 +100,7 @@ const baseConfig: Config = {
 	outboundProxyCooldownMs: 60_000,
 	snapshotWindowDays: [30, 365, 3650, 0],
 	allowLaterFallback: false,
+	assetLaterFallback: true,
 };
 
 describe("Dependencies (TASK-010)", () => {
@@ -219,16 +220,18 @@ describe("Dependencies (TASK-010)", () => {
 		expect(typeof opts.resolver).toBe("function");
 	});
 
-	it("resolver closure invokes resolveSnapshotTimestamp with config windows + flag", async () => {
+	it("resolver closure forwards windows from config and allowLaterFallback from the caller", async () => {
+		// The closure no longer reads config.allowLaterFallback directly — the
+		// worker decides asset-vs-direct policy per-job and passes the chosen
+		// boolean in as the 3rd argument. The closure must forward it untouched.
 		new Dependencies({
 			...baseConfig,
 			snapshotWindowDays: [7, 90],
-			allowLaterFallback: true,
 		});
 		const opts = startArchiveWorkersMock.mock.calls[0][0] as {
-			resolver: (v: string[], t: string) => Promise<string | null>;
+			resolver: (v: string[], t: string, allowLaterFallback: boolean) => Promise<string | null>;
 		};
-		await opts.resolver(["https://example.com/"], "20200101000000");
+		await opts.resolver(["https://example.com/"], "20200101000000", true);
 		expect(resolveSnapshotTimestampMock).toHaveBeenCalledTimes(1);
 		const callArgs = resolveSnapshotTimestampMock.mock.calls[0][0] as {
 			variants: string[];
@@ -240,6 +243,31 @@ describe("Dependencies (TASK-010)", () => {
 		expect(callArgs.requestedTime).toBe("20200101000000");
 		expect(callArgs.windowsDays).toEqual([7, 90]);
 		expect(callArgs.allowLaterFallback).toBe(true);
+
+		// And the opposite case — false forwards as false.
+		resolveSnapshotTimestampMock.mockClear();
+		await opts.resolver(["https://example.com/"], "20200101000000", false);
+		const callArgs2 = resolveSnapshotTimestampMock.mock.calls[0][0] as {
+			allowLaterFallback: boolean;
+		};
+		expect(callArgs2.allowLaterFallback).toBe(false);
+	});
+
+	it("wires both fallback flags (direct + asset) into startArchiveWorkers", () => {
+		// Worker uses these to pick which policy to send to the resolver based
+		// on whether the job's URL is an asset. Regressions in the wiring would
+		// silently apply the wrong policy.
+		new Dependencies({
+			...baseConfig,
+			allowLaterFallback: false,
+			assetLaterFallback: true,
+		});
+		const opts = startArchiveWorkersMock.mock.calls[0][0] as {
+			allowLaterFallbackDirect: boolean;
+			allowLaterFallbackAsset: boolean;
+		};
+		expect(opts.allowLaterFallbackDirect).toBe(false);
+		expect(opts.allowLaterFallbackAsset).toBe(true);
 	});
 
 	it("passes a cache with sentinel and sidecar writers exposed to startArchiveWorkers", () => {

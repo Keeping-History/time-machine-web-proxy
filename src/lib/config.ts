@@ -76,7 +76,16 @@ export function loadConfig(): Config {
 		snapshotWindowDays: parseSnapshotWindowDays(
 			process.env.SNAPSHOT_WINDOW_DAYS ?? "30,365,3650,0",
 		),
+		// Direct/top-level URLs: strict at-or-before by default. The user typed
+		// a time and expects the page state at that time — drifting forward to
+		// a later capture changes what they're viewing. Opt in with
+		// ALLOW_LATER_FALLBACK=true if a strict snapshot is unavailable too often.
 		allowLaterFallback: process.env.ALLOW_LATER_FALLBACK?.toLowerCase() === "true",
+		// Asset URLs (images, CSS, JS, fonts, media): bidirectional closest by
+		// default. Sub-resources at the exact requested timestamp are rare;
+		// without later-fallback the proxy 404s assets that exist a few hours
+		// after the requested time. Opt out with ASSET_LATER_FALLBACK=false.
+		assetLaterFallback: process.env.ASSET_LATER_FALLBACK?.toLowerCase() !== "false",
 	};
 }
 

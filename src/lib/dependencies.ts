@@ -75,12 +75,18 @@ export class Dependencies {
 		attachQueueLogger(QUEUE_CRAWL, crawlEvents, logger);
 
 		const cache = new CacheService(config, logger);
-		const resolver = (variants: string[], requestedTime: string): Promise<string | null> =>
+		// Resolver closure is a thin pass-through — the worker decides which
+		// fallback policy to apply (direct vs asset) based on the URL.
+		const resolver = (
+			variants: string[],
+			requestedTime: string,
+			allowLaterFallback: boolean,
+		): Promise<string | null> =>
 			resolveSnapshotTimestamp({
 				variants,
 				requestedTime,
 				windowsDays: config.snapshotWindowDays,
-				allowLaterFallback: config.allowLaterFallback,
+				allowLaterFallback,
 				logger,
 			});
 		const workers = startArchiveWorkers({
@@ -92,6 +98,8 @@ export class Dependencies {
 			workerConcurrency: config.workerConcurrency,
 			workerRateLimitPerSec: config.workerRateLimitPerSec,
 			downloaderThreadsCount: config.downloaderThreadsCount,
+			allowLaterFallbackDirect: config.allowLaterFallback,
+			allowLaterFallbackAsset: config.assetLaterFallback,
 		});
 		const archiveJobClient = new ArchiveJobClient(
 			exactQueue,

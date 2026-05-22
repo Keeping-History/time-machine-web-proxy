@@ -24,6 +24,57 @@ const RE_ARCHIVE_URL =
 // own ?foo=bar parameters.
 const RE_WAYBACK_PATH = /^\/web\/(\d{14})(?:[a-z]{1,3}_)?\/(.+)$/i;
 
+// Extensions whose presence flips the snapshot resolver to bidirectional
+// ("closest snapshot") mode. Asset captures rarely line up with the
+// page-level requested timestamp, so a strict at-or-before match would
+// 404 sub-resources that exist a few hours/days later. HTML pages and
+// extensionless paths stay strict so the user sees the page state they
+// asked for. Lowercased; case-insensitive match in isAssetUrl.
+const ASSET_EXTENSIONS = new Set([
+	"gif",
+	"jpg",
+	"jpeg",
+	"png",
+	"webp",
+	"svg",
+	"ico",
+	"bmp",
+	"tiff",
+	"avif",
+	"css",
+	"js",
+	"mjs",
+	"map",
+	"woff",
+	"woff2",
+	"ttf",
+	"eot",
+	"otf",
+	"mp3",
+	"mp4",
+	"webm",
+	"ogg",
+	"wav",
+	"flac",
+	"m4a",
+	"m4v",
+	"pdf",
+]);
+
+export const isAssetUrl = (url: string): boolean => {
+	let pathname: string;
+	try {
+		pathname = new URL(url).pathname;
+	} catch {
+		return false;
+	}
+	const lastSlash = pathname.lastIndexOf("/");
+	const lastSegment = lastSlash === -1 ? pathname : pathname.slice(lastSlash + 1);
+	const lastDot = lastSegment.lastIndexOf(".");
+	if (lastDot <= 0) return false;
+	return ASSET_EXTENSIONS.has(lastSegment.slice(lastDot + 1).toLowerCase());
+};
+
 const RE_CSS_URL = /(url\s*\(\s*['"]?)([^'")]+?)(['"]?\s*\))/gi;
 
 // Schemes/anchors that must never be rewritten — opaque or non-network

@@ -137,6 +137,10 @@ function baseOpts(
 		workerConcurrency: 2,
 		workerRateLimitPerSec: 1,
 		downloaderThreadsCount: 3,
+		// Default: bidirectional disabled for both — keeps existing test assertions
+		// stable. Tests exercising asset-vs-direct policy override these explicitly.
+		allowLaterFallbackDirect: false,
+		allowLaterFallbackAsset: false,
 		...overrides,
 	};
 }
@@ -207,6 +211,167 @@ describe("startArchiveWorkers", () => {
 		startArchiveWorkers(baseOpts());
 		expect(findWorker(QUEUE_EXACT).on).toHaveBeenCalledWith("failed", expect.any(Function));
 		expect(findWorker(QUEUE_CRAWL).on).toHaveBeenCalledWith("failed", expect.any(Function));
+	});
+});
+
+// --- Progress emission -------------------------------------------------------
+
+describe("worker progress emission", () => {
+	function makeJob(
+		id: string,
+		data: Record<string, unknown>,
+		token = "tk",
+	): {
+		id: string;
+		data: Record<string, unknown>;
+		token: string;
+		updateProgress: jest.Mock;
+		extendLock?: jest.Mock;
+	} {
+		return {
+			id,
+			data,
+			token,
+			updateProgress: jest.fn().mockResolvedValue(undefined),
+			extendLock: jest.fn().mockResolvedValue(0),
+		};
+	}
+
+	function progressStages(updateProgress: jest.Mock): string[] {
+		return updateProgress.mock.calls.map((c) => (c[0] as { stage: string }).stage);
+	}
+
+	it("exact processor emits picked_up → availability_start → resolved → download_start → download_done", async () => {
+		const resolver = jest.fn().mockResolvedValue("20200115000000");
+		startArchiveWorkers(baseOpts({ resolver }));
+		const worker = findWorker(QUEUE_EXACT);
+		const job = makeJob("e1", { url: "https://example.com/", time: "20200101000000" });
+		await worker.processor(job);
+		expect(progressStages(job.updateProgress)).toEqual([
+			"picked_up",
+			"availability_start",
+			"resolved",
+			"download_start",
+			"download_done",
+		]);
+	});
+
+	it("exact processor emits no_snapshot (not resolved) when resolver returns null", async () => {
+		const resolver = jest.fn().mockResolvedValue(null);
+		startArchiveWorkers(baseOpts({ resolver }));
+		const worker = findWorker(QUEUE_EXACT);
+		const job = makeJob("e2", { url: "https://example.com/", time: "20200101000000" });
+		await worker.processor(job);
+		expect(progressStages(job.updateProgress)).toEqual([
+			"picked_up",
+			"availability_start",
+			"no_snapshot",
+		]);
+	});
+
+	it("exact processor emits error stage before re-throwing on downloader failure", async () => {
+		downloadFilesMock.mockRejectedValueOnce(new Error("boom"));
+		const resolver = jest.fn().mockResolvedValue("20200115000000");
+		startArchiveWorkers(baseOpts({ resolver }));
+		const worker = findWorker(QUEUE_EXACT);
+		const job = makeJob("e3", { url: "https://example.com/", time: "20200101000000" });
+		await expect(worker.processor(job)).rejects.toThrow("boom");
+		const stages = progressStages(job.updateProgress);
+		expect(stages).toContain("error");
+		// error must be the final stage (after download_start)
+		expect(stages[stages.length - 1]).toBe("error");
+		// payload carries error message
+		const errCall = job.updateProgress.mock.calls.find(
+			(c) => (c[0] as { stage: string }).stage === "error",
+		);
+		expect((errCall?.[0] as { error?: string }).error).toBe("boom");
+	});
+
+	it("exact processor's resolved-stage payload carries url, time, resolved, queue, jobId", async () => {
+		const resolver = jest.fn().mockResolvedValue("20200115000000");
+		startArchiveWorkers(baseOpts({ resolver }));
+		const worker = findWorker(QUEUE_EXACT);
+		const job = makeJob("e-payload", {
+			url: "https://example.com/",
+			time: "20200101000000",
+		});
+		await worker.processor(job);
+		const resolvedCall = job.updateProgress.mock.calls.find(
+			(c) => (c[0] as { stage: string }).stage === "resolved",
+		);
+		expect(resolvedCall?.[0]).toMatchObject({
+			stage: "resolved",
+			queue: QUEUE_EXACT,
+			jobId: "e-payload",
+			url: "https://example.com/",
+			time: "20200101000000",
+			resolved: "20200115000000",
+		});
+	});
+
+	it("crawl processor emits picked_up → download_start → download_done", async () => {
+		startArchiveWorkers(baseOpts());
+		const worker = findWorker(QUEUE_CRAWL);
+		const job = makeJob("c1", { host: "example.com", time: "20200101000000" });
+		await worker.processor(job);
+		expect(progressStages(job.updateProgress)).toEqual([
+			"picked_up",
+			"download_start",
+			"download_done",
+		]);
+	});
+
+	it("crawl processor emits error stage before re-throwing", async () => {
+		downloadFilesMock.mockRejectedValueOnce(new Error("crawl-bust"));
+		startArchiveWorkers(baseOpts());
+		const worker = findWorker(QUEUE_CRAWL);
+		const job = makeJob("c2", { host: "example.com", time: "20200101000000" });
+		await expect(worker.processor(job)).rejects.toThrow("crawl-bust");
+		const stages = progressStages(job.updateProgress);
+		expect(stages[stages.length - 1]).toBe("error");
+	});
+
+	it("worker does NOT fail the job when updateProgress throws (observability never blocks correctness)", async () => {
+		const resolver = jest.fn().mockResolvedValue("20200115000000");
+		startArchiveWorkers(baseOpts({ resolver }));
+		const worker = findWorker(QUEUE_EXACT);
+		const job = makeJob("e-update-fails", {
+			url: "https://example.com/",
+			time: "20200101000000",
+		});
+		job.updateProgress.mockRejectedValue(new Error("redis down"));
+		// Should still resolve successfully — progress writes are best-effort.
+		await expect(worker.processor(job)).resolves.toBeUndefined();
+	});
+});
+
+// --- attachQueueLogger: progress event --------------------------------------
+
+describe("attachQueueLogger progress event", () => {
+	it("registers a 'progress' handler that logs the payload at debug", () => {
+		const logger = makeLogger();
+		const handlers: Record<string, (args: unknown) => void> = {};
+		const events = {
+			on: jest.fn((event: string, handler: (args: unknown) => void) => {
+				handlers[event] = handler;
+			}),
+		};
+		attachQueueLogger(
+			"archive-exact",
+			events as unknown as Parameters<typeof attachQueueLogger>[1],
+			logger,
+		);
+		expect(events.on).toHaveBeenCalledWith("progress", expect.any(Function));
+		handlers.progress({ jobId: "p1", data: { stage: "resolved", jobId: "p1", queue: "archive-exact", ts: 1, resolved: "20200115000000" } });
+		expect(logger.debug).toHaveBeenCalledWith(
+			expect.objectContaining({
+				queue: "archive-exact",
+				jobId: "p1",
+				event: "progress",
+				progress: expect.objectContaining({ stage: "resolved" }),
+			}),
+			expect.stringContaining("progress"),
+		);
 	});
 });
 
@@ -323,6 +488,61 @@ describe("exact worker processor", () => {
 		const args = WaybackMachineDownloaderMock.mock.calls[0][0];
 		expect(args.from_timestamp).toBe("20200115000000");
 		expect(args.to_timestamp).toBe("20200115000000");
+	});
+
+	it("passes allowLaterFallbackDirect=true to resolver for a direct/top-level URL", async () => {
+		// Direct URL (no asset extension) → worker selects the "direct" flag.
+		const resolver = jest.fn().mockResolvedValue("20200115000000");
+		startArchiveWorkers(
+			baseOpts({ resolver, allowLaterFallbackDirect: true, allowLaterFallbackAsset: false }),
+		);
+		const worker = findWorker(QUEUE_EXACT);
+		await worker.processor({
+			id: "j-direct",
+			data: { url: "https://example.com/", time: "20200101000000" },
+			token: "tk-d",
+		});
+		const [, , allowLaterFallback] = resolver.mock.calls[0];
+		expect(allowLaterFallback).toBe(true);
+	});
+
+	it("passes allowLaterFallbackAsset=true to resolver for an asset URL", async () => {
+		// Asset URL (.gif) → worker selects the "asset" flag, regardless of
+		// the direct policy. This is the AOL screenname_logo.gif regression
+		// fix: the proxy will no longer write a 404 sentinel just because the
+		// exact requested timestamp had no statuscode:200 capture.
+		const resolver = jest.fn().mockResolvedValue("20010914224112");
+		startArchiveWorkers(
+			baseOpts({ resolver, allowLaterFallbackDirect: false, allowLaterFallbackAsset: true }),
+		);
+		const worker = findWorker(QUEUE_EXACT);
+		await worker.processor({
+			id: "j-asset",
+			data: {
+				url: "https://www.aol.com/gr/hp01/screenname_logo.gif",
+				time: "20010913100012",
+			},
+			token: "tk-a",
+		});
+		const [, , allowLaterFallback] = resolver.mock.calls[0];
+		expect(allowLaterFallback).toBe(true);
+	});
+
+	it("passes allowLaterFallbackDirect=false to resolver for a direct URL when configured strict", async () => {
+		// Asymmetric config: direct strict, asset bidirectional (the default
+		// shipped policy). A direct URL must NOT inherit the asset flag.
+		const resolver = jest.fn().mockResolvedValue("20200101000000");
+		startArchiveWorkers(
+			baseOpts({ resolver, allowLaterFallbackDirect: false, allowLaterFallbackAsset: true }),
+		);
+		const worker = findWorker(QUEUE_EXACT);
+		await worker.processor({
+			id: "j-direct-strict",
+			data: { url: "https://example.com/about", time: "20200101000000" },
+			token: "tk-ds",
+		});
+		const [, , allowLaterFallback] = resolver.mock.calls[0];
+		expect(allowLaterFallback).toBe(false);
 	});
 
 	it("writes sentinel and skips downloader when resolver returns null", async () => {

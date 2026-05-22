@@ -1,4 +1,5 @@
 import {
+	isAssetUrl,
 	parseWaybackPath,
 	rewriteCssUrls,
 	rewriteHtmlUrls,
@@ -439,5 +440,53 @@ describe("stripWaybackToolbar", () => {
 		// The exact comment text in current impl ends with "End Wayback Rewrite JS Include";
 		// the goal is that wayback's injected JS is gone.
 		expect(r).not.toContain("wb");
+	});
+});
+
+describe("isAssetUrl", () => {
+	// Asset-classification drives whether the resolver allows later-fallback:
+	// assets opt into bidirectional ("closest snapshot") resolution because
+	// individual sub-resources rarely exist at a page's exact requested time;
+	// direct/top-level URLs stay strict so the user sees the page state they
+	// asked for, not a drifted version.
+	it.each([
+		["http://example.com/logo.gif", true],
+		["http://example.com/photo.JPG", true],
+		["http://example.com/style.css", true],
+		["http://example.com/bundle.js", true],
+		["http://example.com/module.mjs", true],
+		["http://example.com/font.woff2", true],
+		["http://example.com/clip.mp4", true],
+		["http://example.com/icon.svg", true],
+	])("returns true for known asset extension: %s", (url, expected) => {
+		expect(isAssetUrl(url)).toBe(expected);
+	});
+
+	it.each([
+		["http://example.com/", false],
+		["http://example.com/about", false],
+		["http://example.com/index.html", false],
+		["http://example.com/page.htm", false],
+		["http://example.com/api/users", false],
+		["http://example.com/path.with.dots/no-ext", false],
+	])("returns false for non-asset URL: %s", (url, expected) => {
+		expect(isAssetUrl(url)).toBe(expected);
+	});
+
+	it("returns false when URL is malformed (defensive)", () => {
+		expect(isAssetUrl("not a url")).toBe(false);
+	});
+
+	it("ignores query string and fragment when classifying", () => {
+		// The path determines the file type; ?v=12345 cache-busters and #anchors
+		// must not flip the classification or hide an extension.
+		expect(isAssetUrl("http://example.com/logo.png?v=12345")).toBe(true);
+		expect(isAssetUrl("http://example.com/logo.png#hash")).toBe(true);
+		expect(isAssetUrl("http://example.com/page?download=file.zip")).toBe(false);
+	});
+
+	it("is case-insensitive on the extension", () => {
+		expect(isAssetUrl("http://example.com/IMAGE.PNG")).toBe(true);
+		expect(isAssetUrl("http://example.com/script.JS")).toBe(true);
 	});
 });
