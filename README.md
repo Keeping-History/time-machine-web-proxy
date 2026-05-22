@@ -148,26 +148,34 @@ Uses the same `CACHE_CLEAR_TOKEN` for authentication (shared admin token; split 
 |---|---|---|
 | `host` | Yes | Bare hostname (`example.com` or `www.example.com`). Only letters/digits/dots/hyphens — no scheme, path, or port. |
 | `time` | No | 14-digit Wayback timestamp. Defaults to `ARCHIVE_TIME`. Crawl window is the calendar day of this timestamp. |
+| `skip_preflight` | No | Set to `true` (case-insensitive) to bypass the `CRAWL_MAX_CDX_PAGES` CDX preflight check. Use when archive.org's CDX endpoint is rejecting your egress IP but the downloader path still works. **You lose the runaway-crawl size guard** — only use when you already know the target host's archived footprint. Any value other than literal `true` is ignored. |
 
 **Example:**
 
 ```bash
 curl -X POST -H "Authorization: Bearer $CACHE_CLEAR_TOKEN" \
   "http://localhost:8765/crawl?host=www.aol.com&time=20010913000000"
+
+# Bypass the size-cap preflight when CDX is unreachable from your egress IP:
+curl -X POST -H "Authorization: Bearer $CACHE_CLEAR_TOKEN" \
+  "http://localhost:8765/crawl?host=www.aol.com&time=20010913000000&skip_preflight=true"
 ```
 
 **Responses:**
 
 | Status | Meaning |
 |---|---|
-| `202 Accepted` | Job enqueued. Body: `{ "host": "...", "time": "..." }`. The crawl runs asynchronously on the worker. |
+| `202 Accepted` | Job enqueued. Body: `{ "host": "...", "time": "...", "preflightSkipped": false }`. The crawl runs asynchronously on the worker. |
 | `400 Bad Request` | `host` missing or contains illegal characters; or `time` is not 14 digits. |
 | `401 Unauthorized` | Missing or wrong `Authorization` header. |
 | `403 Forbidden` | `CACHE_CLEAR_TOKEN` is empty (endpoint disabled) **or** host is not in `WHITELIST_HOSTS`. |
-| `413 Payload Too Large` | CDX preflight reports more pages than `CRAWL_MAX_CDX_PAGES`. Raise the cap or pick a narrower day. |
+| `413 Payload Too Large` | CDX preflight reports more pages than `CRAWL_MAX_CDX_PAGES`. Raise the cap, pick a narrower day, or pass `skip_preflight=true` if you trust the host's size. |
+| `500 Internal Server Error` | CDX preflight network failure (e.g. archive.org rejecting your egress IP). The error body includes the underlying cause — typical codes: `ECONNREFUSED`, `ENOTFOUND`, `ETIMEDOUT`. Route through `OUTBOUND_PROXY_URLS` or pass `skip_preflight=true`. |
 | `503 Service Unavailable` | `DOMAIN_CRAWL_ENABLED=false` (kill switch). |
 
 Progress is observable via bull-board (see `docker-compose.yml`) or the BullMQ events on the `archive-crawl` queue.
+
+**Note on egress:** All `fetch()` calls in this process (including the CDX preflight) route through `OUTBOUND_PROXY_URLS` when set — `installOutboundProxy` calls `setGlobalDispatcher` at startup. If archive.org is refusing connections from your datacenter IP, point `OUTBOUND_PROXY_URLS` at a residential / ProxyMesh-style proxy and restart.
 
 ---
 

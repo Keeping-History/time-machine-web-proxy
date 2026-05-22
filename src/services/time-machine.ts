@@ -102,10 +102,14 @@ export class TimeMachineService {
 			this.logRequest(req, 400, start);
 			return;
 		}
+		// Opt-in: skip the CDX size preflight. Only "true" (case-insensitive)
+		// counts as opt-in — typos like "yes"/"1" must NOT silently disable the
+		// safety net.
+		const skipPreflight = (u.searchParams.get("skip_preflight") ?? "").toLowerCase() === "true";
 		try {
-			await this.proxy.triggerDomainCrawl(host, time);
+			await this.proxy.triggerDomainCrawl(host, time, { skipPreflight });
 			res.setHeader("Content-Type", "application/json");
-			res.writeHead(202).end(JSON.stringify({ host, time }));
+			res.writeHead(202).end(JSON.stringify({ host, time, preflightSkipped: skipPreflight }));
 			this.logRequest(req, 202, start);
 		} catch (e) {
 			const status = errorHasStatus(e) ? e.status : 500;

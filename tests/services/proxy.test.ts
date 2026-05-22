@@ -546,6 +546,56 @@ describe("ProxyService.triggerDomainCrawl — explicit admin enqueue", () => {
 		});
 	});
 
+	it("skipPreflight:true bypasses CDX size check and enqueues without calling fetch", async () => {
+		// Escape hatch for when archive.org's CDX endpoint is refusing our IP
+		// but the downloader path still works. Admin opts in explicitly via the
+		// HTTP query param; we must NOT touch fetch at all here, so the
+		// preflight-induced ECONNREFUSED can't bubble up.
+		const cache = makeCache();
+		const client = makeClient();
+		mockedFetch.mockImplementation(() => {
+			throw new Error("fetch must not be called when skipPreflight is true");
+		});
+		const svc = new ProxyService(cache, client, logger, {
+			...baseConfig,
+			whitelistHosts: "example.com",
+		});
+
+		await svc.triggerDomainCrawl("example.com", TIME, { skipPreflight: true });
+
+		expect(mockedFetch).not.toHaveBeenCalled();
+		expect(client.enqueueDomainCrawl).toHaveBeenCalledWith("example.com", TIME);
+	});
+
+	it("skipPreflight:true still enforces the whitelist (security boundary, not a rate-limit)", async () => {
+		// Even with the size-cap bypass, an admin can't crawl arbitrary hosts.
+		const cache = makeCache();
+		const client = makeClient();
+		const svc = new ProxyService(cache, client, logger, {
+			...baseConfig,
+			whitelistHosts: "other.com",
+		});
+
+		await expect(
+			svc.triggerDomainCrawl("example.com", TIME, { skipPreflight: true }),
+		).rejects.toMatchObject({ status: 403 });
+		expect(client.enqueueDomainCrawl).not.toHaveBeenCalled();
+	});
+
+	it("skipPreflight:true still respects the DOMAIN_CRAWL_ENABLED kill switch", async () => {
+		const cache = makeCache();
+		const client = makeClient();
+		const svc = new ProxyService(cache, client, logger, {
+			...baseConfig,
+			domainCrawlEnabled: false,
+		});
+
+		await expect(
+			svc.triggerDomainCrawl("example.com", TIME, { skipPreflight: true }),
+		).rejects.toMatchObject({ status: 503 });
+		expect(client.enqueueDomainCrawl).not.toHaveBeenCalled();
+	});
+
 	it("does NOT consult the Redis 24h budget — explicit admin action bypasses throttle", async () => {
 		// The fire-and-forget path takes a SET NX EX lock per host; the explicit
 		// path must not. Verify by passing a redis whose `set` would refuse the

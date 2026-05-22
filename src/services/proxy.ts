@@ -157,26 +157,42 @@ export class ProxyService {
 	 *   - Bypasses the per-host 24h Redis budget. The budget exists to throttle
 	 *     fire-and-forget side-effects of foreground requests; an explicit admin
 	 *     action shouldn't inherit that throttle.
-	 *   - STILL enforces the whitelist and `CRAWL_MAX_CDX_PAGES` cap — those are
-	 *     safety boundaries, not rate-limits.
+	 *   - STILL enforces the whitelist — that's a security boundary, not a rate-limit.
 	 *   - STILL respects `DOMAIN_CRAWL_ENABLED` as the kill switch.
+	 *
+	 * `opts.skipPreflight` — when true, skips the CDX page-count cap check. Useful
+	 * when archive.org is rejecting/timing-out CDX requests from your egress IP
+	 * but the downloader path still works. Trade-off: you lose the runaway-crawl
+	 * guard, so the admin must know the target host's size or risk a multi-hour
+	 * download. Always opt-in; never on by default.
 	 */
-	async triggerDomainCrawl(host: string, time: string): Promise<void> {
+	async triggerDomainCrawl(
+		host: string,
+		time: string,
+		opts: { skipPreflight?: boolean } = {},
+	): Promise<void> {
 		if (!this.config.domainCrawlEnabled) {
 			throw statusError("Domain crawl is disabled (DOMAIN_CRAWL_ENABLED=false)", 503);
 		}
 		if (!isHostWhitelisted(`https://${host}`, this.config.whitelistHosts)) {
 			throw statusError("Host not whitelisted", 403);
 		}
-		const pages = await this.cdxPageCount(host, time);
-		if (pages > this.config.crawlMaxCdxPages) {
-			throw statusError(
-				`Crawl too large: ${pages} CDX pages > ${this.config.crawlMaxCdxPages} cap`,
-				413,
+		if (opts.skipPreflight) {
+			this.logger.warn(
+				{ host, time },
+				"[crawl] preflight SKIPPED by admin — runaway-crawl guard disabled for this request",
 			);
+		} else {
+			const pages = await this.cdxPageCount(host, time);
+			if (pages > this.config.crawlMaxCdxPages) {
+				throw statusError(
+					`Crawl too large: ${pages} CDX pages > ${this.config.crawlMaxCdxPages} cap`,
+					413,
+				);
+			}
+			this.logger.info({ host, time, pages }, "[crawl] explicit enqueue (preflight ok)");
 		}
 		await this.archiveJobClient.enqueueDomainCrawl(host, time);
-		this.logger.info({ host, time, pages }, "[crawl] explicit enqueue");
 	}
 
 	private async cdxPageCount(host: string, time: string): Promise<number> {
