@@ -2,13 +2,17 @@ import { promises as fs } from "node:fs";
 import type IORedis from "ioredis";
 import type pino from "pino";
 import type { ArchiveJobClientPort } from "../clients/archive-job-client";
+import { dayWindow } from "../lib/archive-time";
 import { rewriteCssUrls, rewriteHtmlUrls, stripWaybackToolbar } from "../lib/url-rewriter";
 import { isHostWhitelisted } from "../lib/url-validator";
 import type { Config } from "../models/config";
 import type { ProxyResult } from "../models/proxy";
 import type { CacheService } from "./cache";
 
-const CDX_TIMEOUT_MS = 10_000;
+// 30s — matches AVAILABILITY_TIMEOUT_MS in the worker. Production logs show
+// sporadic 10s connect timeouts against web.archive.org; widening here keeps
+// the size-preflight from misclassifying transient slowness as "skip crawl".
+const CDX_TIMEOUT_MS = 30_000;
 const HOST_BUDGET_TTL_S = 86_400;
 
 interface StatusError extends Error {
@@ -135,9 +139,14 @@ export class ProxyService {
 	}
 
 	private async cdxPageCount(host: string, time: string): Promise<number> {
+		// Widen to the calendar day of `time` so CDX counts captures across the
+		// day instead of the exact second (which virtually never matches and
+		// would always yield 0, defeating the crawl-size cap). Shared helper
+		// keeps this in lockstep with the crawler's from/to window.
+		const { from, to } = dayWindow(time);
 		const u =
 			`https://web.archive.org/cdx/search/cdx?url=${encodeURIComponent(`${host}/*`)}` +
-			`&from=${time}&to=${time}&output=json&showNumPages=true`;
+			`&from=${from}&to=${to}&output=json&showNumPages=true`;
 		const r = await fetch(u, { signal: AbortSignal.timeout(CDX_TIMEOUT_MS) });
 		if (!r.ok) throw new Error(`CDX preflight ${r.status}`);
 		const txt = (await r.text()).trim();
