@@ -135,43 +135,57 @@ describe("installOutboundProxy", () => {
 			expect(infoSpy.mock.calls.some((c) => c[1] === "[outbound-proxy] installed")).toBe(true);
 		});
 
-		it("throws when EVERY probe fails (transport error)", async () => {
+		it("installs rotator with every agent in cooldown when EVERY probe fails (transport error)", async () => {
 			mockRequestImpl(async () => {
 				throw new Error("ECONNREFUSED");
 			});
 			const { logger, errorSpy } = makeLogger();
-			await expect(
-				installOutboundProxy(
-					makeConfig({
-						outboundProxyUrls: ["http://a.example.com:31280", "http://b.example.com:31280"],
-					}),
-					logger,
-				),
-			).rejects.toThrow(/all 2 configured proxies failed connectivity probe.*ECONNREFUSED/);
-			expect(setGlobalDispatcherMock).not.toHaveBeenCalled();
+			await installOutboundProxy(
+				makeConfig({
+					outboundProxyUrls: ["http://a.example.com:31280", "http://b.example.com:31280"],
+				}),
+				logger,
+			);
+			expect(setGlobalDispatcherMock).toHaveBeenCalledTimes(1);
+			expect(setGlobalDispatcherMock.mock.calls[0][0]).toBeInstanceOf(RotatingProxyDispatcher);
 			// Each failed proxy logs an error
 			expect(
 				errorSpy.mock.calls.filter((c) => c[1] === "[outbound-proxy] startup probe failed").length,
 			).toBe(2);
+			// The "all probes failed → install anyway" warning fires once.
+			expect(
+				errorSpy.mock.calls.filter((c) =>
+					typeof c[1] === "string" && c[1].startsWith("[outbound-proxy] all startup probes failed"),
+				).length,
+			).toBe(1);
+			// Both agents seeded in cooldown.
+			expect(
+				errorSpy.mock.calls.filter(
+					(c) => c[1] === "[outbound-proxy] proxy taken out of rotation",
+				).length,
+			).toBe(2);
 		});
 
-		it("throws when EVERY probe fails (proxy 407 auth)", async () => {
+		it("installs rotator with every agent in cooldown when EVERY probe fails (proxy 407 auth)", async () => {
 			mockRequestImpl(async () => ({
 				statusCode: 407,
 				body: { dump: jest.fn().mockResolvedValue(undefined) },
 			}));
-			const { logger } = makeLogger();
-			await expect(
-				installOutboundProxy(
-					makeConfig({
-						outboundProxyUrls: ["http://a.example.com:31280"],
-						outboundProxyUsername: "alice",
-						outboundProxyPassword: "wrong",
-					}),
-					logger,
-				),
-			).rejects.toThrow(/407.*auth failed/);
-			expect(setGlobalDispatcherMock).not.toHaveBeenCalled();
+			const { logger, errorSpy } = makeLogger();
+			await installOutboundProxy(
+				makeConfig({
+					outboundProxyUrls: ["http://a.example.com:31280"],
+					outboundProxyUsername: "alice",
+					outboundProxyPassword: "wrong",
+				}),
+				logger,
+			);
+			expect(setGlobalDispatcherMock).toHaveBeenCalledTimes(1);
+			expect(
+				errorSpy.mock.calls.filter((c) =>
+					typeof c[1] === "string" && c[1].startsWith("[outbound-proxy] all startup probes failed"),
+				).length,
+			).toBe(1);
 		});
 
 		it("installs when some probes succeed; failed agents are seeded in cooldown", async () => {
