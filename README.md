@@ -60,9 +60,11 @@ The proxy listens on port `8765` by default.
 | `CRAWL_MAX_CDX_PAGES` | `50` | CDX preflight cap. At default (50 pages × ~3000 URLs/page) ≈ 150k URLs per crawl. |
 | `SNAPSHOT_WINDOW_DAYS` | `30,365,3650,0` | Widening search windows (in days) for finding the closest Wayback snapshot at-or-before the requested time. Tried in order; `0` = unbounded. CSV of non-negative integers. |
 | `ALLOW_LATER_FALLBACK` | `false` | When `true` and no snapshot exists at-or-before the requested time, fall back to the earliest snapshot **after** the requested time. Default is the strict "no later than" semantic — `404` when no earlier snapshot exists. |
-| `OUTBOUND_PROXY_URL` | _(empty)_ | HTTP/HTTPS proxy for outbound Wayback fetches (e.g. `http://us-wa-load-balancer.proxymesh.com:31280`). Empty = direct. |
-| `OUTBOUND_PROXY_USERNAME` | _(empty)_ | Basic-auth username for the proxy. Empty = IP whitelist auth. |
+| `OUTBOUND_PROXY_URLS` | _(empty)_ | CSV of HTTP/HTTPS proxy URLs for outbound Wayback fetches (e.g. `http://us-wa-load-balancer.proxymesh.com:31280`). One URL → single proxy; multiple URLs → rotation. Empty = direct. |
+| `OUTBOUND_PROXY_CHOOSER` | `sequential` | Rotation strategy when multiple `OUTBOUND_PROXY_URLS` are set: `sequential` (round-robin) or `random` (uniform per-request). Case-insensitive. Ignored when only one URL is provided. |
+| `OUTBOUND_PROXY_USERNAME` | _(empty)_ | Basic-auth username applied to every proxy URL. Empty = IP whitelist auth. |
 | `OUTBOUND_PROXY_PASSWORD` | _(empty)_ | Basic-auth password. Required when `OUTBOUND_PROXY_USERNAME` is set. |
+| `OUTBOUND_PROXY_COOLDOWN_SECONDS` | `60` | Base cooldown applied to a proxy after a failure (transport error, 407, 502/503/504). Re-probed at expiry; each consecutive re-probe failure extends the cooldown linearly (X, 2X, 3X, ...). All proxies cooled-down ⇒ dispatch throws `no healthy proxy`. Startup probe failures use the same path. |
 
 ---
 
