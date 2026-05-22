@@ -3,7 +3,7 @@ import type pino from "pino";
 import { type WebSocket, WebSocketServer } from "ws";
 import { errorHasStatus } from "../lib/errors";
 import type { ShutdownController } from "../lib/shutdown";
-import { sanitizeTimeParam, unwrapNestedProxyUrl } from "../lib/url-rewriter";
+import { parseWaybackPath, sanitizeTimeParam, unwrapNestedProxyUrl } from "../lib/url-rewriter";
 import type { Config } from "../models/config";
 import { isWsRequest, type WsRequest, type WsResponse } from "../models/websocket";
 import type { CacheService } from "./cache";
@@ -123,16 +123,27 @@ export class TimeMachineService {
 			return;
 		}
 
-		const reqUrl = new URL(req.url ?? "/", "http://localhost");
-		let targetUrl = reqUrl.searchParams.get("url");
+		let targetUrl: string | null;
 		let time: string;
-		try {
-			time = sanitizeTimeParam(reqUrl.searchParams.get("time"), this.config.defaultTime);
-		} catch (e) {
-			const msg = e instanceof Error ? e.message : "Invalid time parameter";
-			res.writeHead(400).end(msg);
-			this.logRequest(req, 400, start);
-			return;
+
+		// Path-based input: /web/{14-digit-ts}{mod?}_/{url}. Parse against the
+		// raw req.url so the target URL's own query string is preserved (a
+		// `new URL()` parse would split on the first `?` and steal it).
+		const pathParsed = parseWaybackPath(req.url ?? "/");
+		if (pathParsed) {
+			targetUrl = pathParsed.url;
+			time = pathParsed.time;
+		} else {
+			const reqUrl = new URL(req.url ?? "/", "http://localhost");
+			targetUrl = reqUrl.searchParams.get("url");
+			try {
+				time = sanitizeTimeParam(reqUrl.searchParams.get("time"), this.config.defaultTime);
+			} catch (e) {
+				const msg = e instanceof Error ? e.message : "Invalid time parameter";
+				res.writeHead(400).end(msg);
+				this.logRequest(req, 400, start);
+				return;
+			}
 		}
 
 		if (targetUrl) {

@@ -89,8 +89,10 @@ describe("ProxyService.fetch — cache HIT", () => {
 		expect(result.contentType).toBe("text/html");
 		expect(client.enqueueExactAndWait).not.toHaveBeenCalled();
 		expect(client.enqueueDomainCrawl).not.toHaveBeenCalled();
-		// rewriteArchiveLinks turns /web/.../http://... into proxyBase/?url=...
-		expect(String(result.body)).toContain("http://localhost:8080/?url=");
+		// rewriteHtmlUrls emits /web/<ts>/<originalUrl> — the proxy host must
+		// NOT appear in rewritten attribute values (output is path-based).
+		expect(String(result.body)).toContain("/web/20200101000000/http://example.com/x");
+		expect(String(result.body)).not.toMatch(/href="https?:\/\//);
 	});
 
 	it("returns CSS with rewriteCssUrls applied; no job enqueued", async () => {
@@ -104,7 +106,7 @@ describe("ProxyService.fetch — cache HIT", () => {
 		expect(result.cache).toBe("HIT");
 		expect(result.contentType).toBe("text/css");
 		expect(client.enqueueExactAndWait).not.toHaveBeenCalled();
-		expect(String(result.body)).toContain("http://localhost:8080/?url=");
+		expect(String(result.body)).toContain("/web/20200101000000/http://example.com/bg.png");
 	});
 
 	it("surfaces hit.archiveTime via result.archiveTime when sidecar exists", async () => {
@@ -166,7 +168,8 @@ describe("ProxyService.fetch — cache MISS", () => {
 		expect(result.cache).toBe("MISS");
 		expect(client.enqueueExactAndWait).toHaveBeenCalledWith(TARGET_HTML_URL, TIME);
 		expect(lookup).toHaveBeenCalledTimes(2);
-		expect(String(result.body)).toContain("http://localhost:8080/?url=");
+		expect(String(result.body)).toContain("/web/20200101000000/http://example.com/x");
+		expect(String(result.body)).not.toMatch(/href="https?:\/\//);
 	});
 
 	it("throws Error{status:502} when cache is still empty after job completes", async () => {

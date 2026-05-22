@@ -2,7 +2,7 @@ import { promises as fs } from "node:fs";
 import type IORedis from "ioredis";
 import type pino from "pino";
 import type { ArchiveJobClientPort } from "../clients/archive-job-client";
-import { rewriteArchiveLinks, rewriteCssUrls, stripWaybackToolbar } from "../lib/url-rewriter";
+import { rewriteCssUrls, rewriteHtmlUrls, stripWaybackToolbar } from "../lib/url-rewriter";
 import { isHostWhitelisted } from "../lib/url-validator";
 import type { Config } from "../models/config";
 import type { ProxyResult } from "../models/proxy";
@@ -39,7 +39,7 @@ export class ProxyService {
 		private readonly logger: pino.Logger,
 		private readonly config: Pick<
 			Config,
-			"proxyBase" | "whitelistHosts" | "crawlMaxCdxPages" | "bullmqPrefix"
+			"whitelistHosts" | "crawlMaxCdxPages" | "bullmqPrefix"
 		>,
 		private readonly redis: IORedis | null = null,
 	) {}
@@ -67,16 +67,13 @@ export class ProxyService {
 		let body: string | Buffer = raw;
 
 		if (isHtml) {
-			const html = stripWaybackToolbar(raw.toString("utf-8"), targetUrl);
-			body = rewriteArchiveLinks(
-				rewriteCssUrls(html, this.config.proxyBase, time),
-				this.config.proxyBase,
-			);
+			const stripped = stripWaybackToolbar(raw.toString("utf-8"));
+			body = rewriteHtmlUrls(stripped, targetUrl, time);
 			if (cacheStatus === "MISS") {
 				void this.maybeEnqueueDomainCrawl(u.hostname, time);
 			}
 		} else if (isCss) {
-			body = rewriteCssUrls(raw.toString("utf-8"), this.config.proxyBase, time);
+			body = rewriteCssUrls(raw.toString("utf-8"), targetUrl, time);
 		}
 
 		return {
