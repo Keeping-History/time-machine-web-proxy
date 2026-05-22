@@ -188,10 +188,41 @@ export class ProxyService {
 		const u =
 			`https://web.archive.org/cdx/search/cdx?url=${encodeURIComponent(`${host}/*`)}` +
 			`&from=${from}&to=${to}&output=json&showNumPages=true`;
-		const r = await fetch(u, { signal: AbortSignal.timeout(CDX_TIMEOUT_MS) });
+		let r: Response;
+		try {
+			r = await fetch(u, { signal: AbortSignal.timeout(CDX_TIMEOUT_MS) });
+		} catch (e) {
+			// Node's fetch (undici) wraps the real failure in a generic
+			// `TypeError: fetch failed` whose `.cause` holds the actual error
+			// (DNS, ECONNREFUSED, TLS, AbortError on timeout, etc.). Surface it
+			// so the caller (and the JSON error body on POST /crawl) shows the
+			// reason, not just the wrapper.
+			throw new Error(`CDX preflight network error: ${describeFetchError(e)}`, {
+				cause: e,
+			});
+		}
 		if (!r.ok) throw new Error(`CDX preflight ${r.status}`);
 		const txt = (await r.text()).trim();
 		const n = Number.parseInt(txt, 10);
 		return Number.isFinite(n) ? n : 0;
 	}
+}
+
+/**
+ * Unwraps a fetch failure into a human-readable string. Handles undici's
+ * `TypeError: fetch failed` (which puts the real cause on `.cause`) plus
+ * AbortError (timeout) and plain Error fallbacks.
+ */
+function describeFetchError(e: unknown): string {
+	if (e instanceof Error && e.name === "TimeoutError") return "timed out";
+	const cause = (e as { cause?: unknown })?.cause;
+	if (cause instanceof Error) {
+		// Common system-error shapes from libc/undici. The `code` is the most
+		// useful single token (ENOTFOUND, ECONNREFUSED, EAI_AGAIN, ECONNRESET);
+		// the message adds the address/port when present.
+		const code = (cause as { code?: string }).code;
+		return code ? `${code} (${cause.message})` : cause.message;
+	}
+	if (e instanceof Error) return e.message;
+	return String(e);
 }

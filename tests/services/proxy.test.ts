@@ -519,6 +519,33 @@ describe("ProxyService.triggerDomainCrawl — explicit admin enqueue", () => {
 		expect(client.enqueueDomainCrawl).not.toHaveBeenCalled();
 	});
 
+	it("surfaces the underlying network cause when CDX preflight throws (no generic 'fetch failed')", async () => {
+		// undici masks the real failure in a `TypeError: fetch failed` whose
+		// `.cause` is the actual SystemError (ENOTFOUND, ECONNREFUSED, …). The
+		// describeFetchError helper unwraps it so the operator sees what
+		// actually broke instead of a useless wrapper message.
+		const cause = Object.assign(new Error("getaddrinfo ENOTFOUND web.archive.org"), {
+			code: "ENOTFOUND",
+		});
+		const wrapped = Object.assign(new TypeError("fetch failed"), { cause });
+		mockedFetch.mockRejectedValue(wrapped);
+		const cache = makeCache();
+		const client = makeClient();
+		const svc = new ProxyService(cache, client, logger, {
+			...baseConfig,
+			whitelistHosts: "example.com",
+		});
+
+		await expect(svc.triggerDomainCrawl("example.com", TIME)).rejects.toThrow(/ENOTFOUND/);
+		await expect(svc.triggerDomainCrawl("example.com", TIME)).rejects.toThrow(
+			/CDX preflight network error/,
+		);
+		// And the cause is preserved on the thrown error for upstream loggers.
+		await expect(svc.triggerDomainCrawl("example.com", TIME)).rejects.toMatchObject({
+			cause: wrapped,
+		});
+	});
+
 	it("does NOT consult the Redis 24h budget — explicit admin action bypasses throttle", async () => {
 		// The fire-and-forget path takes a SET NX EX lock per host; the explicit
 		// path must not. Verify by passing a redis whose `set` would refuse the
