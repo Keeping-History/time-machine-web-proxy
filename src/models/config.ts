@@ -21,11 +21,19 @@ export interface Config {
 	workerRateLimitPerSec: number;
 	downloaderThreadsCount: number;
 	crawlMaxCdxPages: number;
-	outboundProxyUrl: string;
+	outboundProxyUrls: string[];
+	outboundProxyChooser: OutboundProxyChooser;
 	outboundProxyUsername: string;
 	outboundProxyPassword: string;
+	/** Base cooldown applied to a proxy after a failure, in milliseconds.
+	 * Parsed from OUTBOUND_PROXY_COOLDOWN_SECONDS (default 60s).
+	 * Each consecutive re-probe failure extends the cooldown linearly by
+	 * this base value (X, 2X, 3X, ...). */
+	outboundProxyCooldownMs: number;
 
 	// — Snapshot timestamp resolver —
 	snapshotWindowDays: number[];
 	allowLaterFallback: boolean;
 }
+
+export type OutboundProxyChooser = "sequential" | "random";

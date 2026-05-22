@@ -1,5 +1,5 @@
 import { mkdirSync } from "node:fs";
-import type { Config } from "../models/config";
+import type { Config, OutboundProxyChooser } from "../models/config";
 
 const parseSnapshotWindowDays = (csv: string): number[] => {
 	const parts = csv.split(",").map((s) => s.trim());
@@ -12,6 +12,30 @@ const parseSnapshotWindowDays = (csv: string): number[] => {
 	}
 	return parsed;
 };
+
+function parseOutboundProxyUrls(raw: string | undefined): string[] {
+	if (!raw) return [];
+	return raw
+		.split(",")
+		.map((s) => s.trim())
+		.filter(Boolean);
+}
+
+function parseOutboundProxyChooser(raw: string | undefined): OutboundProxyChooser {
+	if (!raw) return "sequential";
+	const lowered = raw.trim().toLowerCase();
+	if (lowered === "sequential" || lowered === "random") return lowered;
+	throw new Error(`OUTBOUND_PROXY_CHOOSER must be "sequential" or "random" (got "${raw}")`);
+}
+
+function parseOutboundProxyCooldownMs(raw: string | undefined): number {
+	if (raw === undefined || raw === "") return 60_000;
+	const parsed = Number(raw);
+	if (!Number.isFinite(parsed) || parsed < 0) {
+		throw new Error(`OUTBOUND_PROXY_COOLDOWN_SECONDS must be a non-negative number (got "${raw}")`);
+	}
+	return Math.floor(parsed * 1000);
+}
 
 export function loadConfig(): Config {
 	const hostname = process.env.LISTENER ?? "0.0.0.0";
@@ -42,9 +66,13 @@ export function loadConfig(): Config {
 		workerRateLimitPerSec: Number(process.env.WORKER_RATE_LIMIT_PER_SEC) || 1,
 		downloaderThreadsCount: Number(process.env.DOWNLOADER_THREADS_COUNT) || 3,
 		crawlMaxCdxPages: Number(process.env.CRAWL_MAX_CDX_PAGES) || 50,
-		outboundProxyUrl: process.env.OUTBOUND_PROXY_URL ?? "",
+		outboundProxyUrls: parseOutboundProxyUrls(process.env.OUTBOUND_PROXY_URLS),
+		outboundProxyChooser: parseOutboundProxyChooser(process.env.OUTBOUND_PROXY_CHOOSER),
 		outboundProxyUsername: process.env.OUTBOUND_PROXY_USERNAME ?? "",
 		outboundProxyPassword: process.env.OUTBOUND_PROXY_PASSWORD ?? "",
+		outboundProxyCooldownMs: parseOutboundProxyCooldownMs(
+			process.env.OUTBOUND_PROXY_COOLDOWN_SECONDS,
+		),
 		snapshotWindowDays: parseSnapshotWindowDays(
 			process.env.SNAPSHOT_WINDOW_DAYS ?? "30,365,3650,0",
 		),
