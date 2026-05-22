@@ -1,6 +1,7 @@
 import { type ConnectionOptions, type QueueEvents, Worker } from "bullmq";
 import type pino from "pino";
 import { WaybackMachineDownloader } from "wayback-machine-downloader";
+import { dayWindow } from "../lib/archive-time";
 import { normalizeBaseUrlInput } from "../lib/normalize-base-url";
 import type { CacheService } from "../services/cache";
 import { assertDomainCrawlJob, assertExactUrlJob, QUEUE_CRAWL, QUEUE_EXACT } from "./jobs";
@@ -14,7 +15,7 @@ export interface StartArchiveWorkersOpts {
 	connection: ConnectionOptions;
 	cache: Pick<
 		CacheService,
-		"cacheDirForJob" | "writeNotFoundSentinel" | "writeResolvedTimeSidecar"
+		"cacheDirForJob" | "writeNotFoundSentinel" | "writeResolvedTimeSidecar" | "lookup"
 	>;
 	resolver: SnapshotResolverFn;
 	logger: pino.Logger;
@@ -75,7 +76,12 @@ export function startArchiveWorkers(opts: StartArchiveWorkersOpts): ArchiveWorke
 			assertExactUrlJob(job.data);
 			const { url, time } = job.data;
 			const base = normalizeBaseUrlInput(url);
-			const directory = cache.cacheDirForJob(time, base.bareHost);
+			// Cache directory keys on the URL's hostname verbatim — www.example.com
+			// and example.com are stored as separate entries because they can
+			// legitimately serve different content. Must match CacheService.lookup,
+			// which also keys on u.hostname (not base.bareHost).
+			const { hostname } = new URL(url);
+			const directory = cache.cacheDirForJob(time, hostname);
 			logger.info({ url, time, directory }, "[worker:exact] start");
 			const resolved = await resolver(base.variants, time);
 			if (resolved === null) {
@@ -94,11 +100,22 @@ export function startArchiveWorkers(opts: StartArchiveWorkersOpts): ArchiveWorke
 					rewrite_mode: "as-is",
 					canonical_action: "keep",
 					exact_url: true,
-					download_external_assets: false,
+					download_external_assets: true,
 					directory,
 				}).download_files(),
 			);
 			await cache.writeResolvedTimeSidecar(time, url, resolved);
+			// Success criterion must match what the proxy reader requires for
+			// THIS specific (url, time) — a host-level "directory has any file"
+			// check used to mask zero-result CDX runs whenever sibling URLs at
+			// the same host had been downloaded previously, marking the job
+			// `completed` while the proxy then 502'd on the re-lookup.
+			const hit = await cache.lookup(url, time);
+			if (!hit) {
+				throw new Error(
+					`Downloader produced no usable file for ${url} @ ${time} (resolved ${resolved})`,
+				);
+			}
 		},
 		{
 			connection,
@@ -116,16 +133,7 @@ export function startArchiveWorkers(opts: StartArchiveWorkersOpts): ArchiveWorke
 			const { host, time } = job.data;
 			const base = normalizeBaseUrlInput(`https://${host}`);
 			const directory = cache.cacheDirForJob(time, host);
-			const hostRootUrl = `https://${host}/`;
 			logger.info({ host, time, directory }, "[worker:crawl] start");
-
-			const resolved = await resolver(base.variants, time);
-			if (resolved === null) {
-				logger.warn({ host, time }, "[worker:crawl] no snapshot at-or-before requested time");
-				await cache.writeNotFoundSentinel(time, hostRootUrl);
-				return;
-			}
-			logger.info({ host, time, resolved }, "[worker:crawl] resolved snapshot");
 
 			const extender = setInterval(() => {
 				// BullMQ guarantees `job.token` is defined inside an active processor;
@@ -144,13 +152,17 @@ export function startArchiveWorkers(opts: StartArchiveWorkersOpts): ArchiveWorke
 				);
 			}, CRAWL_LOCK_EXTEND_INTERVAL_MS);
 
+			// Crawl downloads everything in a day-wide window rather than a single
+			// resolved timestamp: a domain crawl is expected to span many distinct
+			// captures across siblings, not lock to one snapshot.
+			const { from, to } = dayWindow(time);
 			try {
 				await runWithRateLimitGuard(crawl, () =>
 					new WaybackMachineDownloader({
 						base_url: base.canonicalUrl,
 						normalized_base: base,
-						from_timestamp: resolved,
-						to_timestamp: resolved,
+						from_timestamp: from,
+						to_timestamp: to,
 						threads_count: downloaderThreadsCount,
 						rewrite_mode: "as-is",
 						canonical_action: "keep",
@@ -159,7 +171,6 @@ export function startArchiveWorkers(opts: StartArchiveWorkersOpts): ArchiveWorke
 						directory,
 					}).download_files(),
 				);
-				await cache.writeResolvedTimeSidecar(time, hostRootUrl, resolved);
 			} finally {
 				clearInterval(extender);
 			}

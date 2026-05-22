@@ -5,6 +5,10 @@ const MIN_TIMESTAMP = "19960101000000";
 const MAX_TIMESTAMP = "29991231235959";
 const MS_PER_DAY = 86_400_000;
 const TIMESTAMP_RE = /^\d{14}$/;
+// 30s rather than the undici default (~10s): production logs on main showed
+// sporadic connect timeouts to web.archive.org under that ceiling, surfacing
+// to the user as a 500 even though the downloader could likely have succeeded.
+const CDX_TIMEOUT_MS = 30_000;
 
 export interface ResolveOpts {
 	variants: string[];
@@ -84,7 +88,7 @@ async function cdxQuery(
 
 	let res: Response;
 	try {
-		res = await fetchImpl(requestUrl);
+		res = await fetchImpl(requestUrl, { signal: AbortSignal.timeout(CDX_TIMEOUT_MS) });
 	} catch (e) {
 		logger.debug(
 			{ url, error: e instanceof Error ? e.message : String(e) },
