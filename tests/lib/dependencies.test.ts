@@ -242,11 +242,15 @@ describe("Dependencies (TASK-010)", () => {
 		expect(callArgs.allowLaterFallback).toBe(true);
 	});
 
-	it("passes a cache with writeNotFoundSentinel exposed to startArchiveWorkers", () => {
+	it("passes a cache with sentinel and sidecar writers exposed to startArchiveWorkers", () => {
 		new Dependencies(baseConfig);
 		const opts = startArchiveWorkersMock.mock.calls[0][0] as {
-			cache: { writeNotFoundSentinel: unknown };
+			cache: {
+				writeNotFoundSentinel: unknown;
+				writeResolvedTimeSidecar: unknown;
+			};
 		};
 		expect(typeof opts.cache.writeNotFoundSentinel).toBe("function");
+		expect(typeof opts.cache.writeResolvedTimeSidecar).toBe("function");
 	});
 });

@@ -279,6 +279,19 @@ describe("CacheService.writeNotFoundSentinel + sentinel-aware lookup", () => {
 		expect(result?.archiveTime).toBeUndefined();
 	});
 
+	it("ignores malformed .resolved-time sidecar contents and leaves archiveTime undefined", async () => {
+		// Guards the 14-digit validation in readResolvedTime against accidentally
+		// propagating bad sidecar data (e.g. a partial write or hand-edited file).
+		(mockFs.access as jest.Mock).mockResolvedValue(undefined);
+		(mockFs.readFile as jest.Mock).mockImplementation((p: string) => {
+			if (p.endsWith(".resolved-time")) return Promise.resolve("not-a-timestamp");
+			return Promise.resolve(Buffer.from(""));
+		});
+		const svc = makeService();
+		const result = await svc.lookup("https://www.example.com/about.html", TIME);
+		expect(result?.archiveTime).toBeUndefined();
+	});
+
 	it("sentinel keyed by full URL: same path, different query string → different sentinels", async () => {
 		(mockFs.mkdir as jest.Mock).mockResolvedValue(undefined);
 		(mockFs.writeFile as jest.Mock).mockResolvedValue(undefined);

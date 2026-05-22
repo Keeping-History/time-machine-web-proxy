@@ -1,5 +1,5 @@
 import pino from "pino";
-import { resolveSnapshotTimestamp } from "../../src/lib/snapshot-resolver";
+import { MAX_TIMESTAMP, resolveSnapshotTimestamp } from "../../src/lib/snapshot-resolver";
 
 const logger = pino({ level: "silent" });
 
@@ -191,6 +191,25 @@ describe("resolveSnapshotTimestamp", () => {
 		});
 		const calledUrl = (fetchImpl.mock.calls[0] as unknown as [string])[0];
 		expect(new URL(calledUrl).searchParams.get("from")).toBe("19960101000000");
+	});
+
+	it("clamps forward 'to' to MAX_TIMESTAMP when addition overflows", async () => {
+		// Pin requestedTime at the upper bound so shiftTimestamp(+365) overflows;
+		// the forward-fallback call should still use MAX_TIMESTAMP for 'to'.
+		// Use mockImplementation so each call gets a fresh Response (body is single-use).
+		const fetchImpl = jest.fn().mockImplementation(() => Promise.resolve(mkEmptyResponse()));
+		await resolveSnapshotTimestamp({
+			variants: ["https://x/"],
+			requestedTime: MAX_TIMESTAMP,
+			windowsDays: [365],
+			allowLaterFallback: true,
+			fetchImpl: fetchImpl as unknown as typeof fetch,
+			logger,
+		});
+		// calls[0] = backward window; calls[1] = forward window with the clamped 'to'.
+		expect(fetchImpl).toHaveBeenCalledTimes(2);
+		const forwardUrl = (fetchImpl.mock.calls[1] as unknown as [string])[0];
+		expect(new URL(forwardUrl).searchParams.get("to")).toBe(MAX_TIMESTAMP);
 	});
 
 	it("skips backward search entirely when first window finds match", async () => {

@@ -1,8 +1,8 @@
 import type pino from "pino";
 
 const CDX_ENDPOINT = "https://web.archive.org/cdx/search/cdx";
-const MIN_TIMESTAMP = "19960101000000";
-const MAX_TIMESTAMP = "29991231235959";
+export const MIN_TIMESTAMP = "19960101000000";
+export const MAX_TIMESTAMP = "29991231235959";
 const MS_PER_DAY = 86_400_000;
 const TIMESTAMP_RE = /^\d{14}$/;
 // 30s rather than the undici default (~10s): production logs on main showed
