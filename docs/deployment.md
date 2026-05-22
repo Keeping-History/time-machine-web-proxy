@@ -48,16 +48,24 @@ gcloud redis instances get-auth-string tm-redis --region=us-central1
 
 Store the password in Secret Manager (see Section 4).
 
-The `REDIS_URL` env var injected into Cloud Run should be of the form:
+The `REDIS_URL` env var injected into Cloud Run must be the fully-formed
+ioredis connection URL, with the AUTH password embedded:
 
 ```
-redis://default:${REDIS_PASSWORD}@10.x.y.z:6379
+redis://default:<password>@10.x.y.z:6379
 ```
 
-The `${REDIS_PASSWORD}` placeholder is expanded by the application from the
-`REDIS_PASSWORD` environment variable injected by `--set-secrets`. If you
-prefer to pre-baked the URL, set `REDIS_URL` directly via Secret Manager
-instead.
+The application reads `REDIS_URL` verbatim — there is no `${REDIS_PASSWORD}`
+substitution in code. Two ways to inject it:
+
+- **Recommended — store the full URL as its own Secret Manager secret** so the
+  password never lives on disk. Create a `redis-url` secret containing the
+  full `redis://default:<password>@host:port` value, then add
+  `REDIS_URL=redis-url:latest` to the `--set-secrets` flag in
+  `cloudbuild.yaml`. The `REDIS_PASSWORD` env injected separately is unused
+  by the app and can be dropped if you take this route.
+- **Quick path — inline the URL in `.env.prod`** (the file is gitignored, but
+  the password is in plaintext on disk and in the build environment).
 
 ---
 
@@ -127,10 +135,12 @@ because they differ from typical request-only Cloud Run services.
 Create the secrets referenced by `cloudbuild.yaml` (`--set-secrets`):
 
 ```bash
-# Redis AUTH password
-gcloud secrets create redis-password --replication-policy=automatic
-echo -n "<password-from-gcloud-redis-get-auth-string>" \
-  | gcloud secrets versions add redis-password --data-file=-
+# Full Redis connection URL (host + AUTH baked in). cloudbuild.yaml injects
+# this verbatim as REDIS_URL; the app reads it directly.
+REDIS_HOST=$(gcloud redis instances describe tm-redis --region=us-central1 --format='value(host)')
+REDIS_AUTH=$(gcloud redis instances get-auth-string tm-redis --region=us-central1 --format='value(authString)')
+printf '%s' "redis://default:${REDIS_AUTH}@${REDIS_HOST}:6379" \
+  | gcloud secrets create redis-url --replication-policy=automatic --data-file=-
 
 # Outbound proxy password (optional — only needed for Basic-auth proxies)
 gcloud secrets create outbound-proxy-password --replication-policy=automatic
@@ -143,13 +153,17 @@ echo -n "<docker-hub-pat>" \
   | gcloud secrets versions add dockerhub-token --data-file=-
 ```
 
+`infra-setup.sh` also writes a `redis-password` secret containing the AUTH
+string alone. That secret is unused by the Cloud Run deploy (which consumes
+`redis-url` instead) and can be left in place or deleted.
+
 Grant the Cloud Run service account access:
 
 ```bash
 PROJECT_NUMBER=$(gcloud projects describe "$PROJECT_ID" --format='value(projectNumber)')
 SA="${PROJECT_NUMBER}-compute@developer.gserviceaccount.com"
 
-for secret in redis-password outbound-proxy-password; do
+for secret in redis-url outbound-proxy-password; do
   gcloud secrets add-iam-policy-binding "$secret" \
     --member="serviceAccount:${SA}" \
     --role=roles/secretmanager.secretAccessor
@@ -173,37 +187,66 @@ dashboard (e.g. `us-wa-load-balancer.proxymesh.com`). Default port is `31280`.
 There are two authentication modes:
 
 1. **IP authentication** — whitelist the Cloud Run egress IPs (or NAT gateway
-   IP) in the ProxyMesh dashboard. Set only `OUTBOUND_PROXY_URL`; leave
+   IP) in the ProxyMesh dashboard. Set only `OUTBOUND_PROXY_URLS`; leave
    `OUTBOUND_PROXY_USERNAME` and `OUTBOUND_PROXY_PASSWORD` empty.
 
-2. **Basic authentication** — set all three env vars. The application
-   URL-encodes the credentials and injects them into the proxy URL before
-   passing it to `undici.ProxyAgent`.
+2. **Basic authentication** — set `OUTBOUND_PROXY_URLS` plus the username and
+   password env vars. The application URL-encodes the credentials and applies
+   them to every URL in the list before passing each to `undici.ProxyAgent`.
 
-Example IP-auth setup:
+`OUTBOUND_PROXY_URLS` is a CSV. Provide one URL for a single proxy, or two
+or more URLs to rotate per outbound request. `OUTBOUND_PROXY_CHOOSER`
+selects the rotation strategy (`sequential` round-robin, the default, or
+`random`); values are case-insensitive. Ignored when only one URL is
+configured.
+
+Example IP-auth setup, single proxy:
 
 ```
-OUTBOUND_PROXY_URL=http://us-wa-load-balancer.proxymesh.com:31280
+OUTBOUND_PROXY_URLS=http://us-wa-load-balancer.proxymesh.com:31280
 OUTBOUND_PROXY_USERNAME=
 OUTBOUND_PROXY_PASSWORD=
 ```
 
-Example Basic-auth setup (the password ships via Secret Manager):
+Example Basic-auth setup with rotation (the password ships via Secret Manager):
 
 ```
-OUTBOUND_PROXY_URL=http://us-wa-load-balancer.proxymesh.com:31280
+OUTBOUND_PROXY_URLS=http://us-wa.proxymesh.com:31280,http://uk.proxymesh.com:31280,http://au.proxymesh.com:31280
+OUTBOUND_PROXY_CHOOSER=random
 OUTBOUND_PROXY_USERNAME=tm-prod
 OUTBOUND_PROXY_PASSWORD=<from-secret-manager>
 ```
 
-When `OUTBOUND_PROXY_URL` is set, the startup log emits:
+When a single URL is set, the startup log emits:
 
 ```
 [outbound-proxy] installed host=us-wa-load-balancer.proxymesh.com:31280 auth=basic
 ```
 
+When multiple URLs are set, the startup log emits:
+
+```
+[outbound-proxy] installed (rotating) hosts=[...] auth=basic chooser=random count=3
+```
+
 When only one of `OUTBOUND_PROXY_USERNAME` / `OUTBOUND_PROXY_PASSWORD` is set,
-the process fails fast at startup.
+or `OUTBOUND_PROXY_CHOOSER` is anything other than `Sequential`/`Random`, or
+any URL in the list is unparseable or non-http(s), the process fails fast at
+startup.
+
+**Startup connectivity probe.** Each configured proxy is exercised at startup
+with an HTTP request to `https://web.archive.org/` (30s timeout). If every
+proxy fails the probe, the process exits. If some pass and some fail, the
+failed ones start in cooldown and are re-probed automatically.
+
+**Runtime circuit breaker.** Transport errors (connect/DNS/timeout/TLS),
+HTTP 407, and 502/503/504 responses through a proxy mark it failed and take
+it out of rotation for `OUTBOUND_PROXY_COOLDOWN_SECONDS` (default 60s). At
+cooldown expiry, the proxy is re-probed; success restores it, failure
+extends the cooldown linearly (X, 2X, 3X, ...). When every proxy is
+currently in cooldown, dispatch throws `no healthy proxy`. Note that
+5xx-from-upstream forwarded by the proxy may produce false positives —
+tune the cooldown to limit blast radius from a single Wayback hiccup.
 
 ---
 
@@ -222,7 +265,7 @@ The trigger and substitutions are documented in the header of
 | Name | Purpose |
 |---|---|
 | `dockerhub-token` (Secret Manager) | Docker Hub auth |
-| `redis-password` (Secret Manager) | Memorystore AUTH |
+| `redis-url` (Secret Manager) | Full Redis URL with Memorystore AUTH |
 | `outbound-proxy-password` (Secret Manager) | ProxyMesh / Squid auth |
 | `_VPC_CONNECTOR` (substitution) | VPC connector name |
 | `_CACHE_BUCKET` (substitution) | GCS bucket for FUSE cache |

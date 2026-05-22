@@ -109,10 +109,16 @@ steps:
   #   connector; public traffic (Wayback, outbound proxy) still uses the
   #   default egress path.
   #
-  # --set-secrets injects the Redis AUTH password and outbound-proxy password
-  #   from Secret Manager. Create the secrets with:
-  #     gcloud secrets create redis-password --replication-policy=automatic
-  #     echo -n "<password>" | gcloud secrets versions add redis-password --data-file=-
+  # --set-secrets injects the full REDIS_URL (including AUTH) and the
+  #   outbound-proxy password from Secret Manager. The app reads REDIS_URL
+  #   verbatim — there is no in-process expansion of REDIS_PASSWORD.
+  #   infra-setup.sh writes the AUTH-only redis-password secret; for Cloud
+  #   Run we use the full URL in the redis-url secret instead. Create with:
+  #     printf '%s' "redis://default:<auth>@<host>:6379" \
+  #       | gcloud secrets create redis-url --replication-policy=automatic --data-file=-
+  #     gcloud secrets add-iam-policy-binding redis-url \
+  #       --member="serviceAccount:<PROJECT_NUMBER>-compute@developer.gserviceaccount.com" \
+  #       --role="roles/secretmanager.secretAccessor"
   #   (and likewise for outbound-proxy-password).
   #
   # --min-instances=1 and --no-cpu-throttling keep the in-process BullMQ
@@ -140,7 +146,7 @@ steps:
       - --no-cpu-throttling
       - --vpc-connector=$_VPC_CONNECTOR
       - --vpc-egress=private-ranges-only
-      - --set-secrets=REDIS_PASSWORD=redis-password:latest,OUTBOUND_PROXY_PASSWORD=outbound-proxy-password:latest
+      - --set-secrets=REDIS_URL=redis-url:latest,OUTBOUND_PROXY_PASSWORD=outbound-proxy-password:latest
       - --add-volume=name=cache,type=cloud-storage,bucket=$_CACHE_BUCKET
       - --add-volume-mount=volume=cache,mount-path=/app/cache
 
@@ -163,7 +169,7 @@ substitutions:
   # Serverless VPC Access connector name. The connector must exist in the
   # same region as the service. See docs/deployment.md for the gcloud command
   # to create one.
-  _VPC_CONNECTOR: TODO-vpc-connector-name
+  _VPC_CONNECTOR: tm-connector
 
 options:
   logging: CLOUD_LOGGING_ONLY

@@ -397,6 +397,37 @@ describe("ProxyService.fetch — domain crawl fire-and-forget", () => {
 		expect(client.enqueueDomainCrawl).not.toHaveBeenCalled();
 	});
 
+	it("CDX preflight URL widens to the calendar day of the requested time, not the exact second", async () => {
+		// Previously `from=time&to=time` (exact second) — CDX virtually never matched,
+		// so pages was always 0, the cap check always passed, and crawls were enqueued
+		// unconditionally regardless of host size.
+		const lookup = jest
+			.fn<Promise<CacheHit | null>, [string, string]>()
+			.mockResolvedValueOnce(null)
+			.mockResolvedValueOnce(htmlHit);
+		const cache = makeCache(lookup);
+		const client = makeClient();
+		mockedReadFile.mockResolvedValue(Buffer.from(HTML_BODY));
+		mockedFetch.mockReturnValue(cdxOk(10));
+		const redis = makeRedis("OK");
+		const svc = new ProxyService(
+			cache,
+			client,
+			logger,
+			{ ...baseConfig, whitelistHosts: "example.com" },
+			redis as unknown as import("ioredis").default,
+		);
+
+		await svc.fetch(TARGET_HTML_URL, "20200101123045");
+		await new Promise((r) => setImmediate(r));
+
+		expect(mockedFetch).toHaveBeenCalledTimes(1);
+		const calledUrl = new URL(mockedFetch.mock.calls[0][0] as string);
+		expect(calledUrl.searchParams.get("from")).toBe("20200101000000");
+		expect(calledUrl.searchParams.get("to")).toBe("20200101235959");
+		expect(calledUrl.searchParams.get("url")).toBe("example.com/*");
+	});
+
 	it("works with no Redis (redis arg defaults to null) — budget check is skipped, CDX still runs", async () => {
 		const lookup = jest
 			.fn<Promise<CacheHit | null>, [string, string]>()

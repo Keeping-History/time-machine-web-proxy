@@ -119,6 +119,59 @@ describe("CacheService.lookup (v2)", () => {
 		const result = await svc.lookup("https://example.com/file.unknownext", TIME);
 		expect(result?.contentType).toBe("application/octet-stream");
 	});
+
+	// www.example.com and example.com may serve different content and the
+	// Wayback Machine archives them as distinct URLs. The cache key preserves
+	// that distinction so a hit on one form never returns content from the
+	// other.
+	it("www. and apex hosts resolve to DISTINCT cache entries", async () => {
+		(mockFs.access as jest.Mock).mockResolvedValue(undefined);
+		const svc = makeService();
+		const a = await svc.lookup("https://www.example.com/about.html", TIME);
+		const b = await svc.lookup("https://example.com/about.html", TIME);
+		expect(a?.absPath).toBe("/tmp/cache/v2/20200101000000/www.example.com/about.html");
+		expect(b?.absPath).toBe("/tmp/cache/v2/20200101000000/example.com/about.html");
+		expect(a?.absPath).not.toBe(b?.absPath);
+	});
+
+	it("lookup for a www. URL uses the www. hostname verbatim in the cache path", async () => {
+		(mockFs.access as jest.Mock).mockResolvedValue(undefined);
+		const svc = makeService();
+		const result = await svc.lookup("https://www.apple.com/", TIME);
+		expect(result?.absPath).toBe("/tmp/cache/v2/20200101000000/www.apple.com/index.html");
+	});
+
+	// The Wayback downloader saves directory-style URLs as `<dir>/index.html`
+	// (e.g., `apple.com/mac/index.html` for `http://apple.com/mac`). A request
+	// for `/mac` with no trailing slash must therefore fall back to the
+	// directory-index file when no literal file exists at that path. Without
+	// this, the user gets a 502 even though the content is cached.
+	it("MISS at <root>/<path> falls back to <root>/<path>/index.html (directory-index convention)", async () => {
+		(mockFs.access as jest.Mock)
+			.mockRejectedValueOnce(Object.assign(new Error("ENOENT"), { code: "ENOENT" }))
+			.mockResolvedValueOnce(undefined);
+		const svc = makeService();
+		const result = await svc.lookup("https://example.com/mac", TIME);
+		expect(result?.absPath).toBe("/tmp/cache/v2/20200101000000/example.com/mac/index.html");
+		expect(result?.contentType).toBe("text/html");
+	});
+
+	it("prefers the exact file when it exists; does not probe the index fallback", async () => {
+		(mockFs.access as jest.Mock).mockResolvedValueOnce(undefined);
+		const svc = makeService();
+		const result = await svc.lookup("https://example.com/mac.html", TIME);
+		expect(result?.absPath).toBe("/tmp/cache/v2/20200101000000/example.com/mac.html");
+		expect(mockFs.access).toHaveBeenCalledTimes(1);
+	});
+
+	it("returns null when neither <root>/<path> nor <root>/<path>/index.html exists", async () => {
+		(mockFs.access as jest.Mock).mockRejectedValue(
+			Object.assign(new Error("ENOENT"), { code: "ENOENT" }),
+		);
+		const svc = makeService();
+		const result = await svc.lookup("https://example.com/nope", TIME);
+		expect(result).toBeNull();
+	});
 });
 
 describe("CacheService.writeNotFoundSentinel + sentinel-aware lookup", () => {
