@@ -104,12 +104,13 @@ describe("CacheService.lookup (v2)", () => {
 		expect(pngResult?.contentType).toBe("image/png");
 	});
 
-	it("strips leading 'www.' from host so lookup matches worker's bareHost write path", async () => {
+	it("preserves 'www.' in host so the cache key matches the worker write path", async () => {
 		(mockFs.access as jest.Mock).mockResolvedValue(undefined);
 		const svc = makeService();
 		const result = await svc.lookup("https://www.example.com/about.html", TIME);
-		// Worker writes to <root>/example.com/, NOT <root>/www.example.com/.
-		expect(result?.absPath).toBe("/tmp/cache/v2/20200101000000/example.com/about.html");
+		// www.example.com and example.com are stored separately — they can
+		// legitimately serve different content; collapsing risks poisoning.
+		expect(result?.absPath).toBe("/tmp/cache/v2/20200101000000/www.example.com/about.html");
 	});
 
 	it("returns application/octet-stream for unknown extension", async () => {
@@ -182,13 +183,15 @@ describe("CacheService.writeNotFoundSentinel + sentinel-aware lookup", () => {
 		expect(mockFs.access).toHaveBeenCalledTimes(1);
 	});
 
-	it("sentinel root dir strips 'www.' to match worker write path", async () => {
+	it("sentinel root dir preserves 'www.' to match the worker write path", async () => {
 		(mockFs.mkdir as jest.Mock).mockResolvedValue(undefined);
 		(mockFs.writeFile as jest.Mock).mockResolvedValue(undefined);
 		const svc = makeService();
 		await svc.writeNotFoundSentinel(TIME, "https://www.example.com/about");
 		const writtenPath = (mockFs.writeFile as jest.Mock).mock.calls[0][0] as string;
-		expect(writtenPath).toMatch(/^\/tmp\/cache\/v2\/20200101000000\/example\.com\/\.notfound\//);
+		expect(writtenPath).toMatch(
+			/^\/tmp\/cache\/v2\/20200101000000\/www\.example\.com\/\.notfound\//,
+		);
 	});
 
 	it("writeResolvedTimeSidecar writes <root>/.resolved-time with the timestamp", async () => {
@@ -198,7 +201,7 @@ describe("CacheService.writeNotFoundSentinel + sentinel-aware lookup", () => {
 		await svc.writeResolvedTimeSidecar(TIME, "https://www.example.com/", "20010822231227");
 		const path = (mockFs.writeFile as jest.Mock).mock.calls[0][0] as string;
 		const content = (mockFs.writeFile as jest.Mock).mock.calls[0][1] as string;
-		expect(path).toBe("/tmp/cache/v2/20200101000000/example.com/.resolved-time");
+		expect(path).toBe("/tmp/cache/v2/20200101000000/www.example.com/.resolved-time");
 		expect(content).toBe("20010822231227");
 	});
 
