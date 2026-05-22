@@ -99,11 +99,19 @@ function makeCache(dir = "/cache"): {
 	cacheDirForJob: jest.Mock;
 	writeNotFoundSentinel: jest.Mock;
 	writeResolvedTimeSidecar: jest.Mock;
+	lookup: jest.Mock;
 } {
 	return {
 		cacheDirForJob: jest.fn((time: string, host: string) => `${dir}/v2/${time}/${host}`),
 		writeNotFoundSentinel: jest.fn().mockResolvedValue(undefined),
 		writeResolvedTimeSidecar: jest.fn().mockResolvedValue(undefined),
+		// Default to a non-null hit so the exact worker's post-download
+		// validation passes. Tests that exercise the "downloader produced no
+		// usable file" path override this explicitly.
+		lookup: jest.fn().mockResolvedValue({
+			absPath: `${dir}/v2/anytime/anyhost/index.html`,
+			contentType: "text/html",
+		}),
 	};
 }
 
@@ -222,10 +230,12 @@ describe("exact worker processor", () => {
 		expect(args.threads_count).toBe(3);
 		expect(args.rewrite_mode).toBe("as-is");
 		expect(args.canonical_action).toBe("keep");
-		expect(args.download_external_assets).toBe(false);
+		// download_external_assets is true on the exact worker so referenced
+		// CSS/images are pulled in the same job rather than re-queuing per-asset.
+		expect(args.download_external_assets).toBe(true);
 	});
 
-	it("derives directory from cache.cacheDirForJob(time, base.bareHost)", async () => {
+	it("derives directory from cache.cacheDirForJob(time, hostname) — preserves 'www.'", async () => {
 		const cache = makeCache("/c");
 		startArchiveWorkers(baseOpts({ cache }));
 		const worker = findWorker(QUEUE_EXACT);
@@ -234,10 +244,11 @@ describe("exact worker processor", () => {
 			data: { url: "https://www.example.com/about", time: "20200101000000" },
 			token: "tk-2",
 		});
-		// bareHost strips the leading "www."
-		expect(cache.cacheDirForJob).toHaveBeenCalledWith("20200101000000", "example.com");
+		// hostname preserves "www." — www.example.com and example.com are
+		// stored as separate cache entries.
+		expect(cache.cacheDirForJob).toHaveBeenCalledWith("20200101000000", "www.example.com");
 		const args = WaybackMachineDownloaderMock.mock.calls[0][0];
-		expect(args.directory).toBe("/c/v2/20200101000000/example.com");
+		expect(args.directory).toBe("/c/v2/20200101000000/www.example.com");
 	});
 
 	it("invokes download_files exactly once", async () => {
@@ -376,6 +387,24 @@ describe("exact worker processor", () => {
 		expect(cache.writeResolvedTimeSidecar).not.toHaveBeenCalled();
 	});
 
+	it("throws when downloader produces no usable file for THIS (url, time)", async () => {
+		const cache = makeCache();
+		// Downloader "succeeds" but no file for the requested URL ends up on disk.
+		// Without this validation a host-level "any file present" check would
+		// have marked the job complete and the proxy would 502 on re-lookup.
+		cache.lookup.mockResolvedValueOnce(null);
+		const resolver = jest.fn().mockResolvedValue("20010822231227");
+		startArchiveWorkers(baseOpts({ cache, resolver }));
+		const worker = findWorker(QUEUE_EXACT);
+		await expect(
+			worker.processor({
+				id: "j-novalid",
+				data: { url: "https://example.com/", time: "20010912000000" },
+				token: "tk-nv",
+			}),
+		).rejects.toThrow(/no usable file/);
+	});
+
 	it("does NOT write resolved-time sidecar when downloader throws", async () => {
 		const cache = makeCache();
 		const resolver = jest.fn().mockResolvedValue("20010822231227");
@@ -466,7 +495,7 @@ describe("crawl worker processor", () => {
 		jest.useRealTimers();
 	});
 
-	it("constructs WaybackMachineDownloader with exact_url:false and derives base from 'https://<host>'", async () => {
+	it("constructs WaybackMachineDownloader with exact_url:false, dayWindow timestamps, and base from 'https://<host>'", async () => {
 		const cache = makeCache();
 		startArchiveWorkers(baseOpts({ cache }));
 		const worker = findWorker(QUEUE_CRAWL);
@@ -480,8 +509,9 @@ describe("crawl worker processor", () => {
 		expect(normalizeBaseUrlInputMock).toHaveBeenCalledWith("https://example.com");
 		const args = WaybackMachineDownloaderMock.mock.calls[0][0];
 		expect(args.exact_url).toBe(false);
+		// Crawl uses dayWindow(time): all captures across the calendar day.
 		expect(args.from_timestamp).toBe("20200101000000");
-		expect(args.to_timestamp).toBe("20200101000000");
+		expect(args.to_timestamp).toBe("20200101235959");
 		expect(args.directory).toBe("/cache/v2/20200101000000/example.com");
 	});
 
@@ -552,7 +582,7 @@ describe("crawl worker processor", () => {
 		expect(extendLockMock).not.toHaveBeenCalled();
 	});
 
-	it("calls resolver and uses resolved time for crawl downloader from/to", async () => {
+	it("crawl worker does NOT invoke the snapshot resolver — it crawls the whole day window", async () => {
 		const resolver = jest.fn().mockResolvedValue("20200115000000");
 		startArchiveWorkers(baseOpts({ resolver }));
 		const worker = findWorker(QUEUE_CRAWL);
@@ -562,29 +592,28 @@ describe("crawl worker processor", () => {
 			token: "tk-cr",
 			extendLock: jest.fn().mockResolvedValue(0),
 		});
-		expect(resolver).toHaveBeenCalledTimes(1);
-		expect(resolver.mock.calls[0][1]).toBe("20200101000000");
+		// Crawl uses dayWindow(time) directly, not the resolver — the goal
+		// is to capture all sibling pages within the day, not snap to one.
+		expect(resolver).not.toHaveBeenCalled();
 		const args = WaybackMachineDownloaderMock.mock.calls[0][0];
-		expect(args.from_timestamp).toBe("20200115000000");
-		expect(args.to_timestamp).toBe("20200115000000");
+		expect(args.from_timestamp).toBe("20200101000000");
+		expect(args.to_timestamp).toBe("20200101235959");
 	});
 
-	it("writes sentinel for host root URL and skips downloader on null crawl resolution", async () => {
+	it("crawl worker does NOT write the not-found sentinel — sentinels are exact-URL-only", async () => {
 		const cache = makeCache();
-		const resolver = jest.fn().mockResolvedValue(null);
-		startArchiveWorkers(baseOpts({ cache, resolver }));
+		startArchiveWorkers(baseOpts({ cache }));
 		const worker = findWorker(QUEUE_CRAWL);
 		await worker.processor({
-			id: "c-null",
+			id: "c-no-sentinel",
 			data: { host: "example.com", time: "20200101000000" },
-			token: "tk-cnull",
+			token: "tk-cns",
 			extendLock: jest.fn().mockResolvedValue(0),
 		});
-		expect(cache.writeNotFoundSentinel).toHaveBeenCalledWith(
-			"20200101000000",
-			"https://example.com/",
-		);
-		expect(WaybackMachineDownloaderMock).not.toHaveBeenCalled();
+		// Empty crawl results do not imply "404" — they may just mean the day
+		// window had no captures of any sibling. Sentinels would poison the
+		// negative cache for the host root.
+		expect(cache.writeNotFoundSentinel).not.toHaveBeenCalled();
 	});
 
 	it("logs a warning (but does not throw) when extendLock rejects", async () => {
