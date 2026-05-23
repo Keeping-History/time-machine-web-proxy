@@ -5,7 +5,6 @@ codealike.json
 tsconfig.tsbuildinfo
 node_modules
 .turbo
-/.env.prod
 .DS_Store
 /stories/archive
 /.vscode
