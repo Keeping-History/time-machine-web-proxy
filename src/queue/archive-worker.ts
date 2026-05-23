@@ -3,6 +3,7 @@ import { type ConnectionOptions, type Job, type QueueEvents, Worker } from "bull
 import type pino from "pino";
 import { WaybackMachineDownloader } from "wayback-machine-downloader";
 import { dayWindow } from "../lib/archive-time";
+import { installDownloaderLogging, runWithDownloaderLogging } from "../lib/downloader-logger";
 import { normalizeBaseUrlInput } from "../lib/normalize-base-url";
 import { isAssetUrl } from "../lib/url-rewriter";
 import type {
@@ -152,6 +153,11 @@ export function startArchiveWorkers(opts: StartArchiveWorkersOpts): ArchiveWorke
 
 	const limiter = { max: workerRateLimitPerSec, duration: 1000 };
 
+	// Flip the downloader into debug mode and route its console.log output
+	// through pino (+ per-job BullMQ logs visible in bull-board). Idempotent —
+	// safe to call across repeated startArchiveWorkers invocations.
+	installDownloaderLogging();
+
 	const runWithRateLimitGuard = async <T>(worker: Worker, fn: () => Promise<T>): Promise<T> => {
 		try {
 			return await fn();
@@ -225,20 +231,30 @@ export function startArchiveWorkers(opts: StartArchiveWorkersOpts): ArchiveWorke
 					},
 					logger,
 				);
+				const downloaderLogger = logger.child({
+					component: "wbm-downloader",
+					queue: QUEUE_EXACT,
+					jobId: job.id,
+					url,
+					time,
+					resolved,
+				});
 				try {
-					await runWithRateLimitGuard(exact, () =>
-						new WaybackMachineDownloader({
-							base_url: base.canonicalUrl,
-							normalized_base: base,
-							from_timestamp: resolved,
-							to_timestamp: resolved,
-							threads_count: downloaderThreadsCount,
-							rewrite_mode: "as-is",
-							canonical_action: "keep",
-							exact_url: true,
-							download_external_assets: true,
-							directory,
-						}).download_files(),
+					await runWithDownloaderLogging({ logger: downloaderLogger, job }, () =>
+						runWithRateLimitGuard(exact, () =>
+							new WaybackMachineDownloader({
+								base_url: base.canonicalUrl,
+								normalized_base: base,
+								from_timestamp: resolved,
+								to_timestamp: resolved,
+								threads_count: downloaderThreadsCount,
+								rewrite_mode: "as-is",
+								canonical_action: "keep",
+								exact_url: true,
+								download_external_assets: true,
+								directory,
+							}).download_files(),
+						),
 					);
 				} finally {
 					stopWatch();
@@ -320,20 +336,29 @@ export function startArchiveWorkers(opts: StartArchiveWorkersOpts): ArchiveWorke
 					},
 					logger,
 				);
+				const downloaderLogger = logger.child({
+					component: "wbm-downloader",
+					queue: QUEUE_CRAWL,
+					jobId: job.id,
+					host,
+					time,
+				});
 				try {
-					await runWithRateLimitGuard(crawl, () =>
-						new WaybackMachineDownloader({
-							base_url: base.canonicalUrl,
-							normalized_base: base,
-							from_timestamp: from,
-							to_timestamp: to,
-							threads_count: downloaderThreadsCount,
-							rewrite_mode: "as-is",
-							canonical_action: "keep",
-							exact_url: false,
-							download_external_assets: false,
-							directory,
-						}).download_files(),
+					await runWithDownloaderLogging({ logger: downloaderLogger, job }, () =>
+						runWithRateLimitGuard(crawl, () =>
+							new WaybackMachineDownloader({
+								base_url: base.canonicalUrl,
+								normalized_base: base,
+								from_timestamp: from,
+								to_timestamp: to,
+								threads_count: downloaderThreadsCount,
+								rewrite_mode: "as-is",
+								canonical_action: "keep",
+								exact_url: false,
+								download_external_assets: false,
+								directory,
+							}).download_files(),
+						),
 					);
 				} finally {
 					stopWatch();

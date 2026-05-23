@@ -232,13 +232,15 @@ export class TimeMachineService {
 		let targetUrl: string | null;
 		let time: string;
 
-		// Path-based input: /web/{14-digit-ts}{mod?}_/{url}. Parse against the
-		// raw req.url so the target URL's own query string is preserved (a
-		// `new URL()` parse would split on the first `?` and steal it).
+		// Path-based input: /web/{14-digit-ts}{mod?}_/{url}, or the no-time
+		// variant /web/{url} which falls back to the configured default time
+		// (ARCHIVE_TIME). Parse against the raw req.url so the target URL's
+		// own query string is preserved (a `new URL()` parse would split on
+		// the first `?` and steal it).
 		const pathParsed = parseWaybackPath(req.url ?? "/");
 		if (pathParsed) {
 			targetUrl = pathParsed.url;
-			time = pathParsed.time;
+			time = pathParsed.time ?? this.config.defaultTime;
 		} else {
 			const reqUrl = new URL(req.url ?? "/", "http://localhost");
 			targetUrl = reqUrl.searchParams.get("url");

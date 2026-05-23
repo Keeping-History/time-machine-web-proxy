@@ -22,11 +22,14 @@ const normalizeBaseUrlInputMock = jest.fn((url: string) => {
 	};
 });
 
+const setDebugModeMock = jest.fn();
+
 jest.mock(
 	"wayback-machine-downloader",
 	() => ({
 		__esModule: true,
 		WaybackMachineDownloader: WaybackMachineDownloaderMock,
+		setDebugMode: setDebugModeMock,
 	}),
 	{ virtual: true },
 );
@@ -87,12 +90,18 @@ import { QUEUE_CRAWL, QUEUE_EXACT } from "../../src/queue/jobs";
 // --- Helpers -----------------------------------------------------------------
 
 function makeLogger(): pino.Logger {
-	return {
+	const stub = {
 		info: jest.fn(),
 		warn: jest.fn(),
 		error: jest.fn(),
 		debug: jest.fn(),
-	} as unknown as pino.Logger;
+		// `child()` mirrors pino's API. The worker uses it to scope downloader
+		// output; returning the same stub is enough for these tests because
+		// they assert on log content, not on child-binding propagation.
+		child: jest.fn(),
+	};
+	stub.child.mockReturnValue(stub);
+	return stub as unknown as pino.Logger;
 }
 
 function makeCache(dir = "/cache"): {
