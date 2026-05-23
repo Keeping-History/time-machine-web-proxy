@@ -22,7 +22,13 @@ const RE_ARCHIVE_URL =
 // same rewritten payload regardless of asset type. URL is captured raw so
 // the caller can append req.url's query string to preserve the target's
 // own ?foo=bar parameters.
-const RE_WAYBACK_PATH = /^\/web\/(\d{14})(?:[a-z]{1,3}_)?\/(.+)$/i;
+//
+// Timestamp segment is optional: `/web/{url}` is accepted and signals that
+// the caller wants the configured default time (ARCHIVE_TIME). The URL
+// group is constrained to start with http:// or https:// so malformed
+// timestamps like `/web/2002/http://x` still parse as null rather than
+// silently treating "2002/http://x" as the target URL.
+const RE_WAYBACK_PATH = /^\/web\/(?:(\d{14})(?:[a-z]{1,3}_)?\/)?(https?:\/\/.+)$/i;
 
 // Extensions whose presence flips the snapshot resolver to bidirectional
 // ("closest snapshot") mode. Asset captures rarely line up with the
@@ -153,10 +159,11 @@ export const unwrapNestedProxyUrl = (
 
 		// New /web/<ts>/<url> format. Append nested.search so the target URL's
 		// own query string (which lives on the proxy URL after path-based
-		// rewriting) is preserved.
+		// rewriting) is preserved. Timestamp may be absent (`/web/<url>`), in
+		// which case the fallback time supplied by the caller wins.
 		const pathMatch = nested.pathname.match(RE_WAYBACK_PATH);
 		if (pathMatch) {
-			return { url: `${pathMatch[2]}${nested.search}`, time: pathMatch[1] };
+			return { url: `${pathMatch[2]}${nested.search}`, time: pathMatch[1] ?? fallbackTime };
 		}
 	} catch {
 		/* not a valid absolute URL — use as-is */
@@ -165,17 +172,23 @@ export const unwrapNestedProxyUrl = (
 };
 
 /**
- * Parse the proxy's path-based input format `/web/{ts}{mod?}_/{url}`.
+ * Parse the proxy's path-based input format `/web/{ts}{mod?}_/{url}` or
+ * its no-timestamp variant `/web/{url}`.
  *
  * Pass the raw `req.url` (NOT a value that has been through `new URL()`)
  * so the target URL's own query string is preserved untouched — `new URL()`
  * would split at the first `?` and treat the target's query as the proxy's.
  *
- * Returns null when the path does not match this format.
+ * When the timestamp segment is absent, `time` is null and the caller is
+ * expected to substitute the configured default (ARCHIVE_TIME).
+ *
+ * Returns null when the path does not match either format.
  */
-export const parseWaybackPath = (rawReqUrl: string): { time: string; url: string } | null => {
+export const parseWaybackPath = (
+	rawReqUrl: string,
+): { time: string | null; url: string } | null => {
 	const m = rawReqUrl.match(RE_WAYBACK_PATH);
-	return m ? { time: m[1], url: m[2] } : null;
+	return m ? { time: m[1] ?? null, url: m[2] } : null;
 };
 
 const buildProxyUrl = (originalUrl: string, time: string): string =>

@@ -57,6 +57,11 @@ export async function resolveSnapshotTimestamp(o: ResolveOpts): Promise<string |
 				o.logger.debug({ from, to, resolved: ts }, "[snapshot-resolver] bidirectional hit");
 				return ts;
 			}
+			// If a full window completed without a single parseable CDX response,
+			// CDX is unhealthy (timeouts, 5xx storm, HTML error pages). Subsequent
+			// windows hit the same endpoint and will fail the same way — bail out
+			// rather than burning another ~90s per window before the throw fires.
+			if (!tracker.anyOk) break;
 		}
 	} else {
 		// Strict at-or-before: only consider snapshots ≤ requestedTime. Opt-in
@@ -80,6 +85,7 @@ export async function resolveSnapshotTimestamp(o: ResolveOpts): Promise<string |
 				);
 				return ts;
 			}
+			if (!tracker.anyOk) break;
 		}
 	}
 
@@ -153,6 +159,9 @@ async function cdxQuery(
 	params.set("to", to);
 	const requestUrl = `${CDX_ENDPOINT}?${params.toString()}`;
 
+	const startedAt = Date.now();
+	let lastReason: { kind: "transport" | "non-ok" | "parse"; detail: string } | null = null;
+
 	for (let attempt = 1; attempt <= CDX_RETRY_MAX_ATTEMPTS; attempt += 1) {
 		const isLastAttempt = attempt === CDX_RETRY_MAX_ATTEMPTS;
 
@@ -160,22 +169,27 @@ async function cdxQuery(
 		try {
 			res = await fetchImpl(requestUrl, { signal: AbortSignal.timeout(CDX_TIMEOUT_MS) });
 		} catch (e) {
+			const detail = e instanceof Error ? e.message : String(e);
+			lastReason = { kind: "transport", detail };
 			logger.debug(
-				{ url, attempt, error: e instanceof Error ? e.message : String(e) },
+				{ url, attempt, error: detail },
 				"[snapshot-resolver] CDX fetch failed",
 			);
-			if (isLastAttempt) return [];
+			if (isLastAttempt) return giveUp(logger, url, lastReason, startedAt, attempt);
 			await sleep(CDX_RETRY_BASE_DELAY_MS * 2 ** (attempt - 1));
 			continue;
 		}
 		if (!res.ok) {
+			lastReason = { kind: "non-ok", detail: `HTTP ${res.status}` };
 			logger.debug(
 				{ url, attempt, status: res.status },
 				"[snapshot-resolver] CDX non-OK",
 			);
 			// 4xx (except 429) are not transient — no amount of retry will fix
 			// a malformed query. Give up immediately so we don't waste budget.
-			if (!isRetryableStatus(res.status) || isLastAttempt) return [];
+			if (!isRetryableStatus(res.status) || isLastAttempt) {
+				return giveUp(logger, url, lastReason, startedAt, attempt);
+			}
 			await sleep(CDX_RETRY_BASE_DELAY_MS * 2 ** (attempt - 1));
 			continue;
 		}
@@ -184,8 +198,9 @@ async function cdxQuery(
 		try {
 			json = JSON.parse(text);
 		} catch {
+			lastReason = { kind: "parse", detail: `${text.slice(0, 80)}…` };
 			logger.debug({ url, attempt }, "[snapshot-resolver] CDX malformed JSON");
-			if (isLastAttempt) return [];
+			if (isLastAttempt) return giveUp(logger, url, lastReason, startedAt, attempt);
 			await sleep(CDX_RETRY_BASE_DELAY_MS * 2 ** (attempt - 1));
 			continue;
 		}
@@ -206,6 +221,20 @@ async function cdxQuery(
 	}
 	// Unreachable: the loop body either returns or continues; the final
 	// iteration's `isLastAttempt` branches return [].
+	return [];
+}
+
+function giveUp(
+	logger: pino.Logger,
+	url: string,
+	reason: { kind: "transport" | "non-ok" | "parse"; detail: string },
+	startedAt: number,
+	attempts: number,
+): string[] {
+	logger.warn(
+		{ url, kind: reason.kind, detail: reason.detail, attempts, elapsedMs: Date.now() - startedAt },
+		"[snapshot-resolver] CDX gave up after exhausting retries",
+	);
 	return [];
 }
 

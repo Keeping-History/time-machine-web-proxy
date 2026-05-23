@@ -159,6 +159,20 @@ describe("parseWaybackPath", () => {
 	it("returns null when URL segment is empty", () => {
 		expect(parseWaybackPath("/web/20020401000000/")).toBeNull();
 	});
+
+	it("parses /web/{url} with no timestamp — time defaults to null", () => {
+		expect(parseWaybackPath("/web/http://www.apple.com/")).toEqual({
+			time: null,
+			url: "http://www.apple.com/",
+		});
+	});
+
+	it("parses /web/{url} with no timestamp for https targets", () => {
+		expect(parseWaybackPath("/web/https://example.com/page?x=1&y=2")).toEqual({
+			time: null,
+			url: "https://example.com/page?x=1&y=2",
+		});
+	});
 });
 
 describe("rewriteHtmlUrls — archive-prefixed URLs", () => {

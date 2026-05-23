@@ -209,6 +209,20 @@ describe("TimeMachineService HTTP handler — path-based /web/{ts}/{url} input",
 			await svc.stop();
 		}
 	});
+
+	it("uses config.defaultTime (ARCHIVE_TIME) when the timestamp segment is omitted", async () => {
+		const fetchMock = jest.fn().mockResolvedValue(okResult);
+		const { svc, proxy } = makeService(fetchMock);
+		const port = await startAndAwaitListening(svc);
+
+		try {
+			const r = await fetch(`http://127.0.0.1:${port}/web/http://example.com/page`);
+			expect(r.status).toBe(200);
+			expect(proxy.fetch).toHaveBeenCalledWith("http://example.com/page", config.defaultTime);
+		} finally {
+			await svc.stop();
+		}
+	});
 });
 
 describe("TimeMachineService HTTP handler — SSE (Accept: text/event-stream)", () => {
