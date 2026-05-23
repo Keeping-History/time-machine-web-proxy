@@ -1,4 +1,5 @@
-import { parse, serialize, type DefaultTreeAdapterTypes } from "parse5";
+import { defaultTreeAdapter, parse, serialize, type DefaultTreeAdapterTypes } from "parse5";
+import { generateShimScript } from "./runtime-shim";
 
 type Node = DefaultTreeAdapterTypes.Node;
 type Element = DefaultTreeAdapterTypes.Element;
@@ -287,6 +288,7 @@ const rewriteMetaRefresh = (
 	return `${prefix}${quote}${rewriteOneUrl(url, targetUrl, time, collect, assets)}${quote}`;
 };
 
+
 const isElement = (node: Node): node is Element =>
 	typeof (node as Partial<Element>).tagName === "string";
 
@@ -369,6 +371,51 @@ export interface RewriteHtmlResult {
 	discoveredAssets: DiscoveredAsset[];
 }
 
+// Walk the tree depth-first to find the first element with the given tag name.
+const findElement = (node: Node, tag: string): Element | null => {
+	if (isElement(node) && node.tagName.toLowerCase() === tag) return node;
+	if (hasChildNodes(node)) {
+		for (const child of node.childNodes) {
+			const found = findElement(child, tag);
+			if (found) return found;
+		}
+	}
+	return null;
+};
+
+// Inject <meta name="wayback-context"> and the runtime shim <script> as the
+// first two children of <head>, so they execute before any page scripts.
+const injectShim = (doc: ParentNode, targetUrl: string, time: string): void => {
+	const head = findElement(doc, "head");
+	if (!head) return;
+
+	// Build <meta name="wayback-context" data-ts="..." data-url="...">
+	const metaNode = defaultTreeAdapter.createElement("meta", // parse5's NS enum is not in its public exports; the HTML namespace URI is the correct runtime value
+"http://www.w3.org/1999/xhtml" as unknown as Parameters<typeof defaultTreeAdapter.createElement>[1], [
+		{ name: "name", value: "wayback-context" },
+		{ name: "data-ts", value: time },
+		{ name: "data-url", value: targetUrl },
+	]);
+
+	// Build <script>...</script> containing the shim IIFE
+	const scriptNode = defaultTreeAdapter.createElement("script", // parse5's NS enum is not in its public exports; the HTML namespace URI is the correct runtime value
+"http://www.w3.org/1999/xhtml" as unknown as Parameters<typeof defaultTreeAdapter.createElement>[1], []);
+	const scriptText = defaultTreeAdapter.createTextNode(generateShimScript(time, targetUrl));
+	defaultTreeAdapter.appendChild(scriptNode, scriptText);
+
+	// Insert as first two children of <head>
+	const firstChild = head.childNodes[0];
+	if (firstChild) {
+		defaultTreeAdapter.insertBefore(head, metaNode, firstChild);
+		// After inserting metaNode, the new first child we want to insert before is
+		// what was originally firstChild, now at index 1.
+		defaultTreeAdapter.insertBefore(head, scriptNode, firstChild);
+	} else {
+		defaultTreeAdapter.appendChild(head, metaNode);
+		defaultTreeAdapter.appendChild(head, scriptNode);
+	}
+};
+
 export const rewriteHtmlUrls = (
 	html: string,
 	targetUrl: string,
@@ -380,6 +427,7 @@ export const rewriteHtmlUrls = (
 	// <base href> handling first so its effective base is used during visit().
 	const effectiveBase = consumeBaseTag(doc, targetUrl);
 	visit(doc, effectiveBase, time, collect, assets);
+	injectShim(doc, targetUrl, time);
 	return { html: serialize(doc), discoveredAssets: assets };
 };
 

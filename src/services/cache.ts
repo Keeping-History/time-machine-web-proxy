@@ -22,7 +22,7 @@ export interface CacheHit {
 
 export class CacheService {
 	constructor(
-		private readonly config: Pick<Config, "cacheDir" | "cacheEnabled">,
+		private readonly config: Pick<Config, "cacheDir" | "cacheEnabled" | "notFoundTtlDays">,
 		private readonly logger: pino.Logger,
 	) {}
 
@@ -102,9 +102,18 @@ export class CacheService {
 		}
 		// Negative-cache sentinel: worker writes one when CDX confirms 404.
 		// Lookup throws 404 instead of returning null so the proxy stops re-queuing.
+		// Sentinels older than notFoundTtlDays are deleted so Wayback backfills
+		// become visible on the next request.
 		const sentinel = this.sentinelPath(time, url);
 		try {
-			await fs.access(sentinel);
+			const stat = await fs.stat(sentinel);
+			const ageMs = Date.now() - stat.mtimeMs;
+			const ttlMs = this.config.notFoundTtlDays * 24 * 60 * 60 * 1000;
+			if (ageMs > ttlMs) {
+				await fs.unlink(sentinel);
+				this.logger.info({ sentinel, ageMs, ttlMs }, "[cache] sentinel-expired");
+				return null;
+			}
 		} catch {
 			return null;
 		}

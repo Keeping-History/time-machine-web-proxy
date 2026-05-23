@@ -5,6 +5,7 @@ jest.mock("node:fs", () => ({
 		readdir: jest.fn(),
 		unlink: jest.fn(),
 		access: jest.fn(),
+		stat: jest.fn(),
 		rm: jest.fn(),
 		mkdir: jest.fn(),
 		rename: jest.fn(),
@@ -17,12 +18,18 @@ import { CacheService } from "../../src/services/cache";
 
 const logger = pino({ level: "silent" });
 
-const makeService = (cacheEnabled = true) =>
-	new CacheService({ cacheDir: "/tmp/cache", cacheEnabled }, logger);
+const makeService = (cacheEnabled = true, notFoundTtlDays = 30) =>
+	new CacheService({ cacheDir: "/tmp/cache", cacheEnabled, notFoundTtlDays }, logger);
 
 const mockFs = fs as jest.Mocked<typeof fs>;
 
-beforeEach(() => jest.resetAllMocks());
+beforeEach(() => {
+	jest.resetAllMocks();
+	// Default: sentinel does not exist. Tests that need a present sentinel override this.
+	(mockFs.stat as jest.Mock).mockRejectedValue(
+		Object.assign(new Error("ENOENT"), { code: "ENOENT" }),
+	);
+});
 
 describe("CacheService.cacheDirForJob", () => {
 	it("returns <cacheDir>/v2/<time>/<host> exactly", () => {
@@ -207,11 +214,11 @@ describe("CacheService.writeNotFoundSentinel + sentinel-aware lookup", () => {
 	});
 
 	it("lookup throws {status: 404} when sentinel exists for the URL", async () => {
-		// file access fails; sentinel access succeeds.
-		(mockFs.access as jest.Mock).mockImplementation((p: string) => {
-			if (p.includes("/.notfound/")) return Promise.resolve(undefined);
-			return Promise.reject(Object.assign(new Error("ENOENT"), { code: "ENOENT" }));
-		});
+		// file access fails for the content file; sentinel stat succeeds with a recent mtime.
+		(mockFs.access as jest.Mock).mockRejectedValue(
+			Object.assign(new Error("ENOENT"), { code: "ENOENT" }),
+		);
+		(mockFs.stat as jest.Mock).mockResolvedValue({ mtimeMs: Date.now() });
 		const svc = makeService();
 		await expect(svc.lookup(URL, TIME)).rejects.toMatchObject({
 			status: 404,
@@ -220,6 +227,9 @@ describe("CacheService.writeNotFoundSentinel + sentinel-aware lookup", () => {
 
 	it("lookup returns null when neither file nor sentinel exists (unchanged miss path)", async () => {
 		(mockFs.access as jest.Mock).mockRejectedValue(
+			Object.assign(new Error("ENOENT"), { code: "ENOENT" }),
+		);
+		(mockFs.stat as jest.Mock).mockRejectedValue(
 			Object.assign(new Error("ENOENT"), { code: "ENOENT" }),
 		);
 		const svc = makeService();
@@ -302,6 +312,56 @@ describe("CacheService.writeNotFoundSentinel + sentinel-aware lookup", () => {
 		const a = (mockFs.writeFile as jest.Mock).mock.calls[0][0] as string;
 		const b = (mockFs.writeFile as jest.Mock).mock.calls[1][0] as string;
 		expect(a).not.toBe(b);
+	});
+
+	it("lookup deletes an expired sentinel and returns null", async () => {
+		// Content file misses; sentinel exists but is older than TTL.
+		(mockFs.access as jest.Mock).mockRejectedValue(
+			Object.assign(new Error("ENOENT"), { code: "ENOENT" }),
+		);
+		const ttlDays = 7;
+		const oldMtimeMs = Date.now() - (ttlDays + 1) * 24 * 60 * 60 * 1000;
+		(mockFs.stat as jest.Mock).mockResolvedValue({ mtimeMs: oldMtimeMs });
+		(mockFs.unlink as jest.Mock).mockResolvedValue(undefined);
+
+		const svc = makeService(true, ttlDays);
+		const result = await svc.lookup(URL, TIME);
+
+		expect(result).toBeNull();
+		expect(mockFs.unlink).toHaveBeenCalledTimes(1);
+	});
+
+	it("lookup throws 404 for a fresh sentinel within TTL", async () => {
+		// Content file misses; sentinel exists and is recent (within TTL).
+		(mockFs.access as jest.Mock).mockRejectedValue(
+			Object.assign(new Error("ENOENT"), { code: "ENOENT" }),
+		);
+		const ttlDays = 7;
+		const freshMtimeMs = Date.now() - 1 * 24 * 60 * 60 * 1000; // 1 day old
+		(mockFs.stat as jest.Mock).mockResolvedValue({ mtimeMs: freshMtimeMs });
+
+		const svc = makeService(true, ttlDays);
+		await expect(svc.lookup(URL, TIME)).rejects.toMatchObject({ status: 404 });
+		expect(mockFs.unlink).not.toHaveBeenCalled();
+	});
+
+	it("expired sentinel unlink is logged with [cache] sentinel-expired", async () => {
+		(mockFs.access as jest.Mock).mockRejectedValue(
+			Object.assign(new Error("ENOENT"), { code: "ENOENT" }),
+		);
+		const ttlDays = 30;
+		const oldMtimeMs = Date.now() - 60 * 24 * 60 * 60 * 1000; // 60 days old
+		(mockFs.stat as jest.Mock).mockResolvedValue({ mtimeMs: oldMtimeMs });
+		(mockFs.unlink as jest.Mock).mockResolvedValue(undefined);
+
+		const logSpy = jest.spyOn(logger, "info");
+		const svc = makeService(true, ttlDays);
+		await svc.lookup(URL, TIME);
+
+		expect(logSpy).toHaveBeenCalledWith(
+			expect.objectContaining({ sentinel: expect.any(String), ageMs: expect.any(Number), ttlMs: expect.any(Number) }),
+			"[cache] sentinel-expired",
+		);
 	});
 });
 

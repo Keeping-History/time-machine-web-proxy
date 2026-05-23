@@ -37,6 +37,32 @@ function parseOutboundProxyCooldownMs(raw: string | undefined): number {
 	return Math.floor(parsed * 1000);
 }
 
+function parseBool(raw: string | undefined, envName: string, defaultValue: boolean): boolean {
+	if (raw === undefined || raw === "") return defaultValue;
+	const lower = raw.trim().toLowerCase();
+	if (lower === "true") return true;
+	if (lower === "false") return false;
+	throw new Error(`${envName} must be "true" or "false" (got "${raw}")`);
+}
+
+function parseIntInRange(
+	raw: string | undefined,
+	envName: string,
+	defaultValue: number,
+	min: number,
+	max: number,
+): number {
+	if (raw === undefined || raw === "") return defaultValue;
+	const parsed = Number.parseInt(raw, 10);
+	if (!Number.isFinite(parsed) || String(parsed) !== raw.trim()) {
+		throw new Error(`${envName} must be an integer (got "${raw}")`);
+	}
+	if (parsed < min || parsed > max) {
+		throw new Error(`${envName} must be between ${min} and ${max} (got ${parsed})`);
+	}
+	return parsed;
+}
+
 export function loadConfig(): Config {
 	const hostname = process.env.LISTENER ?? "0.0.0.0";
 	const port = Number(process.env.TIMEMACHINE_PORT) || 8765;
@@ -86,9 +112,64 @@ export function loadConfig(): Config {
 		// without later-fallback the proxy 404s assets that exist a few hours
 		// after the requested time. Opt out with ASSET_LATER_FALLBACK=false.
 		assetLaterFallback: process.env.ASSET_LATER_FALLBACK?.toLowerCase() !== "false",
+
+		// Direct-fetch kill switches and tuning knobs
+		directFetchEnabled: parseBool(process.env.DIRECT_FETCH_ENABLED, "DIRECT_FETCH_ENABLED", true),
+		directFetchMaxConcurrent: parseIntInRange(
+			process.env.DIRECT_FETCH_MAX_CONCURRENT,
+			"DIRECT_FETCH_MAX_CONCURRENT",
+			10,
+			1,
+			50,
+		),
+		directFetchTimeoutMs: parseIntInRange(
+			process.env.DIRECT_FETCH_TIMEOUT_MS,
+			"DIRECT_FETCH_TIMEOUT_MS",
+			15_000,
+			1_000,
+			60_000,
+		),
+		directFetchRatePerSec: parseIntInRange(
+			process.env.DIRECT_FETCH_RATE_PER_SEC,
+			"DIRECT_FETCH_RATE_PER_SEC",
+			20,
+			1,
+			100,
+		),
+		directFetchBurst: parseIntInRange(
+			process.env.DIRECT_FETCH_BURST,
+			"DIRECT_FETCH_BURST",
+			30,
+			1,
+			200,
+		),
+
+		// Prewarm knobs
+		prewarmEnabled: parseBool(process.env.PREWARM_ENABLED, "PREWARM_ENABLED", true),
+		prewarmMaxAssetsPerPage: parseIntInRange(
+			process.env.PREWARM_MAX_ASSETS_PER_PAGE,
+			"PREWARM_MAX_ASSETS_PER_PAGE",
+			100,
+			0,
+			500,
+		),
+
+		// Sentinel TTL
+		notFoundTtlDays: parseIntInRange(
+			process.env.NOT_FOUND_TTL_DAYS,
+			"NOT_FOUND_TTL_DAYS",
+			30,
+			1,
+			3650,
+		),
 	};
 }
 
 export function ensureCacheDir(cacheDir: string): void {
 	mkdirSync(cacheDir, { recursive: true });
 }
+
+/** Singleton parsed config. Evaluated once at module load; safe to import
+ * anywhere except test files that need to override env vars (call loadConfig()
+ * directly in those). */
+export const config: ReturnType<typeof loadConfig> = loadConfig();

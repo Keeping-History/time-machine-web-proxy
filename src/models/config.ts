@@ -42,6 +42,29 @@ export interface Config {
 	 *  timestamp, and serving the closest capture matches web.archive.org's
 	 *  own behavior for sub-resources. Env: ASSET_LATER_FALLBACK. */
 	assetLaterFallback: boolean;
+
+	// — Direct-fetch kill switches and tuning knobs —
+	/** Master switch for direct Wayback asset fetching. Env: DIRECT_FETCH_ENABLED (default true). */
+	directFetchEnabled: boolean;
+	/** Max simultaneous direct fetch connections. Env: DIRECT_FETCH_MAX_CONCURRENT (default 10, 1-50). */
+	directFetchMaxConcurrent: number;
+	/** Per-fetch timeout in ms. Env: DIRECT_FETCH_TIMEOUT_MS (default 15000, 1000-60000). */
+	directFetchTimeoutMs: number;
+	/** Sustained rate cap in requests/sec for direct fetches. Env: DIRECT_FETCH_RATE_PER_SEC (default 20, 1-100). */
+	directFetchRatePerSec: number;
+	/** Burst allowance above the sustained rate. Env: DIRECT_FETCH_BURST (default 30, 1-200). */
+	directFetchBurst: number;
+
+	// — Prewarm knobs —
+	/** Whether to prewarm asset URLs discovered during crawl. Env: PREWARM_ENABLED (default true). */
+	prewarmEnabled: boolean;
+	/** Max asset URLs to prewarm per page. Env: PREWARM_MAX_ASSETS_PER_PAGE (default 100, 0-500). */
+	prewarmMaxAssetsPerPage: number;
+
+	// — Sentinel TTL —
+	/** Age in days after which a not-found sentinel is considered stale and deleted on next lookup.
+	 *  Env: NOT_FOUND_TTL_DAYS (default 30, 1-3650). */
+	notFoundTtlDays: number;
 }
 
 export type OutboundProxyChooser = "sequential" | "random";

@@ -128,10 +128,15 @@ export class WaybackDirectClient {
 			return { outcome: "fallback", reason: "bad-timestamp" };
 		}
 
-		await this.bucket.consume();
+		const waitMs = this.bucket.tryConsume();
+		if (waitMs > 0) {
+			this.log.debug({ url, ts, waitMs }, "[direct] rate-limited");
+			await new Promise<void>((resolve) => setTimeout(resolve, waitMs));
+			await this.bucket.consume();
+		}
 
 		const archiveUrl = `${WAYBACK_BASE}/${ts}id_/${url}`;
-		this.log.debug({ archiveUrl, ts }, "[wayback-direct] fetchAtResolvedTime");
+		this.log.debug({ archiveUrl, ts }, "[direct] resolved-fetch");
 
 		let res: Response;
 		try {
@@ -184,10 +189,15 @@ export class WaybackDirectClient {
 			return { outcome: "fallback", reason: "bad-timestamp" };
 		}
 
-		await this.bucket.consume();
+		const waitMs = this.bucket.tryConsume();
+		if (waitMs > 0) {
+			this.log.debug({ url, ts, waitMs }, "[direct] rate-limited");
+			await new Promise<void>((resolve) => setTimeout(resolve, waitMs));
+			await this.bucket.consume();
+		}
 
 		const archiveUrl = `${WAYBACK_BASE}/${ts}im_/${url}`;
-		this.log.debug({ archiveUrl, ts }, "[wayback-direct] fetchAtRequestedTime");
+		this.log.debug({ archiveUrl, ts }, "[direct] requested-fetch");
 
 		let res: Response;
 		try {
