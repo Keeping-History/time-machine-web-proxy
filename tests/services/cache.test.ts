@@ -128,6 +128,93 @@ describe("CacheService.lookup (v2)", () => {
 		expect(result?.contentType).toBe("application/octet-stream");
 	});
 
+	it("uses the .content-types sidecar verbatim when present (overrides extension)", async () => {
+		// The sidecar stores the upstream Content-Type from the direct fetch
+		// path. It takes precedence over mime-types extension lookup so a
+		// charset hint or a non-default type (e.g. application/xhtml+xml) is
+		// preserved across reads.
+		(mockFs.access as jest.Mock).mockResolvedValue(undefined);
+		(mockFs.readFile as jest.Mock).mockImplementation((p: string) => {
+			if (p.includes("/.content-types/")) return Promise.resolve("text/html; charset=utf-8");
+			if (p.endsWith(".resolved-time"))
+				return Promise.reject(Object.assign(new Error("ENOENT"), { code: "ENOENT" }));
+			return Promise.resolve(Buffer.from(""));
+		});
+		const svc = makeService();
+		const result = await svc.lookup("https://www.yahoo.com/r/ci", TIME);
+		expect(result?.contentType).toBe("text/html; charset=utf-8");
+	});
+
+	it("sniffs HTML for extensionless URLs when no sidecar exists (legacy cache)", async () => {
+		// The user-reported bug: http://www.yahoo.com/r/ci has no extension,
+		// mime-types returns false, and pre-fix the response went out as
+		// application/octet-stream — the browser downloaded it. Sniffing the
+		// cached body for an HTML signature serves it correctly without a
+		// cache wipe.
+		(mockFs.access as jest.Mock).mockResolvedValue(undefined);
+		(mockFs.readFile as jest.Mock).mockImplementation((p: string) => {
+			if (p.includes("/.content-types/"))
+				return Promise.reject(Object.assign(new Error("ENOENT"), { code: "ENOENT" }));
+			if (p.endsWith(".resolved-time"))
+				return Promise.reject(Object.assign(new Error("ENOENT"), { code: "ENOENT" }));
+			return Promise.resolve(
+				Buffer.from('<HTML><HEAD><meta http-equiv="refresh" content="0;url=/"></HEAD></HTML>'),
+			);
+		});
+		const svc = makeService();
+		const result = await svc.lookup("https://www.yahoo.com/r/ci", TIME);
+		expect(result?.contentType).toBe("text/html; charset=utf-8");
+	});
+
+	it("sniff recognises an XML prolog", async () => {
+		(mockFs.access as jest.Mock).mockResolvedValue(undefined);
+		(mockFs.readFile as jest.Mock).mockImplementation((p: string) => {
+			if (p.includes("/.content-types/") || p.endsWith(".resolved-time"))
+				return Promise.reject(Object.assign(new Error("ENOENT"), { code: "ENOENT" }));
+			return Promise.resolve(Buffer.from('<?xml version="1.0"?><rss></rss>'));
+		});
+		const svc = makeService();
+		const result = await svc.lookup("https://example.com/feed", TIME);
+		expect(result?.contentType).toBe("application/xml");
+	});
+
+	it("sniff does NOT run when the URL has an extension (avoids false positives)", async () => {
+		// `.unknownext` is non-empty — mime-types returns false, but we MUST
+		// NOT sniff: an extension was specified, so the user/server intended
+		// a particular type. Falsely promoting binary blobs to text/html based
+		// on a stray "<html" byte sequence would corrupt downloads.
+		(mockFs.access as jest.Mock).mockResolvedValue(undefined);
+		const readSpy = jest.fn().mockImplementation((p: string) => {
+			if (p.includes("/.content-types/") || p.endsWith(".resolved-time"))
+				return Promise.reject(Object.assign(new Error("ENOENT"), { code: "ENOENT" }));
+			return Promise.resolve(Buffer.from("<html>this is a trap</html>"));
+		});
+		(mockFs.readFile as jest.Mock).mockImplementation(readSpy);
+		const svc = makeService();
+		const result = await svc.lookup("https://example.com/file.unknownext", TIME);
+		expect(result?.contentType).toBe("application/octet-stream");
+		// The cached body must never be read in the no-sniff path.
+		const bodyReads = readSpy.mock.calls.filter(
+			(call: [string]) =>
+				!call[0].includes("/.content-types/") && !call[0].endsWith(".resolved-time"),
+		);
+		expect(bodyReads).toHaveLength(0);
+	});
+
+	it("sniff returns octet-stream for non-HTML/XML extensionless content", async () => {
+		// Random binary bytes should NOT be promoted to text/html. The
+		// sniffer's allowlist of signatures is intentionally narrow.
+		(mockFs.access as jest.Mock).mockResolvedValue(undefined);
+		(mockFs.readFile as jest.Mock).mockImplementation((p: string) => {
+			if (p.includes("/.content-types/") || p.endsWith(".resolved-time"))
+				return Promise.reject(Object.assign(new Error("ENOENT"), { code: "ENOENT" }));
+			return Promise.resolve(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
+		});
+		const svc = makeService();
+		const result = await svc.lookup("https://example.com/blob", TIME);
+		expect(result?.contentType).toBe("application/octet-stream");
+	});
+
 	// www.example.com and example.com may serve different content and the
 	// Wayback Machine archives them as distinct URLs. The cache key preserves
 	// that distinction so a hit on one form never returns content from the
@@ -545,6 +632,39 @@ describe("CacheService.writeFile", () => {
 	});
 
 	// Criterion 4: partial tmp file does not satisfy lookup (rename is the visibility boundary)
+	it("writeContentTypeSidecar persists upstream type at <root>/.content-types/<sha-16>", async () => {
+		const svc = makeService();
+		await svc.writeContentTypeSidecar(
+			"https://www.yahoo.com/r/ci",
+			TIME,
+			"text/html; charset=utf-8",
+		);
+
+		expect(mockFs.writeFile).toHaveBeenCalledTimes(1);
+		const [path, contents] = (mockFs.writeFile as jest.Mock).mock.calls[0] as [string, string];
+		expect(path).toMatch(
+			/^\/tmp\/cache\/v2\/20200101000000\/www\.yahoo\.com\/\.content-types\/[0-9a-f]{16}$/,
+		);
+		expect(contents).toBe("text/html; charset=utf-8");
+		// Parent dir is created before the write to match the existing sentinel
+		// pattern — required when this is the first sidecar for a fresh host.
+		expect(mockFs.mkdir).toHaveBeenCalledWith(
+			expect.stringMatching(/\/www\.yahoo\.com\/\.content-types$/),
+			{ recursive: true },
+		);
+	});
+
+	it("writeContentTypeSidecar derives the same key for the same URL across calls", async () => {
+		// Lookup reads via buildPerUrlSubpath; this write MUST land on the
+		// exact path lookup will probe, or the sidecar is unreachable.
+		const svc = makeService();
+		await svc.writeContentTypeSidecar("https://example.com/r/ci", TIME, "text/html");
+		await svc.writeContentTypeSidecar("https://example.com/r/ci", TIME, "text/html");
+		const first = (mockFs.writeFile as jest.Mock).mock.calls[0][0] as string;
+		const second = (mockFs.writeFile as jest.Mock).mock.calls[1][0] as string;
+		expect(first).toBe(second);
+	});
+
 	it("writes to a .tmp sibling before renaming — tmp path differs from final path", async () => {
 		const svc = makeService();
 		const url = "https://example.com/asset.js";

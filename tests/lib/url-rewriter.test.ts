@@ -382,6 +382,23 @@ describe("rewriteHtmlUrls — <base href> handling", () => {
 		expect(r).toContain(`/web/${TIME}/https://cdn.example.com/x`);
 		expect(r).not.toContain(`/web/${TIME}/http://www.apple.com/x`);
 	});
+
+	it("unwraps a wayback-wrapped <base href> before resolving relative URLs", () => {
+		// Wayback injects this shape of <base> on many archived pages. Without
+		// unwrapping, "r/ar" resolves to https://web.archive.org/web/<inner>/
+		// http://www.yahoo.com/r/ar and gets re-proxied verbatim.
+		const html = `<html><head><base href="https://web.archive.org/web/20010913013843/http://www.yahoo.com/" target="_top"></head><body><a href="r/ar">x</a></body></html>`;
+		const { html: r } = rewriteHtmlUrls(html, "http://www.yahoo.com/", TIME);
+		expect(r).toContain(`href="/web/${TIME}/http://www.yahoo.com/r/ar"`);
+		expect(r).not.toContain(`/web/${TIME}/https://web.archive.org`);
+	});
+
+	it("unwraps a protocol-relative wayback <base href>", () => {
+		const html = `<html><head><base href="//web.archive.org/web/20010913013843/http://www.yahoo.com/"></head><body><a href="r/ar">x</a></body></html>`;
+		const { html: r } = rewriteHtmlUrls(html, "http://www.yahoo.com/", TIME);
+		expect(r).toContain(`href="/web/${TIME}/http://www.yahoo.com/r/ar"`);
+		expect(r).not.toContain(`/web/${TIME}//web.archive.org`);
+	});
 });
 
 describe("rewriteHtmlUrls — <meta http-equiv='refresh'>", () => {

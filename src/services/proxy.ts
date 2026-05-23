@@ -75,6 +75,9 @@ export class ProxyService {
 					if (direct.resolvedTime) {
 						await this.cache.writeResolvedTimeSidecar(time, targetUrl, direct.resolvedTime);
 					}
+					if (direct.contentType) {
+						await this.cache.writeContentTypeSidecar(targetUrl, time, direct.contentType);
+					}
 					hit = await this.cache.lookup(targetUrl, time);
 					cacheStatus = "MISS_DIRECT";
 					this.logger.info({ targetUrl, time }, "[CACHE MISS_DIRECT] direct fetch ok");
@@ -127,9 +130,16 @@ export class ProxyService {
 				for (const asset of discoveredAssets) {
 					void this.directClient
 						.fetchAtResolvedTime(asset.url, asset.embeddedTs)
-						.then((result) => {
+						.then(async (result) => {
 							if (result.outcome === "ok" && result.body) {
-								return this.cache.writeFile(asset.url, asset.embeddedTs, result.body);
+								await this.cache.writeFile(asset.url, asset.embeddedTs, result.body);
+								if (result.contentType) {
+									await this.cache.writeContentTypeSidecar(
+										asset.url,
+										asset.embeddedTs,
+										result.contentType,
+									);
+								}
 							}
 						})
 						.catch((err: unknown) => {

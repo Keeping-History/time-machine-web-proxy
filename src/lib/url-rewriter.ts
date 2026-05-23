@@ -304,6 +304,13 @@ const hasChildNodes = (node: Node): node is ParentNode =>
 // have done the same), then return the new effective base. Removes the
 // <base> tag(s) from the tree so the live browser can't fall back to the
 // archived origin for any unrewritten refs.
+//
+// Wayback's default rendering injects a `<base href="https://web.archive.org/
+// web/<ts>/<original>/">` into many archived pages. Resolving relative URLs
+// against that wrapped base produces doubly-wrapped absolute URLs that the
+// per-URL rewriter then proxies verbatim (e.g. `/web/<page-ts>/https://web.
+// archive.org/web/<inner-ts>/<original>/r/ar`). Unwrap the wayback prefix
+// here so relative URLs resolve against the original site, not the wrapper.
 const consumeBaseTag = (node: Node, currentBase: string): string => {
 	let effectiveBase = currentBase;
 	if (!hasChildNodes(node)) return effectiveBase;
@@ -312,7 +319,9 @@ const consumeBaseTag = (node: Node, currentBase: string): string => {
 			const hrefAttr = child.attrs.find((a) => a.name === "href");
 			if (hrefAttr?.value) {
 				try {
-					effectiveBase = new URL(hrefAttr.value, currentBase).href;
+					const resolved = new URL(hrefAttr.value, currentBase).href;
+					const archive = resolved.match(RE_ARCHIVE_URL);
+					effectiveBase = archive ? archive[2] : resolved;
 				} catch {
 					/* keep currentBase */
 				}
