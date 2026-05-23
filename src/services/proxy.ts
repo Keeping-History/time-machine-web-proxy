@@ -83,7 +83,7 @@ export class ProxyService {
 
 		if (isHtml) {
 			const stripped = stripWaybackToolbar(raw.toString("utf-8"));
-			body = rewriteHtmlUrls(stripped, targetUrl, time);
+			body = rewriteHtmlUrls(stripped, targetUrl, time).html;
 			if (cacheStatus === "MISS") {
 				void this.maybeEnqueueDomainCrawl(u.hostname, time);
 			}

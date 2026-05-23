@@ -7,6 +7,10 @@ import type pino from "pino";
 import type { Config } from "../models/config";
 
 const ROOT_VERSION = "v2";
+// Suffix appended to the final path to produce the tmp write target. Kept in
+// the same directory as the destination so the rename is atomic on POSIX
+// (same filesystem, same mount point).
+const TMP_SUFFIX = ".tmp";
 
 export interface CacheHit {
 	absPath: string;
@@ -26,16 +30,20 @@ export class CacheService {
 		return join(this.config.cacheDir, ROOT_VERSION, time, host);
 	}
 
-	async lookup(url: string, time: string): Promise<CacheHit | null> {
-		if (!this.config.cacheEnabled) return null;
+	/**
+	 * Computes the absolute cache path for a given URL and timestamp.
+	 *
+	 * This is the single source of truth for cache path resolution — both the
+	 * read path (lookup) and the write path (writeFile) call this so they can
+	 * never diverge. Percent-encoded traversal sequences (e.g. %2e%2e%2f) are
+	 * decoded before path.resolve so the startsWith guard catches them.
+	 *
+	 * Directory-style URLs (/ or trailing /) resolve to `<dir>/index.html`.
+	 * Throws HTTP 400 if the resolved path escapes the cache root.
+	 */
+	computeAbsPath(url: string, time: string): string {
 		const u = new URL(url);
-		// Cache key uses the hostname verbatim. www.example.com and example.com
-		// are deliberately stored as separate entries because they may serve
-		// different content; collapsing them would poison the cache.
 		const root = this.cacheDirForJob(time, u.hostname);
-		// Decode the pathname so percent-encoded traversal sequences (e.g. %2e%2e%2f)
-		// are normalized before path.resolve, allowing the startsWith guard below
-		// to catch them. URL's own pathname normalization only handles literal "..".
 		let decoded: string;
 		try {
 			decoded = decodeURIComponent(u.pathname);
@@ -43,11 +51,31 @@ export class CacheService {
 			throw Object.assign(new Error("Malformed URL pathname"), { status: 400 });
 		}
 		const isDirStyle = decoded === "/" || decoded.endsWith("/");
-		const primaryRel = isDirStyle ? `${decoded}index.html` : decoded;
-		const primaryAbs = resolve(root, `.${primaryRel}`);
-		if (primaryAbs !== root && !primaryAbs.startsWith(root + sep)) {
+		const rel = isDirStyle ? `${decoded}index.html` : decoded;
+		const abs = resolve(root, `.${rel}`);
+		if (abs !== root && !abs.startsWith(root + sep)) {
 			throw Object.assign(new Error("Path traversal rejected"), { status: 400 });
 		}
+		return abs;
+	}
+
+	async lookup(url: string, time: string): Promise<CacheHit | null> {
+		if (!this.config.cacheEnabled) return null;
+		const u = new URL(url);
+		// Cache key uses the hostname verbatim. www.example.com and example.com
+		// are deliberately stored as separate entries because they may serve
+		// different content; collapsing them would poison the cache.
+		const primaryAbs = this.computeAbsPath(url, time);
+		const root = this.cacheDirForJob(time, u.hostname);
+		// Decode pathname for the directory-index fallback probe. computeAbsPath
+		// already validated against traversal; we only need the decoded form here.
+		let decoded: string;
+		try {
+			decoded = decodeURIComponent(u.pathname);
+		} catch {
+			throw Object.assign(new Error("Malformed URL pathname"), { status: 400 });
+		}
+		const isDirStyle = decoded === "/" || decoded.endsWith("/");
 		try {
 			await fs.access(primaryAbs);
 			const contentType = mimeLookup(extname(primaryAbs)) || "application/octet-stream";
@@ -81,6 +109,25 @@ export class CacheService {
 			return null;
 		}
 		throw Object.assign(new Error("Not in archive"), { status: 404 });
+	}
+
+	/**
+	 * Atomically writes `data` into the cache for the given URL + timestamp.
+	 *
+	 * The write goes to a sibling `.tmp` file first; a rename makes it visible
+	 * as an atomic unit. A partial write (crash / concurrent write) therefore
+	 * never satisfies a subsequent lookup — only the rename crosses the
+	 * visibility boundary.
+	 *
+	 * Uses the same computeAbsPath as lookup so read-path and write-path are
+	 * always in sync.
+	 */
+	async writeFile(url: string, time: string, data: Buffer): Promise<void> {
+		const dest = this.computeAbsPath(url, time);
+		await fs.mkdir(dirname(dest), { recursive: true });
+		const tmp = `${dest}${TMP_SUFFIX}`;
+		await fs.writeFile(tmp, data);
+		await fs.rename(tmp, dest);
 	}
 
 	async writeResolvedTimeSidecar(time: string, url: string, resolvedTime: string): Promise<void> {

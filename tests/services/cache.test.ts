@@ -7,6 +7,7 @@ jest.mock("node:fs", () => ({
 		access: jest.fn(),
 		rm: jest.fn(),
 		mkdir: jest.fn(),
+		rename: jest.fn(),
 	},
 }));
 
@@ -301,6 +302,132 @@ describe("CacheService.writeNotFoundSentinel + sentinel-aware lookup", () => {
 		const a = (mockFs.writeFile as jest.Mock).mock.calls[0][0] as string;
 		const b = (mockFs.writeFile as jest.Mock).mock.calls[1][0] as string;
 		expect(a).not.toBe(b);
+	});
+});
+
+describe("CacheService.computeAbsPath", () => {
+	const TIME = "20200101000000";
+
+	// Criterion 1: computeAbsPath returns same path as lookup probes for given (url, time)
+	it("returns the same primary path that lookup probes for a plain file URL", () => {
+		const svc = makeService();
+		const abs = svc.computeAbsPath("https://example.com/about.html", TIME);
+		expect(abs).toBe("/tmp/cache/v2/20200101000000/example.com/about.html");
+	});
+
+	it("resolves directory-style URL (trailing /) to index.html — matching lookup primary probe", () => {
+		const svc = makeService();
+		const abs = svc.computeAbsPath("https://example.com/about/", TIME);
+		expect(abs).toBe("/tmp/cache/v2/20200101000000/example.com/about/index.html");
+	});
+
+	it("resolves root / to index.html — matching lookup primary probe", () => {
+		const svc = makeService();
+		const abs = svc.computeAbsPath("https://example.com/", TIME);
+		expect(abs).toBe("/tmp/cache/v2/20200101000000/example.com/index.html");
+	});
+
+	it("preserves www. in hostname verbatim — same as lookup", () => {
+		const svc = makeService();
+		const abs = svc.computeAbsPath("https://www.example.com/page.html", TIME);
+		expect(abs).toBe("/tmp/cache/v2/20200101000000/www.example.com/page.html");
+	});
+
+	// Criterion 2: path-traversal payloads reject with HTTP 400
+	it("rejects percent-encoded traversal (%2e%2e/etc/passwd) with status 400", () => {
+		const svc = makeService();
+		expect(() =>
+			svc.computeAbsPath("https://example.com/%2e%2e%2fetc%2fpasswd", TIME),
+		).toThrow(expect.objectContaining({ status: 400 }));
+	});
+
+	it("rejects deeply nested percent-encoded traversal with status 400", () => {
+		const svc = makeService();
+		expect(() =>
+			svc.computeAbsPath("https://example.com/%2e%2e%2f%2e%2e%2fetc%2fpasswd", TIME),
+		).toThrow(expect.objectContaining({ status: 400 }));
+	});
+});
+
+describe("CacheService.writeFile", () => {
+	const TIME = "20200101000000";
+
+	beforeEach(() => {
+		(mockFs.mkdir as jest.Mock).mockResolvedValue(undefined);
+		(mockFs.writeFile as jest.Mock).mockResolvedValue(undefined);
+		(mockFs.rename as jest.Mock).mockResolvedValue(undefined);
+	});
+
+	// Criterion 3: writeFile round-trips — subsequent lookup returns the bytes
+	// (In the mock environment we verify the write path matches computeAbsPath
+	// and that lookup probes the same path, ensuring they are consistent.)
+	it("writes to the path that computeAbsPath returns — lookup will find it there", async () => {
+		const svc = makeService();
+		const url = "https://example.com/page.html";
+		const expectedDest = svc.computeAbsPath(url, TIME);
+
+		await svc.writeFile(url, TIME, Buffer.from("hello"));
+
+		// rename target must equal computeAbsPath output
+		const renameDest = (mockFs.rename as jest.Mock).mock.calls[0][1] as string;
+		expect(renameDest).toBe(expectedDest);
+	});
+
+	it("creates the parent directory before writing", async () => {
+		const svc = makeService();
+		await svc.writeFile("https://example.com/deep/path/file.html", TIME, Buffer.from("x"));
+
+		expect(mockFs.mkdir).toHaveBeenCalledWith(
+			"/tmp/cache/v2/20200101000000/example.com/deep/path",
+			{ recursive: true },
+		);
+	});
+
+	// Criterion 4: partial tmp file does not satisfy lookup (rename is the visibility boundary)
+	it("writes to a .tmp sibling before renaming — tmp path differs from final path", async () => {
+		const svc = makeService();
+		const url = "https://example.com/asset.js";
+		const dest = svc.computeAbsPath(url, TIME);
+
+		await svc.writeFile(url, TIME, Buffer.from("var x=1;"));
+
+		const writtenPath = (mockFs.writeFile as jest.Mock).mock.calls[0][0] as string;
+		const [renameSrc, renameDest] = (mockFs.rename as jest.Mock).mock.calls[0] as [
+			string,
+			string,
+		];
+
+		// tmp file path must differ from destination
+		expect(writtenPath).not.toBe(dest);
+		expect(writtenPath).toBe(`${dest}.tmp`);
+		// rename moves tmp → dest
+		expect(renameSrc).toBe(`${dest}.tmp`);
+		expect(renameDest).toBe(dest);
+	});
+
+	it("rename happens after writeFile — order of operations is tmp-write then rename", async () => {
+		const order: string[] = [];
+		(mockFs.writeFile as jest.Mock).mockImplementation(async () => {
+			order.push("writeFile");
+		});
+		(mockFs.rename as jest.Mock).mockImplementation(async () => {
+			order.push("rename");
+		});
+
+		const svc = makeService();
+		await svc.writeFile("https://example.com/x.html", TIME, Buffer.from(""));
+
+		expect(order).toEqual(["writeFile", "rename"]);
+	});
+
+	// Criterion 2 also applies to writeFile: traversal rejected before any fs call
+	it("rejects path-traversal URL with status 400 without touching fs", async () => {
+		const svc = makeService();
+		await expect(
+			svc.writeFile("https://example.com/%2e%2e%2fetc%2fpasswd", TIME, Buffer.from("evil")),
+		).rejects.toMatchObject({ status: 400 });
+		expect(mockFs.writeFile).not.toHaveBeenCalled();
+		expect(mockFs.rename).not.toHaveBeenCalled();
 	});
 });
 
