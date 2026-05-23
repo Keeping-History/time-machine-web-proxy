@@ -1,4 +1,5 @@
-import { parse, serialize, type DefaultTreeAdapterTypes } from "parse5";
+import { defaultTreeAdapter, parse, serialize, type DefaultTreeAdapterTypes } from "parse5";
+import { generateShimScript } from "./runtime-shim";
 
 type Node = DefaultTreeAdapterTypes.Node;
 type Element = DefaultTreeAdapterTypes.Element;
@@ -11,11 +12,14 @@ const RE_WAYBACK_JS_HTML = /((?:<html[^>]*>))[\s\S]*?<!-- End Wayback Rewrite JS
 const RE_WAYBACK_TOOLBAR =
 	/<!-- BEGIN WAYBACK TOOLBAR INSERT -->[\s\S]*?<!-- END WAYBACK TOOLBAR INSERT -->/gi;
 
-// Wayback archive URL (absolute or path-relative), with optional 1-3 char
-// content-type modifier (im_, cs_, js_, if_, fw_, …) between timestamp and
-// the original URL. Capture: (timestamp, originalUrl).
+// Wayback archive URL (absolute, protocol-relative, or path-relative), with
+// optional 1-3 char content-type modifier (im_, cs_, js_, if_, fw_, …)
+// between timestamp and the original URL. Capture: (timestamp, originalUrl).
+// Protocol-relative `//web.archive.org/...` is the form `wayback-machine-downloader`
+// stores in cached HTML; missing it caused the rewriter to fall through to
+// new URL() resolution and emit doubly-wrapped paths that the router 404s on.
 const RE_ARCHIVE_URL =
-	/^(?:https?:\/\/web\.archive\.org)?\/web\/(\d{1,14})(?:[a-z]{1,3}_)?\/(https?:\/\/.+)$/i;
+	/^(?:(?:https?:)?\/\/web\.archive\.org)?\/web\/(\d{1,14})(?:[a-z]{1,3}_)?\/(https?:\/\/.+)$/i;
 
 // Proxy path-format request: /web/{14-digit-ts}{optional 1-3 char mod}_/{url}.
 // Modifier (if present) is tolerated and discarded — the proxy serves the
@@ -82,6 +86,14 @@ export const isAssetUrl = (url: string): boolean => {
 };
 
 const RE_CSS_URL = /(url\s*\(\s*['"]?)([^'")]+?)(['"]?\s*\))/gi;
+
+export interface DiscoveredAsset {
+	url: string;
+	embeddedTs: string;
+}
+
+/** Deduplication key for discovered assets */
+const assetKey = (a: DiscoveredAsset): string => `${a.embeddedTs}:${a.url}`;
 
 // Schemes/anchors that must never be rewritten — opaque or non-network
 // protocols whose semantics break if proxied. List ported from main:
@@ -194,13 +206,31 @@ export const parseWaybackPath = (
 const buildProxyUrl = (originalUrl: string, time: string): string =>
 	`/web/${time}/${originalUrl}`;
 
-const rewriteOneUrl = (raw: string, targetUrl: string, fallbackTime: string): string => {
+const rewriteOneUrl = (
+	raw: string,
+	targetUrl: string,
+	fallbackTime: string,
+	collect?: Set<string>,
+	assets?: DiscoveredAsset[],
+): string => {
 	if (!raw) return raw;
 	const trimmed = raw.trim();
 	if (!trimmed || RE_SKIP_PREFIX.test(trimmed)) return raw;
 
 	const archive = trimmed.match(RE_ARCHIVE_URL);
-	if (archive) return buildProxyUrl(archive[2], archive[1]);
+	if (archive) {
+		const [, ts, originalUrl] = archive;
+		// Only record when the embedded timestamp is a valid 14-digit string.
+		if (collect !== undefined && assets !== undefined && /^\d{14}$/.test(ts)) {
+			const asset: DiscoveredAsset = { url: originalUrl, embeddedTs: ts };
+			const key = assetKey(asset);
+			if (!collect.has(key)) {
+				collect.add(key);
+				assets.push(asset);
+			}
+		}
+		return buildProxyUrl(originalUrl, ts);
+	}
 
 	try {
 		const resolved = new URL(trimmed, targetUrl);
@@ -211,7 +241,13 @@ const rewriteOneUrl = (raw: string, targetUrl: string, fallbackTime: string): st
 	}
 };
 
-const rewriteSrcsetValue = (srcset: string, targetUrl: string, time: string): string =>
+const rewriteSrcsetValue = (
+	srcset: string,
+	targetUrl: string,
+	time: string,
+	collect?: Set<string>,
+	assets?: DiscoveredAsset[],
+): string =>
 	srcset
 		.split(",")
 		.map((part) => {
@@ -219,18 +255,30 @@ const rewriteSrcsetValue = (srcset: string, targetUrl: string, time: string): st
 			if (!trimmed) return "";
 			const match = trimmed.match(/^(\S+)(\s+.+)?$/);
 			if (!match) return trimmed;
-			return `${rewriteOneUrl(match[1], targetUrl, time)}${match[2] ?? ""}`;
+			return `${rewriteOneUrl(match[1], targetUrl, time, collect, assets)}${match[2] ?? ""}`;
 		})
 		.filter(Boolean)
 		.join(", ");
 
-export const rewriteCssUrls = (css: string, targetUrl: string, time: string): string =>
+export const rewriteCssUrls = (
+	css: string,
+	targetUrl: string,
+	time: string,
+	collect?: Set<string>,
+	assets?: DiscoveredAsset[],
+): string =>
 	css.replace(RE_CSS_URL, (_, before, url, after) => {
-		const rewritten = rewriteOneUrl(url, targetUrl, time);
+		const rewritten = rewriteOneUrl(url, targetUrl, time, collect, assets);
 		return `${before}${rewritten}${after}`;
 	});
 
-const rewriteMetaRefresh = (content: string, targetUrl: string, time: string): string => {
+const rewriteMetaRefresh = (
+	content: string,
+	targetUrl: string,
+	time: string,
+	collect?: Set<string>,
+	assets?: DiscoveredAsset[],
+): string => {
 	const m = content.match(META_REFRESH_RE);
 	if (!m) return content;
 	const prefix = m[1];
@@ -240,8 +288,9 @@ const rewriteMetaRefresh = (content: string, targetUrl: string, time: string): s
 		quote = url[0];
 		url = url.slice(1, -1);
 	}
-	return `${prefix}${quote}${rewriteOneUrl(url, targetUrl, time)}${quote}`;
+	return `${prefix}${quote}${rewriteOneUrl(url, targetUrl, time, collect, assets)}${quote}`;
 };
+
 
 const isElement = (node: Node): node is Element =>
 	typeof (node as Partial<Element>).tagName === "string";
@@ -285,7 +334,13 @@ const isMetaRefresh = (el: Element): boolean => {
 	return httpEquiv?.value.toLowerCase() === "refresh";
 };
 
-const visit = (node: Node, targetUrl: string, time: string): void => {
+const visit = (
+	node: Node,
+	targetUrl: string,
+	time: string,
+	collect: Set<string>,
+	assets: DiscoveredAsset[],
+): void => {
 	if (isElement(node)) {
 		const tag = node.tagName.toLowerCase();
 		const urlAttrs = TAG_URL_ATTRS[tag];
@@ -293,33 +348,90 @@ const visit = (node: Node, targetUrl: string, time: string): void => {
 		for (const attr of node.attrs) {
 			if (urlAttrs?.includes(attr.name)) {
 				attr.value = SRCSET_ATTRS.has(attr.name)
-					? rewriteSrcsetValue(attr.value, targetUrl, time)
-					: rewriteOneUrl(attr.value, targetUrl, time);
+					? rewriteSrcsetValue(attr.value, targetUrl, time, collect, assets)
+					: rewriteOneUrl(attr.value, targetUrl, time, collect, assets);
 			} else if (metaRefresh && attr.name === "content") {
-				attr.value = rewriteMetaRefresh(attr.value, targetUrl, time);
+				attr.value = rewriteMetaRefresh(attr.value, targetUrl, time, collect, assets);
 			} else if (attr.name === "style") {
-				attr.value = rewriteCssUrls(attr.value, targetUrl, time);
+				attr.value = rewriteCssUrls(attr.value, targetUrl, time, collect, assets);
 			}
 		}
 		if (tag === "style") {
 			for (const child of node.childNodes) {
 				if (isTextNode(child)) {
-					child.value = rewriteCssUrls(child.value, targetUrl, time);
+					child.value = rewriteCssUrls(child.value, targetUrl, time, collect, assets);
 				}
 			}
 		}
 	}
 	if (hasChildNodes(node)) {
-		for (const child of node.childNodes) visit(child, targetUrl, time);
+		for (const child of node.childNodes) visit(child, targetUrl, time, collect, assets);
 	}
 };
 
-export const rewriteHtmlUrls = (html: string, targetUrl: string, time: string): string => {
+export interface RewriteHtmlResult {
+	html: string;
+	discoveredAssets: DiscoveredAsset[];
+}
+
+// Walk the tree depth-first to find the first element with the given tag name.
+const findElement = (node: Node, tag: string): Element | null => {
+	if (isElement(node) && node.tagName.toLowerCase() === tag) return node;
+	if (hasChildNodes(node)) {
+		for (const child of node.childNodes) {
+			const found = findElement(child, tag);
+			if (found) return found;
+		}
+	}
+	return null;
+};
+
+// Inject <meta name="wayback-context"> and the runtime shim <script> as the
+// first two children of <head>, so they execute before any page scripts.
+const injectShim = (doc: ParentNode, targetUrl: string, time: string): void => {
+	const head = findElement(doc, "head");
+	if (!head) return;
+
+	// Build <meta name="wayback-context" data-ts="..." data-url="...">
+	const metaNode = defaultTreeAdapter.createElement("meta", // parse5's NS enum is not in its public exports; the HTML namespace URI is the correct runtime value
+"http://www.w3.org/1999/xhtml" as unknown as Parameters<typeof defaultTreeAdapter.createElement>[1], [
+		{ name: "name", value: "wayback-context" },
+		{ name: "data-ts", value: time },
+		{ name: "data-url", value: targetUrl },
+	]);
+
+	// Build <script>...</script> containing the shim IIFE
+	const scriptNode = defaultTreeAdapter.createElement("script", // parse5's NS enum is not in its public exports; the HTML namespace URI is the correct runtime value
+"http://www.w3.org/1999/xhtml" as unknown as Parameters<typeof defaultTreeAdapter.createElement>[1], []);
+	const scriptText = defaultTreeAdapter.createTextNode(generateShimScript(time, targetUrl));
+	defaultTreeAdapter.appendChild(scriptNode, scriptText);
+
+	// Insert as first two children of <head>
+	const firstChild = head.childNodes[0];
+	if (firstChild) {
+		defaultTreeAdapter.insertBefore(head, metaNode, firstChild);
+		// After inserting metaNode, the new first child we want to insert before is
+		// what was originally firstChild, now at index 1.
+		defaultTreeAdapter.insertBefore(head, scriptNode, firstChild);
+	} else {
+		defaultTreeAdapter.appendChild(head, metaNode);
+		defaultTreeAdapter.appendChild(head, scriptNode);
+	}
+};
+
+export const rewriteHtmlUrls = (
+	html: string,
+	targetUrl: string,
+	time: string,
+): RewriteHtmlResult => {
+	const collect = new Set<string>();
+	const assets: DiscoveredAsset[] = [];
 	const doc = parse(html);
 	// <base href> handling first so its effective base is used during visit().
 	const effectiveBase = consumeBaseTag(doc, targetUrl);
-	visit(doc, effectiveBase, time);
-	return serialize(doc);
+	visit(doc, effectiveBase, time, collect, assets);
+	injectShim(doc, targetUrl, time);
+	return { html: serialize(doc), discoveredAssets: assets };
 };
 
 export const stripWaybackToolbar = (html: string): string =>

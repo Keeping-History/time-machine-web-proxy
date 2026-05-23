@@ -6,6 +6,7 @@ import {
 	sanitizeTimeParam,
 	stripWaybackToolbar,
 	unwrapNestedProxyUrl,
+	type DiscoveredAsset,
 } from "../../src/lib/url-rewriter";
 
 const TARGET = "http://www.apple.com/products/iphone";
@@ -178,83 +179,111 @@ describe("parseWaybackPath", () => {
 describe("rewriteHtmlUrls — archive-prefixed URLs", () => {
 	it("rewrites absolute web.archive.org URL with no modifier", () => {
 		const html = `<a href="https://web.archive.org/web/20191231235959/http://example.com/page">x</a>`;
-		const r = rewriteHtmlUrls(html, TARGET, TIME);
+		const { html: r } = rewriteHtmlUrls(html, TARGET, TIME);
 		expect(r).toContain(`/web/20191231235959/http://example.com/page`);
 	});
 
 	it("rewrites absolute web.archive.org URL with im_ modifier", () => {
 		const html = `<img src="https://web.archive.org/web/20191231235959im_/http://example.com/img.png">`;
-		const r = rewriteHtmlUrls(html, TARGET, TIME);
+		const { html: r } = rewriteHtmlUrls(html, TARGET, TIME);
 		expect(r).toContain(`/web/20191231235959/http://example.com/img.png`);
 	});
 
 	it("rewrites absolute web.archive.org URL with cs_ modifier", () => {
 		const html = `<link rel="stylesheet" href="https://web.archive.org/web/20191231235959cs_/http://example.com/main.css">`;
-		const r = rewriteHtmlUrls(html, TARGET, TIME);
+		const { html: r } = rewriteHtmlUrls(html, TARGET, TIME);
 		expect(r).toContain(`/web/20191231235959/http://example.com/main.css`);
 	});
 
 	it("rewrites relative /web/<ts>/<url>", () => {
 		const html = `<a href="/web/20191231235959/http://example.com/page">x</a>`;
-		const r = rewriteHtmlUrls(html, TARGET, TIME);
+		const { html: r } = rewriteHtmlUrls(html, TARGET, TIME);
 		expect(r).toContain(`/web/20191231235959/http://example.com/page`);
 	});
 
 	it("rewrites relative /web/<ts>im_/<url>", () => {
 		const html = `<img src="/web/20191231235959im_/http://example.com/img.png">`;
-		const r = rewriteHtmlUrls(html, TARGET, TIME);
+		const { html: r } = rewriteHtmlUrls(html, TARGET, TIME);
 		expect(r).toContain(`/web/20191231235959/http://example.com/img.png`);
+	});
+
+	it("rewrites protocol-relative //web.archive.org with im_ modifier (downloader form)", () => {
+		const html = `<img src="//web.archive.org/web/20191231235959im_/http://example.com/img.png">`;
+		const { html: r } = rewriteHtmlUrls(html, TARGET, TIME);
+		expect(r).toContain(`/web/20191231235959/http://example.com/img.png`);
+		expect(r).not.toContain(`web.archive.org`);
+	});
+
+	it("rewrites protocol-relative //web.archive.org with no modifier", () => {
+		const html = `<a href="//web.archive.org/web/20191231235959/http://example.com/page">x</a>`;
+		const { html: r } = rewriteHtmlUrls(html, TARGET, TIME);
+		expect(r).toContain(`/web/20191231235959/http://example.com/page`);
+		expect(r).not.toContain(`web.archive.org`);
+	});
+
+	it("rewrites protocol-relative //web.archive.org with cs_ modifier in <link>", () => {
+		const html = `<link rel="stylesheet" href="//web.archive.org/web/20191231235959cs_/http://example.com/main.css">`;
+		const { html: r } = rewriteHtmlUrls(html, TARGET, TIME);
+		expect(r).toContain(`/web/20191231235959/http://example.com/main.css`);
+		expect(r).not.toContain(`web.archive.org`);
+	});
+
+	it("rewrites protocol-relative //web.archive.org cross-origin asset (not page host)", () => {
+		const html = `<img src="//web.archive.org/web/20010913100802im_/http://i.ihost.com/i/c.gif">`;
+		const { html: r } = rewriteHtmlUrls(html, TARGET, TIME);
+		expect(r).toContain(`/web/20010913100802/http://i.ihost.com/i/c.gif`);
+		expect(r).not.toContain(`web.archive.org`);
 	});
 });
 
 describe("rewriteHtmlUrls — relative URLs resolved against targetUrl", () => {
 	it("resolves path-absolute relative URL against targetUrl", () => {
 		const html = `<img src="/images/foo.png">`;
-		const r = rewriteHtmlUrls(html, TARGET, TIME);
+		const { html: r } = rewriteHtmlUrls(html, TARGET, TIME);
 		expect(r).toContain(`/web/${TIME}/http://www.apple.com/images/foo.png`);
 	});
 
 	it("resolves document-relative URL against targetUrl directory", () => {
 		const html = `<img src="foo.png">`;
-		const r = rewriteHtmlUrls(html, TARGET, TIME);
+		const { html: r } = rewriteHtmlUrls(html, TARGET, TIME);
 		expect(r).toContain(`/web/${TIME}/http://www.apple.com/products/foo.png`);
 	});
 
 	it("preserves already-absolute non-archive URL but wraps it", () => {
 		const html = `<a href="https://example.com/other">x</a>`;
-		const r = rewriteHtmlUrls(html, TARGET, TIME);
+		const { html: r } = rewriteHtmlUrls(html, TARGET, TIME);
 		expect(r).toContain(`/web/${TIME}/https://example.com/other`);
 	});
 });
 
 describe("rewriteHtmlUrls — covers all URL-bearing tags", () => {
 	it("rewrites <a href>", () => {
-		const r = rewriteHtmlUrls(`<a href="/x">x</a>`, TARGET, TIME);
+		const { html: r } = rewriteHtmlUrls(`<a href="/x">x</a>`, TARGET, TIME);
 		expect(r).toContain(`/web/${TIME}/http://www.apple.com/x`);
 	});
 
 	it("rewrites <link href>", () => {
-		const r = rewriteHtmlUrls(`<link rel="stylesheet" href="/css/main.css">`, TARGET, TIME);
+		const { html: r } = rewriteHtmlUrls(`<link rel="stylesheet" href="/css/main.css">`, TARGET, TIME);
 		expect(r).toContain(`/web/${TIME}/http://www.apple.com/css/main.css`);
 	});
 
 	it("rewrites <script src>", () => {
-		const r = rewriteHtmlUrls(`<script src="/js/app.js"></script>`, TARGET, TIME);
+		const { html: r } = rewriteHtmlUrls(`<script src="/js/app.js"></script>`, TARGET, TIME);
 		expect(r).toContain(`/web/${TIME}/http://www.apple.com/js/app.js`);
 	});
 
 	it("rewrites <iframe src>", () => {
-		const r = rewriteHtmlUrls(`<iframe src="/embed"></iframe>`, TARGET, TIME);
+		const { html: r } = rewriteHtmlUrls(`<iframe src="/embed"></iframe>`, TARGET, TIME);
 		expect(r).toContain(`/web/${TIME}/http://www.apple.com/embed`);
 	});
 
 	it("rewrites <form action>", () => {
-		const r = rewriteHtmlUrls(`<form action="/submit"></form>`, TARGET, TIME);
+		const { html: r } = rewriteHtmlUrls(`<form action="/submit"></form>`, TARGET, TIME);
 		expect(r).toContain(`/web/${TIME}/http://www.apple.com/submit`);
 	});
 
 	it("rewrites <video src> and <audio src>", () => {
-		const r = rewriteHtmlUrls(
+		const { html: r } = rewriteHtmlUrls(
 			`<video src="/v.mp4"></video><audio src="/a.mp3"></audio>`,
 			TARGET,
 			TIME,
@@ -267,7 +296,7 @@ describe("rewriteHtmlUrls — covers all URL-bearing tags", () => {
 describe("rewriteHtmlUrls — srcset", () => {
 	it("rewrites <img srcset> with descriptors", () => {
 		const html = `<img srcset="/a.png 1x, /b.png 2x" src="/default.png">`;
-		const r = rewriteHtmlUrls(html, TARGET, TIME);
+		const { html: r } = rewriteHtmlUrls(html, TARGET, TIME);
 		expect(r).toContain(`/web/${TIME}/http://www.apple.com/a.png`);
 		expect(r).toContain(`/web/${TIME}/http://www.apple.com/b.png`);
 		expect(r).toContain(`/web/${TIME}/http://www.apple.com/default.png`);
@@ -277,7 +306,7 @@ describe("rewriteHtmlUrls — srcset", () => {
 
 	it("rewrites <source srcset> with width descriptors", () => {
 		const html = `<source srcset="/s.png 480w, /l.png 1024w">`;
-		const r = rewriteHtmlUrls(html, TARGET, TIME);
+		const { html: r } = rewriteHtmlUrls(html, TARGET, TIME);
 		expect(r).toContain(`/web/${TIME}/http://www.apple.com/s.png`);
 		expect(r).toContain(`/web/${TIME}/http://www.apple.com/l.png`);
 		expect(r).toMatch(/480w/);
@@ -288,7 +317,7 @@ describe("rewriteHtmlUrls — srcset", () => {
 describe("rewriteHtmlUrls — inline style url()", () => {
 	it("rewrites url(...) inside style attribute", () => {
 		const html = `<div style="background: url('/img/bg.png')">x</div>`;
-		const r = rewriteHtmlUrls(html, TARGET, TIME);
+		const { html: r } = rewriteHtmlUrls(html, TARGET, TIME);
 		expect(r).toContain(`/web/${TIME}/http://www.apple.com/img/bg.png`);
 	});
 });
@@ -296,27 +325,27 @@ describe("rewriteHtmlUrls — inline style url()", () => {
 describe("rewriteHtmlUrls — schemes left alone", () => {
 	it("leaves data: URIs untouched", () => {
 		const html = `<img src="data:image/png;base64,iVBORw0KGgo=">`;
-		const r = rewriteHtmlUrls(html, TARGET, TIME);
+		const { html: r } = rewriteHtmlUrls(html, TARGET, TIME);
 		expect(r).toContain(`src="data:image/png;base64,iVBORw0KGgo="`);
 	});
 
 	it("leaves mailto: untouched", () => {
-		const r = rewriteHtmlUrls(`<a href="mailto:x@y.com">m</a>`, TARGET, TIME);
+		const { html: r } = rewriteHtmlUrls(`<a href="mailto:x@y.com">m</a>`, TARGET, TIME);
 		expect(r).toContain(`href="mailto:x@y.com"`);
 	});
 
 	it("leaves javascript: untouched", () => {
-		const r = rewriteHtmlUrls(`<a href="javascript:void(0)">j</a>`, TARGET, TIME);
+		const { html: r } = rewriteHtmlUrls(`<a href="javascript:void(0)">j</a>`, TARGET, TIME);
 		expect(r).toContain(`href="javascript:void(0)"`);
 	});
 
 	it("leaves tel: untouched", () => {
-		const r = rewriteHtmlUrls(`<a href="tel:+15551234">t</a>`, TARGET, TIME);
+		const { html: r } = rewriteHtmlUrls(`<a href="tel:+15551234">t</a>`, TARGET, TIME);
 		expect(r).toContain(`href="tel:+15551234"`);
 	});
 
 	it("leaves fragment-only URLs untouched", () => {
-		const r = rewriteHtmlUrls(`<a href="#top">x</a>`, TARGET, TIME);
+		const { html: r } = rewriteHtmlUrls(`<a href="#top">x</a>`, TARGET, TIME);
 		expect(r).toContain(`href="#top"`);
 	});
 
@@ -333,7 +362,7 @@ describe("rewriteHtmlUrls — schemes left alone", () => {
 		["blob:https://example.com/abc", "blob"],
 		["about:blank", "about"],
 	])("leaves %s URLs untouched (scheme %s)", (uri) => {
-		const r = rewriteHtmlUrls(`<a href="${uri}">x</a>`, TARGET, TIME);
+		const { html: r } = rewriteHtmlUrls(`<a href="${uri}">x</a>`, TARGET, TIME);
 		expect(r).toContain(`href="${uri}"`);
 	});
 });
@@ -341,7 +370,7 @@ describe("rewriteHtmlUrls — schemes left alone", () => {
 describe("rewriteHtmlUrls — <base href> handling", () => {
 	it("strips the <base> tag from the output", () => {
 		const html = `<html><head><base href="https://cdn.example.com/"></head><body></body></html>`;
-		const r = rewriteHtmlUrls(html, TARGET, TIME);
+		const { html: r } = rewriteHtmlUrls(html, TARGET, TIME);
 		expect(r).not.toMatch(/<base\b/i);
 	});
 
@@ -349,7 +378,7 @@ describe("rewriteHtmlUrls — <base href> handling", () => {
 		const html = `<html><head><base href="https://cdn.example.com/"></head><body><a href="/x">x</a></body></html>`;
 		// Without honoring base, relative "/x" would resolve against TARGET
 		// (www.apple.com). With base honored, it resolves against cdn.example.com.
-		const r = rewriteHtmlUrls(html, TARGET, TIME);
+		const { html: r } = rewriteHtmlUrls(html, TARGET, TIME);
 		expect(r).toContain(`/web/${TIME}/https://cdn.example.com/x`);
 		expect(r).not.toContain(`/web/${TIME}/http://www.apple.com/x`);
 	});
@@ -358,19 +387,19 @@ describe("rewriteHtmlUrls — <base href> handling", () => {
 describe("rewriteHtmlUrls — <meta http-equiv='refresh'>", () => {
 	it("rewrites the url= portion of meta refresh content", () => {
 		const html = `<meta http-equiv="refresh" content="5;url=/foo">`;
-		const r = rewriteHtmlUrls(html, TARGET, TIME);
+		const { html: r } = rewriteHtmlUrls(html, TARGET, TIME);
 		expect(r).toContain(`/web/${TIME}/http://www.apple.com/foo`);
 	});
 
 	it("leaves meta refresh without url= unchanged", () => {
 		const html = `<meta http-equiv="refresh" content="5">`;
-		const r = rewriteHtmlUrls(html, TARGET, TIME);
+		const { html: r } = rewriteHtmlUrls(html, TARGET, TIME);
 		expect(r).toContain(`content="5"`);
 	});
 
 	it("does not touch non-refresh meta tags", () => {
 		const html = `<meta name="description" content="visit /home">`;
-		const r = rewriteHtmlUrls(html, TARGET, TIME);
+		const { html: r } = rewriteHtmlUrls(html, TARGET, TIME);
 		expect(r).toContain(`content="visit /home"`);
 	});
 });
@@ -386,7 +415,7 @@ describe("rewriteHtmlUrls — extended URL-bearing attributes", () => {
 		[`<table background="/tbg.png"></table>`, "background"],
 		[`<img longdesc="/desc.html" src="/i.png">`, "longdesc"],
 	])("rewrites %s (%s)", (html, attr) => {
-		const r = rewriteHtmlUrls(html, TARGET, TIME);
+		const { html: r } = rewriteHtmlUrls(html, TARGET, TIME);
 		expect(r).toMatch(new RegExp(`${attr}="\\/web\\/\\d{14}\\/`));
 	});
 });
@@ -394,7 +423,7 @@ describe("rewriteHtmlUrls — extended URL-bearing attributes", () => {
 describe("rewriteHtmlUrls — output is path-based", () => {
 	it("rewritten URLs start with /web/, not the proxy host", () => {
 		const html = `<a href="/foo"><img src="/bar"><script src="/baz"></script>`;
-		const r = rewriteHtmlUrls(html, TARGET, TIME);
+		const { html: r } = rewriteHtmlUrls(html, TARGET, TIME);
 		// Each rewrite must produce an attribute value beginning with /web/{ts}/,
 		// never a value that begins with http:// or https:// (which would mean
 		// the proxy host got baked into the cached HTML).
@@ -404,7 +433,7 @@ describe("rewriteHtmlUrls — output is path-based", () => {
 
 	it("emits unencoded original URL inside the /web/<ts>/ path", () => {
 		const html = `<a href="/foo">x</a>`;
-		const r = rewriteHtmlUrls(html, TARGET, TIME);
+		const { html: r } = rewriteHtmlUrls(html, TARGET, TIME);
 		// The original URL is appended verbatim (no encodeURIComponent), so
 		// the scheme separator and slashes survive intact.
 		expect(r).toContain(`/web/${TIME}/http://www.apple.com/foo`);
@@ -434,6 +463,13 @@ describe("rewriteCssUrls", () => {
 		const css = `background: url('data:image/png;base64,iVBORw0KGgo=')`;
 		const r = rewriteCssUrls(css, "http://example.com/page", TIME);
 		expect(r).toContain(`url('data:image/png;base64,iVBORw0KGgo=')`);
+	});
+
+	it("rewrites protocol-relative archive url() to path-based", () => {
+		const css = `background: url('//web.archive.org/web/20191231235959im_/http://example.com/img.png')`;
+		const r = rewriteCssUrls(css, "http://example.com/page", TIME);
+		expect(r).toContain(`url('/web/20191231235959/http://example.com/img.png')`);
+		expect(r).not.toContain(`web.archive.org`);
 	});
 });
 
@@ -502,5 +538,145 @@ describe("isAssetUrl", () => {
 	it("is case-insensitive on the extension", () => {
 		expect(isAssetUrl("http://example.com/IMAGE.PNG")).toBe(true);
 		expect(isAssetUrl("http://example.com/script.JS")).toBe(true);
+	});
+});
+
+describe("rewriteHtmlUrls — discoveredAssets", () => {
+	it("returns { html, discoveredAssets } shape and html is a non-empty string", () => {
+		const result = rewriteHtmlUrls(`<a href="/x">x</a>`, TARGET, TIME);
+		expect(result).toHaveProperty("html");
+		expect(result).toHaveProperty("discoveredAssets");
+		expect(typeof result.html).toBe("string");
+		expect(Array.isArray(result.discoveredAssets)).toBe(true);
+	});
+
+	it("callers that ignore discoveredAssets still get correct html", () => {
+		const { html } = rewriteHtmlUrls(`<a href="/x">x</a>`, TARGET, TIME);
+		expect(html).toContain(`/web/${TIME}/http://www.apple.com/x`);
+	});
+
+	it("captures embedded TS from an absolute web.archive.org URL with im_ modifier", () => {
+		const ts = "20030401120000";
+		const html = `<img src="https://web.archive.org/web/${ts}im_/http://example.com/logo.png">`;
+		const { discoveredAssets } = rewriteHtmlUrls(html, TARGET, TIME);
+		expect(discoveredAssets).toContainEqual<DiscoveredAsset>({
+			url: "http://example.com/logo.png",
+			embeddedTs: ts,
+		});
+	});
+
+	it("captures embedded TS from a path-relative /web/<ts>/<url>", () => {
+		const ts = "20030401120000";
+		const html = `<a href="/web/${ts}/http://example.com/page">x</a>`;
+		const { discoveredAssets } = rewriteHtmlUrls(html, TARGET, TIME);
+		expect(discoveredAssets).toContainEqual<DiscoveredAsset>({
+			url: "http://example.com/page",
+			embeddedTs: ts,
+		});
+	});
+
+	it("plain relative URL without embedded TS is rewritten but not added to discoveredAssets", () => {
+		const html = `<img src="/images/foo.png">`;
+		const { html: out, discoveredAssets } = rewriteHtmlUrls(html, TARGET, TIME);
+		expect(out).toContain(`/web/${TIME}/http://www.apple.com/images/foo.png`);
+		expect(discoveredAssets).toHaveLength(0);
+	});
+
+	it("deduplicates identical (url, embeddedTs) pairs", () => {
+		const ts = "20030401120000";
+		const ref = `href="/web/${ts}/http://example.com/page"`;
+		const html = `<a ${ref}>x</a><a ${ref}>y</a>`;
+		const { discoveredAssets } = rewriteHtmlUrls(html, TARGET, TIME);
+		const matches = discoveredAssets.filter(
+			(a) => a.url === "http://example.com/page" && a.embeddedTs === ts,
+		);
+		expect(matches).toHaveLength(1);
+	});
+
+	it("drops entries with a non-14-digit embedded TS and does not crash", () => {
+		// RE_ARCHIVE_URL allows 1-14 digits in capture group 1; a short TS
+		// must be filtered out, not stored.
+		const html = `<a href="/web/2003/http://example.com/page">x</a>`;
+		// RE_ARCHIVE_URL requires at least 1 digit but parseWaybackPath requires
+		// exactly 14; however RE_ARCHIVE_URL allows 1–14 digits so short ones match
+		// the regex. A 4-digit TS must not appear in discoveredAssets.
+		const { discoveredAssets } = rewriteHtmlUrls(html, TARGET, TIME);
+		expect(discoveredAssets.every((a) => /^\d{14}$/.test(a.embeddedTs))).toBe(true);
+	});
+
+	it("captures embedded TS from srcset attribute", () => {
+		const ts = "20030401120000";
+		const html = `<img srcset="/web/${ts}im_/http://example.com/a.png 1x, /web/${ts}/http://example.com/b.png 2x">`;
+		const { discoveredAssets } = rewriteHtmlUrls(html, TARGET, TIME);
+		expect(discoveredAssets).toContainEqual<DiscoveredAsset>({
+			url: "http://example.com/a.png",
+			embeddedTs: ts,
+		});
+		expect(discoveredAssets).toContainEqual<DiscoveredAsset>({
+			url: "http://example.com/b.png",
+			embeddedTs: ts,
+		});
+	});
+
+	it("captures embedded TS from inline style url()", () => {
+		const ts = "20030401120000";
+		const html = `<div style="background: url('/web/${ts}/http://example.com/bg.png')">x</div>`;
+		const { discoveredAssets } = rewriteHtmlUrls(html, TARGET, TIME);
+		expect(discoveredAssets).toContainEqual<DiscoveredAsset>({
+			url: "http://example.com/bg.png",
+			embeddedTs: ts,
+		});
+	});
+
+	it("captures embedded TS from <style> element url()", () => {
+		const ts = "20030401120000";
+		const html = `<style>body { background: url('/web/${ts}/http://example.com/bg.png'); }</style>`;
+		const { discoveredAssets } = rewriteHtmlUrls(html, TARGET, TIME);
+		expect(discoveredAssets).toContainEqual<DiscoveredAsset>({
+			url: "http://example.com/bg.png",
+			embeddedTs: ts,
+		});
+	});
+
+	it("captures embedded TS from meta http-equiv refresh url", () => {
+		const ts = "20030401120000";
+		const html = `<meta http-equiv="refresh" content="0;url=/web/${ts}/http://example.com/page">`;
+		const { discoveredAssets } = rewriteHtmlUrls(html, TARGET, TIME);
+		expect(discoveredAssets).toContainEqual<DiscoveredAsset>({
+			url: "http://example.com/page",
+			embeddedTs: ts,
+		});
+	});
+});
+
+describe("rewriteCssUrls — discoveredAssets", () => {
+	it("captures embedded TS when collect/assets are provided", () => {
+		const ts = "20030401120000";
+		const css = `body { background: url('/web/${ts}/http://example.com/bg.png'); }`;
+		const collect = new Set<string>();
+		const assets: DiscoveredAsset[] = [];
+		rewriteCssUrls(css, "http://example.com/page", TIME, collect, assets);
+		expect(assets).toContainEqual<DiscoveredAsset>({
+			url: "http://example.com/bg.png",
+			embeddedTs: ts,
+		});
+	});
+
+	it("does not record assets when collect/assets are omitted", () => {
+		// Regression: calling without optional params must not throw
+		const ts = "20030401120000";
+		const css = `body { background: url('/web/${ts}/http://example.com/bg.png'); }`;
+		expect(() => rewriteCssUrls(css, "http://example.com/page", TIME)).not.toThrow();
+	});
+
+	it("deduplicates within the same CSS string", () => {
+		const ts = "20030401120000";
+		const url = "http://example.com/bg.png";
+		const css = `a { background: url('/web/${ts}/${url}'); } b { background: url('/web/${ts}/${url}'); }`;
+		const collect = new Set<string>();
+		const assets: DiscoveredAsset[] = [];
+		rewriteCssUrls(css, "http://example.com/page", TIME, collect, assets);
+		const matches = assets.filter((a) => a.url === url && a.embeddedTs === ts);
+		expect(matches).toHaveLength(1);
 	});
 });

@@ -1,10 +1,12 @@
 node_modules
 dist
 .git
-stories
 tests
-.claude
+docs
 plans
+stories
+reviews
+.mkdb
+.claude
+.vscode
 *.md
-.env
-.env.*

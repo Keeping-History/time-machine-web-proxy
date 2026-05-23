@@ -297,7 +297,8 @@ export class TimeMachineService {
 			res.setHeader("Content-Type", result.contentType);
 			res.setHeader("X-Archive-Url", result.archiveUrl);
 			res.setHeader("X-Original-Url", result.originalUrl);
-			res.setHeader("X-Cache", result.cache);
+			// Map both MISS variants to "MISS" for client backward-compatibility.
+			res.setHeader("X-Cache", result.cache === "HIT" ? "HIT" : "MISS");
 			if (result.archiveTime) res.setHeader("X-Archive-Time", result.archiveTime);
 			res.end(result.body);
 			this.logRequest(req, 200, start);

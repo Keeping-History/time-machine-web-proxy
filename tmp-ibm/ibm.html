@@ -1,0 +1,424 @@
+<!DOCTYPE html><html lang="en-us"><head><meta name="wayback-context" data-ts="20010913000000" data-url="http://www.ibm.com/"><script>(function () {
+  var meta = document.querySelector('meta[name="wayback-context"]');
+  var _ts = (meta && meta.getAttribute('data-ts')) || "20010913000000";
+  var _orig = (meta && meta.getAttribute('data-url')) || "http://www.ibm.com/";
+
+  // Opaque/non-network schemes that must never be rewritten.
+  var SKIP_RE = /^(?:data:|blob:|javascript:|mailto:|tel:|sms:|about:|#)/i;
+
+  function rewrite(url) {
+    if (!url || typeof url !== 'string') return url;
+    var trimmed = url.trim();
+    if (!trimmed) return url;
+    // Opaque schemes: pass through unchanged.
+    if (SKIP_RE.test(trimmed)) return url;
+    // Already proxied: idempotent pass-through.
+    if (trimmed.indexOf('/web/') === 0) return url;
+    // Resolve relative URLs against the original page URL.
+    var absolute;
+    try {
+      absolute = new URL(trimmed, _orig).href;
+    } catch (e) {
+      return url;
+    }
+    // Only rewrite http/https.
+    if (absolute.indexOf('http://') !== 0 && absolute.indexOf('https://') !== 0) return url;
+    return '/web/' + _ts + 'im_/' + absolute;
+  }
+
+  // --- window.fetch ---
+  var _origFetch = window.fetch;
+  window.fetch = function (input, init) {
+    if (typeof input === 'string') {
+      input = rewrite(input);
+    } else if (input && typeof input === 'object' && typeof input.url === 'string') {
+      input = new Request(rewrite(input.url), input);
+    }
+    return _origFetch.call(this, input, init);
+  };
+
+  // --- XMLHttpRequest.prototype.open ---
+  var _origXhrOpen = XMLHttpRequest.prototype.open;
+  XMLHttpRequest.prototype.open = function (method, url, async, user, password) {
+    var rewritten = rewrite(typeof url === 'string' ? url : String(url));
+    if (arguments.length <= 2) {
+      return _origXhrOpen.call(this, method, rewritten);
+    }
+    return _origXhrOpen.call(this, method, rewritten, async, user, password);
+  };
+
+  // --- Element src/href setters ---
+  var PATCHES = [
+    [HTMLImageElement.prototype, 'src'],
+    [HTMLScriptElement.prototype, 'src'],
+    [HTMLIFrameElement.prototype, 'src'],
+    [HTMLLinkElement.prototype, 'href'],
+    [HTMLAnchorElement.prototype, 'href'],
+  ];
+
+  PATCHES.forEach(function (pair) {
+    var proto = pair[0];
+    var prop = pair[1];
+    var desc = Object.getOwnPropertyDescriptor(proto, prop);
+    if (!desc || !desc.set) return;
+    var origSetter = desc.set;
+    Object.defineProperty(proto, prop, {
+      configurable: true,
+      enumerable: desc.enumerable,
+      get: desc.get,
+      set: function (val) {
+        origSetter.call(this, rewrite(val));
+      },
+    });
+  });
+
+  // --- document.write / document.writeln ---
+  var ATTR_RE = /((?:src|href)s*=s*)(["'])([^"']+)\2/gi;
+
+  function rewriteHtmlString(html) {
+    return html.replace(ATTR_RE, function (match, prefix, quote, url) {
+      return prefix + quote + rewrite(url) + quote;
+    });
+  }
+
+  var _origWrite = document.write.bind(document);
+  var _origWriteln = document.writeln.bind(document);
+  document.write = function (html) {
+    return _origWrite(rewriteHtmlString(String(html)));
+  };
+  document.writeln = function (html) {
+    return _origWriteln(rewriteHtmlString(String(html)));
+  };
+
+  // --- MutationObserver: catch dynamically-inserted nodes ---
+  var URL_ATTRS = ['src', 'href'];
+
+  function rewriteNode(node) {
+    if (node.nodeType !== 1) return; // elements only
+    URL_ATTRS.forEach(function (attr) {
+      var val = node.getAttribute && node.getAttribute(attr);
+      if (val) {
+        var rw = rewrite(val);
+        if (rw !== val) node.setAttribute(attr, rw);
+      }
+    });
+  }
+
+  var observer = new MutationObserver(function (mutations) {
+    mutations.forEach(function (mutation) {
+      mutation.addedNodes.forEach(function (node) {
+        rewriteNode(node);
+        if (node.querySelectorAll) {
+          node.querySelectorAll('[src],[href]').forEach(rewriteNode);
+        }
+      });
+    });
+  });
+
+  observer.observe(document.documentElement, { childList: true, subtree: true });
+})();</script>
+
+<title>ibm.com</title>
+<meta http-equiv="Pragma" content="no-cache">
+<meta http-equiv="content-type" content="text/html; charset=iso-8859-1"><meta http-equiv="PICS-Label" content="(PICS-1.1 'http://www.rsac.org/ratingsv01.html' l gen true comment 'RSACi North America Server' by 'epc@www.ibm.com' for 'http://www.ibm.com/' on '1997.07.05T21:46-0500' r (n 0 s 0 v 0 l 0))">
+<meta http-equiv="PICS-Label" content="(PICS-1.0 'http://www.classify.org/safesurf/' l gen true for 'http://www.ibm.com/' by 'epc@www.ibm.com' r (SS~~000 1 SS~~100 1))">
+<meta name="Security" content="public">
+<meta name="Source" content="Franklin/IPC">
+<meta name="Copyright" content="Copyright (c) 2001 by IBM Corporation">
+<meta name="Robots" content="index,follow">
+<meta scheme="rfc1766" name="DC.Language" content="us-en">
+<meta scheme="iso8601" name="DC.Date" content="2001-08-09">
+<meta name="IBM.Country" content="us">
+<meta name="Description" content="The IBM corporate home page, entry point to information about IBM products and services">
+<meta name="Abstract" content="The IBM corporate home page, entry point to information about IBM products and services">
+<meta name="Owner" content="webmaster@www.ibm.com">
+<meta name="Keywords" content="ibm,international business machines,internet,e-business,ebusiness,personal computer,personal system,e-commerce,ecommerce,pc,workstation,mainframe,unix,technical support,homepage,home page">
+
+
+<script type="text/javascript" src="/web/20010913000000/http://web.archive.org/web/20010913100802js_/http://www.ibm.com/data/js/v11/ibmcss.js" language="JavaScript">
+</script>
+<noscript><link type="text/css" rel="stylesheet" href="//web.archive.org/web/20010913100802cs_/http://www.ibm.com/data/css/v11/r1.css"/></noscript>
+
+<script type="text/javascript" src="/web/20010913000000/http://web.archive.org/web/20010913100802js_/http://www.ibm.com/data/js/v11/ejsmsp.js">
+</script>
+
+
+<style type="text/css">
+<!--
+.smb { font-weight: bold; font-family: Arial, sans-serif; font-size: 9px; }
+.vert { font-family: Arial, sans-serif; font-size: 10px; }
+a.sbold:link { text-decoration: none; color: #006699; font-family: verdana; font-size: 10px; font-weight: bold; }
+a.sbold:visited { text-decoration: none; color: #996699; font-family: verdana; font-size: 10px; font-weight: bold; }
+a.sbold:hover { text-decoration: underline; color: #006699; font-family: verdana; font-size: 10px; font-weight: bold; }
+a.ver:link { text-decoration: none; color: #006699; font-family: verdana; font-size: 10px; }
+a.ver:visited { text-decoration: none; color: #996699; font-family: verdana; font-size: 10px; }
+a.ver:hover { text-decoration: none; color: #006699; font-family: verdana; font-size: 10px; }
+a.detl:link { text-decoration: underline; color: #006699; font-family: verdana; font-size: 10px; }
+a.detl:visited { text-decoration: underline; color: #996699; font-family: verdana; font-size: 10px; }
+a.detl:hover { text-decoration: underline; color: #006699; font-family: verdana; font-size: 10px; }
+//-->
+</style>
+
+<script type="text/javascript" language="JavaScript1.2" src="/web/20010913000000/http://web.archive.org/web/20010913100802js_/http://www.ibm.com/data/js/v11/ejsmsp.js">
+
+</script>
+
+
+<style type="text/css">
+<!--
+a.prefs:link { text-decoration: none; color: #ffcc00; font-family: Verdana, Arial, sans-serif; font-size: 10px; font-weight: bold; }
+a.prefs:visited { text-decoration: none; color: #ffcc00; font-family: Verdana, Arial, sans-serif; font-size: 10px; font-weight: bold; }
+a.prefs:hover { text-decoration: underline; color: #ffcc00; font-family: Verdana, Arial, sans-serif; font-size: 10px; font-weight: bold; }
+-->
+</style>
+
+<!-- 
+<?xml version="1.0"?>
+<!DOCTYPE Brand SYSTEM "http://www.ibm.com/data/xml/ProdNav.dtd">
+<PageSet language="en" cc="us">
+      <URI name="Home / home office" href="http://www.ibm.com/homeoffice"/>
+      <URI name="Small business" href="http://www.ibm.com/businesscenter"/>
+      <URI name="Government" href="http://www.ibm.com/solutions/government"/>
+      <URI name="Education" href="http://www.ibm.com/education"/>
+      <URI name="Industries" href="http://www.ibm.com/solutions/industries/"/>
+</PageSet>
+//s-->
+
+
+</head>
+<body topmargin="2" marginwidth="2" marginheight="2" leftmargin="2" bgcolor="#ffffff" alink="#006699">
+<table width="760" cellspacing="0" cellpadding="0" border="0">
+<tbody><tr>
+<td width="150" class="tbgc"><a href="/web/20010913100802/http://www.ibm.com/"><img width="150" src="/web/20010913000000/http://web.archive.org/web/20010913100802im_/http://www.ibm.com/i/v11/m/en/lanim.gif" height="47" border="0" alt="IBM"></a></td>
+<td width="310" class="tbg"><a href="#main"><img width="1" src="/web/20010913000000/http://web.archive.org/web/20010913100802im_/http://www.ibm.com/i/c.gif" height="1" border="0" alt="Skip to main content"></a><span class="country"></span></td>
+<td width="300" valign="top" class="tbgc" align="right"><table cellspacing="0" cellpadding="0" border="0">
+<form title="Search form" method="get" action="/web/20010913100802/http://www.ibm.com/Search"></form><input value="11" type="hidden" name="v"><input value="en" type="hidden" name="lang"><input value="us" type="hidden" name="cc">
+<tbody><tr>
+<td colspan="4"><img width="1" src="/web/20010913000000/http://web.archive.org/web/20010913100802im_/http://www.ibm.com/i/c.gif" height="12" border="0" alt=""></td>
+</tr><tr valign="middle">
+<td><font size="-1" face="Verdana, sans-serif"><input value="" type="text" size="15" name="q" maxlength="100" id="searchformq" class="input"></font></td>
+<td><img width="5" src="/web/20010913000000/http://web.archive.org/web/20010913100802im_/http://www.ibm.com/i/c.gif" height="1" border="0" alt=""></td>
+<td width="64"><label for="searchformq"><input width="64" value="Search" type="image" src="/web/20010913000000/http://web.archive.org/web/20010913100802im_/http://www.ibm.com/i/v11/m/en/search.gif" name="Search" height="23" border="0" alt="Search"></label></td>
+<td valign="top"><img width="40" src="/web/20010913000000/http://web.archive.org/web/20010913100802im_/http://www.ibm.com/i/c.gif" height="1" border="0" alt=""></td></tr>
+
+</tbody></table></td></tr>
+<tr>
+<td width="150" height="21" class="hbg">&nbsp;</td>
+<td valign="top" height="21" colspan="2" class="bbg">&nbsp;&nbsp;&nbsp;
+
+<a href="/web/20010913100802/http://www.ibm.com/us/en" class="highlight">Home</a><span class="divider">&nbsp;&nbsp;|&nbsp;&nbsp;</span><a href="/web/20010913100802/http://www.ibm.com/products/us" class="mainlink">Products &amp; services</a><span class="divider">&nbsp;&nbsp;|&nbsp;&nbsp;</span><a href="/web/20010913100802/http://www.ibm.com/support" class="mainlink">Support &amp; downloads</a><span class="divider">&nbsp;&nbsp;|&nbsp;&nbsp;</span><a href="/web/20010913100802/http://www.ibm.com/account/us" class="mainlink">My account</a></td>
+</tr></tbody></table>
+
+<table width="760" cellspacing="0" cellpadding="0" border="0">
+<tbody><tr valign="top">
+<td width="150" class="dbg"><table width="150" cellspacing="0" cellpadding="4" border="0">
+<tbody><tr>
+<td class="bbg"><img width="7" src="/web/20010913000000/http://web.archive.org/web/20010913100802im_/http://www.ibm.com/i/v11/icons/rt_arrow.gif" height="5" border="0" alt=""><span class="divider">&nbsp;</span><a href="/web/20010913000000/http://web.archive.org/web/20010913100802/http://www.ibm.com/planetwide/select" class="mainlink">Select a country</a></td>
+</tr>
+</tbody></table>
+
+<table width="150" class="dbg" cellspacing="0" cellpadding="2" border="0">
+<tbody><tr>
+<td rowspan="12"><img width="5" src="/web/20010913000000/http://web.archive.org/web/20010913100802im_/http://www.ibm.com/i/c.gif" height="1" alt=""></td>
+<td colspan="2">&nbsp;</td>
+</tr>
+
+<tr>
+<td width="7"><img width="7" vspace="2" src="/web/20010913000000/http://web.archive.org/web/20010913100802im_/http://www.ibm.com/i/v11/icons/rt_arrow.gif" height="5" border="0" alt=""></td><td width="138"><a href="/web/20010913100802/http://www.ibm.com/homeoffice" class="rlinks"><b>Home / home office</b></a></td>
+</tr>
+<tr>
+<td width="7"><img width="7" vspace="2" src="/web/20010913000000/http://web.archive.org/web/20010913100802im_/http://www.ibm.com/i/v11/icons/rt_arrow.gif" height="5" border="0" alt=""></td><td width="138"><a href="/web/20010913100802/http://www.ibm.com/businesscenter" class="rlinks"><b>Small business</b></a></td>
+</tr>
+<tr>
+<td width="7"><img width="7" vspace="2" src="/web/20010913000000/http://web.archive.org/web/20010913100802im_/http://www.ibm.com/i/v11/icons/rt_arrow.gif" height="5" border="0" alt=""></td><td width="138"><a href="/web/20010913100802/http://www.ibm.com/solutions/government" class="rlinks"><b>Government</b></a></td>
+</tr>
+<tr>
+<td width="7"><img width="7" vspace="2" src="/web/20010913000000/http://web.archive.org/web/20010913100802im_/http://www.ibm.com/i/v11/icons/rt_arrow.gif" height="5" border="0" alt=""></td><td width="138"><a href="/web/20010913100802/http://www.ibm.com/education" class="rlinks"><b>Education</b></a></td>
+</tr>
+<tr>
+<td width="7"><img width="7" vspace="2" src="/web/20010913000000/http://web.archive.org/web/20010913100802im_/http://www.ibm.com/i/v11/icons/rt_arrow.gif" height="5" border="0" alt=""></td><td width="138"><a href="/web/20010913100802/http://www.ibm.com/solutions/industries/" class="rlinks"><b>Industries</b></a></td>
+</tr>
+<tr>
+<td colspan="2">&nbsp;</td>
+</tr>
+</tbody></table>
+<table width="150" class="dbg" cellspacing="0" cellpadding="2" border="0">
+<tbody><tr>
+<td width="15"><img width="15" src="/web/20010913000000/http://web.archive.org/web/20010913100802im_/http://www.ibm.com/i/c.gif" height="1" alt=""></td>
+<td width="135"><a href="/web/20010913100802/http://www.ibm.com/developerworks/" class="rlinks">Developers</a></td>
+</tr>
+<tr>
+<td width="15"><img width="15" src="/web/20010913000000/http://web.archive.org/web/20010913100802im_/http://www.ibm.com/i/c.gif" height="1" alt=""></td>
+<td width="135"><a href="/web/20010913100802/http://www.ibm.com/partnerworld/" class="rlinks">IBM Business<br>Partners</a></td>
+</tr>
+<tr>
+<td width="15"><img width="15" src="/web/20010913000000/http://web.archive.org/web/20010913100802im_/http://www.ibm.com/i/c.gif" height="1" alt=""></td>
+<td width="135"><a href="/web/20010913100802/http://www.ibm.com/employment/" class="rlinks">Jobs at IBM</a></td>
+</tr>
+<tr>
+<td width="15"><img width="15" src="/web/20010913000000/http://web.archive.org/web/20010913100802im_/http://www.ibm.com/i/c.gif" height="1" alt=""></td>
+<td width="135"><a href="/web/20010913100802/http://www.ibm.com/investor/" class="rlinks">Investors</a></td>
+</tr>
+<tr>
+<td width="15"><img width="15" src="/web/20010913000000/http://web.archive.org/web/20010913100802im_/http://www.ibm.com/i/c.gif" height="1" alt=""></td>
+<td width="135"><a href="/web/20010913100802/http://www.ibm.com/press" class="rlinks">Journalists</a></td>
+</tr>
+</tbody></table></td>
+<td width="610"><a name="main"><table width="610" cellspacing="1" cellpadding="0" border="0">
+<tbody><tr>
+<td width="404" valign="top"><a href="/web/20010913100802/http://commerce.www.ibm.com/cgi-bin/ncommerce/AdvantageCode?shoprfnbr=1&amp;cntry=840&amp;lang=en_US&amp;cntrfnbr=1&amp;mmerfnbr=1&amp;q=W201"><img width="404" src="/web/20010913100802/http://www.ibm.com/us/images/2001/09/business_smarts.gif" height="191" border="0" alt="Small business leasing offer"></a></td>
+<td>&nbsp;</td>
+<td width="197" valign="top"><table width="197" cellspacing="0" cellpadding="0" border="0">
+<tbody><tr>
+<td colspan="2"><img width="1" src="/web/20010913000000/http://web.archive.org/web/20010913100802im_/http://www.ibm.com/i/c.gif" height="5" alt=""></td>
+</tr>
+<tr>
+<td width="41" valign="top"><a href="/web/20010913100802/http://www.ibm.com/e-business/index.jsp"><img width="36" src="/web/20010913100802/http://www.ibm.com/us/images/module_ebusiness.gif" height="36" border="0" alt="IBM e-business"></a></td>
+<td width="156" valign="top"><a href="/web/20010913100802/http://www.ibm.com/e-business/index.jsp" class="nav"><b>IBM e-business</b></a><br><a href="/web/20010913100802/http://www.ibm.com/e-business/index.jsp" class="ver">Find out about <br> e-business infrastructure</a></td>
+</tr>
+<tr>
+<td colspan="2"><img width="1" src="/web/20010913000000/http://web.archive.org/web/20010913100802im_/http://www.ibm.com/i/c.gif" height="8" alt=""></td>
+</tr>
+<tr>
+<td colspan="2"><img width="197" src="/web/20010913000000/http://web.archive.org/web/20010913100802im_/http://www.ibm.com/i/v11/dotted_rule_197px.gif" height="1" alt=""></td>
+</tr>
+<tr>
+<td colspan="2"><img width="1" src="/web/20010913000000/http://web.archive.org/web/20010913100802im_/http://www.ibm.com/i/c.gif" height="8" alt=""></td>
+</tr>
+<tr>
+<td width="41" valign="top"><a href="/web/20010913100802/http://commerce.www.ibm.com/cgi-bin/ncommerce/AdvantageCode?cntry=840&amp;lang=en_US&amp;cntrfnbr=1&amp;mmerfnbr=1&amp;shoprfnbr=1&amp;scrfnbr=73&amp;q=W193"><img width="36" src="/web/20010913100802/http://www.ibm.com/us/images/2001/09/server2.gif" height="36" border="0" alt="Server for $649"></a></td>
+<td width="156" valign="top"><a href="/web/20010913100802/http://commerce.www.ibm.com/cgi-bin/ncommerce/AdvantageCode?cntry=840&amp;lang=en_US&amp;cntrfnbr=1&amp;mmerfnbr=1&amp;shoprfnbr=1&amp;scrfnbr=73&amp;q=W193" class="nav"><b>Server for $649</b></a><br><a href="/web/20010913100802/http://commerce.www.ibm.com/cgi-bin/ncommerce/AdvantageCode?cntry=840&amp;lang=en_US&amp;cntrfnbr=1&amp;mmerfnbr=1&amp;shoprfnbr=1&amp;scrfnbr=73&amp;q=W193" class="ver"><img width="53" src="/web/20010913100802/http://www.ibm.com/us/images/eserver_logo.gif" height="10" border="0" alt="e-(logo) server"> xSeries 200VL<br>perfect for small business</a></td>
+</tr>
+<tr>
+<td colspan="2"><img width="1" src="/web/20010913000000/http://web.archive.org/web/20010913100802im_/http://www.ibm.com/i/c.gif" height="8" alt=""></td>
+</tr>
+<tr>
+<td colspan="2"><img width="197" src="/web/20010913000000/http://web.archive.org/web/20010913100802im_/http://www.ibm.com/i/v11/dotted_rule_197px.gif" height="1" alt=""></td>
+</tr>
+<tr>
+<td colspan="2"><img width="1" src="/web/20010913000000/http://web.archive.org/web/20010913100802im_/http://www.ibm.com/i/c.gif" height="8" alt=""></td>
+</tr>
+<tr>
+<td width="41" valign="top"><a href="/web/20010913100802/http://commerce.www.ibm.com/cgi-bin/ncommerce/AdvantageCode?shoprfnbr=1&amp;cntry=840&amp;lang=en_US&amp;cntrfnbr=1&amp;mmerfnbr=1&amp;q=1CA10TRY1"><img width="36" src="/web/20010913100802/http://www.ibm.com/us/images/module_trials_betas.gif" height="36" border="0" alt="software trials and betas"></a></td>
+<td width="156" valign="top"><a href="/web/20010913100802/http://commerce.www.ibm.com/cgi-bin/ncommerce/AdvantageCode?shoprfnbr=1&amp;cntry=840&amp;lang=en_US&amp;cntrfnbr=1&amp;mmerfnbr=1&amp;q=1CA10TRY1" class="nav"><b>Software trials &amp; betas</b></a><br><a href="/web/20010913100802/http://commerce.www.ibm.com/cgi-bin/ncommerce/AdvantageCode?shoprfnbr=1&amp;cntry=840&amp;lang=en_US&amp;cntrfnbr=1&amp;mmerfnbr=1&amp;q=1CA10TRY1" class="ver">Discover the latest <br>in IBM software</a></td>
+</tr>
+</tbody></table></td>
+</tr>
+<tr>
+<td width="404" valign="top" class="bbg"><img width="1" src="/web/20010913000000/http://web.archive.org/web/20010913100802im_/http://www.ibm.com/i/c.gif" height="9" alt=""></td>
+<td width="7"><img width="1" src="/web/20010913000000/http://web.archive.org/web/20010913100802im_/http://www.ibm.com/i/c.gif" height="5" alt=""></td>
+<td width="189" valign="top" class="tbgc"><img width="1" src="/web/20010913000000/http://web.archive.org/web/20010913100802im_/http://www.ibm.com/i/c.gif" height="9" alt=""></td>
+</tr>
+<tr>
+<td width="404" valign="top"><table width="404" cellspacing="0" cellpadding="0" border="0">
+<tbody><tr>
+<td colspan="2"><img width="1" src="/web/20010913000000/http://web.archive.org/web/20010913100802im_/http://www.ibm.com/i/c.gif" height="5" alt=""></td>
+</tr>
+<tr>
+<td width="10">&nbsp;</td>
+<td width="394" colspan="2"><b>News</b></td>
+</tr>
+<tr>
+<td colspan="2"><img width="1" src="/web/20010913000000/http://web.archive.org/web/20010913100802im_/http://www.ibm.com/i/c.gif" height="5" alt=""></td>
+</tr>
+<tr>
+<td width="10">&nbsp;</td>
+<td width="16" valign="top"><img width="16" src="/web/20010913000000/http://web.archive.org/web/20010913100802im_/http://www.ibm.com/i/v11/icons/fw.gif" height="16" alt=""></td>
+<td width="378"><a style="text-decoration: none;" href="/web/20010913100802/http://commerce.www.ibm.com/content/home/en_US/ibm_news_840.html">For disaster-related products, services or assistance,<br> call <b>1-800-IBM-CALL</b></a></td>
+</tr>
+<tr>
+<td colspan="2"><img width="1" src="/web/20010913000000/http://web.archive.org/web/20010913100802im_/http://www.ibm.com/i/c.gif" height="5" alt=""></td>
+</tr>
+<tr> <td width="10">&nbsp;</td> <td width="16" valign="top"><img width="16" src="/web/20010913000000/http://web.archive.org/web/20010913100802im_/http://www.ibm.com/i/v11/icons/fw.gif" height="16" alt=""></td> <td width="378"><a style="text-decoration: none;" href="/web/20010913100802/http://www.ibm.com/news/us/2001/09/101.html">IBM statement of direction on Intel 845 chipset</a></td> </tr>
+<tr>
+<td colspan="2"><img width="1" src="/web/20010913000000/http://web.archive.org/web/20010913100802im_/http://www.ibm.com/i/c.gif" height="5" alt=""></td>
+</tr>
+<tr> <td width="10">&nbsp;</td> <td width="16" valign="top"><img width="16" src="/web/20010913000000/http://web.archive.org/web/20010913100802im_/http://www.ibm.com/i/v11/icons/fw.gif" height="16" alt=""></td> <td width="378"><a style="text-decoration: none;" href="/web/20010913100802/http://www.ibm.com/news/us/2001/09/06.html">eBay joins IBM in software, sales, marketing alliance</a></td> </tr>
+<tr>
+<td colspan="2"><img width="1" src="/web/20010913000000/http://web.archive.org/web/20010913100802im_/http://www.ibm.com/i/c.gif" height="5" alt=""></td>
+</tr>
+<!-- tier5 -->
+<tr>
+<td colspan="2"><img width="1" src="/web/20010913000000/http://web.archive.org/web/20010913100802im_/http://www.ibm.com/i/c.gif" height="5" alt=""></td>
+</tr>
+<tr>
+<td width="10">&nbsp;</td>
+<td width="16" valign="top"><img width="16" src="/web/20010913000000/http://web.archive.org/web/20010913100802im_/http://www.ibm.com/i/v11/icons/fw.gif" height="16" alt=""></td>
+<td width="378"><a style="text-decoration: none;" href="/web/20010913100802/http://www.ibm.com/news/us" class="sbold">More news and newsletters</a></td>
+</tr>
+</tbody></table></td>
+<td>&nbsp;</td>
+<td width="197" valign="top"><table width="197" cellspacing="0" cellpadding="0" border="0">
+<tbody><tr>
+<td colspan="2"><img width="1" src="/web/20010913000000/http://web.archive.org/web/20010913100802im_/http://www.ibm.com/i/c.gif" height="5" alt=""></td>
+</tr>
+<tr><td width="12" valign="top"><img width="16" src="/web/20010913000000/http://web.archive.org/web/20010913100802im_/http://www.ibm.com/i/v11/icons/fw.gif" height="16" alt=""></td><td width="181"><a style="text-decoration: none;" href="/web/20010913100802/http://commerce.www.ibm.com/cgi-bin/ncommerce/AdvantageCode?shoprfnbr=1&amp;cntry=840&amp;lang=en_US&amp;cntrfnbr=1&amp;mmerfnbr=1&amp;q=1KA10R2BY"><b>Ready to buy?</b></a><br><span style="font-family: verdana; font-size:10px;">Find it and buy it fast!<br></span></td></tr><tr><td colspan="2"><img width="1" src="/web/20010913000000/http://web.archive.org/web/20010913100802im_/http://www.ibm.com/i/c.gif" height="5" alt=""></td></tr><tr><td colspan="2"><img width="197" src="/web/20010913000000/http://web.archive.org/web/20010913100802im_/http://www.ibm.com/i/v11/dotted_rule_197px.gif" height="1" alt=""></td></tr><tr><td colspan="2"><img width="1" src="/web/20010913000000/http://web.archive.org/web/20010913100802im_/http://www.ibm.com/i/c.gif" height="5" alt=""></td></tr><tr><td width="12" valign="top"><img width="16" src="/web/20010913000000/http://web.archive.org/web/20010913100802im_/http://www.ibm.com/i/v11/icons/fw.gif" height="16" alt=""></td><td width="181"><a style="text-decoration: none;" href="/web/20010913100802/http://commerce.www.ibm.com/cgi-bin/ncommerce/AdvantageCode?shoprfnbr=1&amp;cntry=840&amp;lang=en_US&amp;cntrfnbr=1&amp;mmerfnbr=1&amp;q=1KA10SAO1"><b>Special / advertised offers</b></a><br><span style="font-family: verdana; font-size:10px;"></span></td></tr><tr><td colspan="2"><img width="1" src="/web/20010913000000/http://web.archive.org/web/20010913100802im_/http://www.ibm.com/i/c.gif" height="5" alt=""></td></tr><tr><td colspan="2"><img width="197" src="/web/20010913000000/http://web.archive.org/web/20010913100802im_/http://www.ibm.com/i/v11/dotted_rule_197px.gif" height="1" alt=""></td></tr><tr><td colspan="2"><img width="1" src="/web/20010913000000/http://web.archive.org/web/20010913100802im_/http://www.ibm.com/i/c.gif" height="5" alt=""></td></tr><tr>
+<td colspan="2"><img width="1" src="/web/20010913000000/http://web.archive.org/web/20010913100802im_/http://www.ibm.com/i/c.gif" height="5" alt=""></td>
+</tr>
+<tr>
+<td width="16" align="right"><img width="9" src="/web/20010913000000/http://web.archive.org/web/20010913100802im_/http://www.ibm.com/i/v11/navcode_triangle.gif" height="9" alt="">&nbsp;</td>
+<td width="181" valign="top"><b>NavCode™</b></td>
+</tr>
+<tr>
+<td>&nbsp;</td><td><span style="font-family: verdana; font-size:10px;">Enter NavCode here: <a href="/web/20010913100802/http://commerce.www.ibm.com/content/home/shop_ShopIBM/en_US/navcode_840.html">Details</a></span><br></td>
+</tr>
+<tr>
+<td colspan="2"><img width="1" src="/web/20010913000000/http://web.archive.org/web/20010913100802im_/http://www.ibm.com/i/c.gif" height="5" alt=""></td>
+</tr>
+<tr>
+<td colspan="2"><table cellspacing="0" cellpadding="0" border="0">
+<tbody><tr>
+<form name="navcode" method="get" action="/web/20010913000000/http://web.archive.org/web/20010913100802/http://commerce.www.ibm.com/cgi-bin/ncommerce/AdvantageCode"></form><input type="hidden" name="shoprfnbr" class="iform" value="1">
+<input type="hidden" name="cntry" class="iform" value="840">
+<input type="hidden" name="lang" class="iform" value="en_US">
+<input type="hidden" name="cntrfnbr" class="iform" value="1">
+<input type="hidden" name="mmerfnbr" class="iform" value="1">
+<td><img width="15" src="/web/20010913000000/http://web.archive.org/web/20010913100802im_/http://www.ibm.com/i/c.gif" height="1" alt=""><input type="text" name="q" class="iform" size="15">
+</td>
+<td><img width="5" src="/web/20010913000000/http://web.archive.org/web/20010913100802im_/http://www.ibm.com/i/c.gif" height="1" alt=""><input width="21" type="image" src="/web/20010913000000/http://web.archive.org/web/20010913100802im_/http://www.ibm.com/i/v11/buttons/go.gif" name=" Go " height="21" border="0" alt=" Go "></td>
+</tr>
+</tbody></table></td>
+</tr>
+</tbody></table></td>
+</tr>
+</tbody></table></a></td>
+</tr>
+<tr valign="top">
+<td width="150" height="10" class="dbg">&nbsp;</td>
+<td width="600" height="10">&nbsp;</td>
+</tr>
+</tbody></table>
+<table width="760" cellspacing="0" cellpadding="0" border="0">
+<tbody><tr>
+<td><img width="1" src="/web/20010913000000/http://web.archive.org/web/20010913100802im_/http://www.ibm.com/i/c.gif" height="1" alt=""></td>
+</tr>
+<tr valign="top">
+<td height="21" class="bbg">&nbsp;&nbsp;<a href="/web/20010913100802/http://www.ibm.com/ibm/us" class="mainlink">About IBM</a><span class="divider">&nbsp;&nbsp;|&nbsp;&nbsp;</span><a href="/web/20010913100802/http://www.ibm.com/privacy/us" class="mainlink">Privacy</a><span class="divider">&nbsp;&nbsp;|&nbsp;&nbsp;</span><a href="/web/20010913100802/http://www.ibm.com/legal/us" class="mainlink">Legal</a><span class="divider">&nbsp;&nbsp;|&nbsp;&nbsp;</span><a href="/web/20010913100802/http://www.ibm.com/contact/us" class="mainlink">Contact</a><span class="divider">&nbsp;&nbsp;</span></td><td height="21" class="bbg" align="right"><img src="/web/20010913100802/http://www.ibm.com/i/uc/c.gif?cc=us&amp;lc=en&amp;ac=all&amp;page=home&amp;cookie=0" border="0" width="1" height="1" alt="">&nbsp;&nbsp;</td>
+</tr>
+</tbody></table>
+
+<script type="text/javascript" language="JavaScript1.2" src="/web/20010913000000/http://web.archive.org/web/20010913100802js_/http://www.ibm.com/common/stats/stats.js"></script>
+<noscript><img src="//web.archive.org/web/20010913100802im_/http://i.ihost.com/i/c.gif" width="1" height="1" alt="" border="0"/></noscript>
+
+
+
+
+</body></html><!-- index.html assembled by make_hp on Thu, 13 Sep 2001 10:05:05 -0500 --><!--
+     FILE ARCHIVED ON 10:08:02 Sep 13, 2001 AND RETRIEVED FROM THE
+     INTERNET ARCHIVE ON 03:38:43 May 23, 2026.
+     JAVASCRIPT APPENDED BY WAYBACK MACHINE, COPYRIGHT INTERNET ARCHIVE.
+
+     ALL OTHER CONTENT MAY ALSO BE PROTECTED BY COPYRIGHT (17 U.S.C.
+     SECTION 108(a)(3)).
+--><!--
+playback timings (ms):
+  captures_list: 0.617
+  exclusion.robots: 0.044
+  exclusion.robots.policy: 0.033
+  esindex: 0.01
+  cdx.remote: 28.439
+  LoadShardBlock: 252.078 (6)
+  PetaboxLoader3.resolve: 182.732 (5)
+  PetaboxLoader3.datanode: 278.263 (7)
+  load_resource: 228.618
+-->

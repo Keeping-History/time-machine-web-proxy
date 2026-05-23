@@ -4,5 +4,5 @@ export interface ProxyResult {
 	originalUrl: string;
 	archiveTime: string;
 	body: string | Buffer;
-	cache: "HIT" | "MISS";
+	cache: "HIT" | "MISS_DIRECT" | "MISS_WORKER";
 }

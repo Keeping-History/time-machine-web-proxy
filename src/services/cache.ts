@@ -7,6 +7,15 @@ import type pino from "pino";
 import type { Config } from "../models/config";
 
 const ROOT_VERSION = "v2";
+// Suffix appended to the final path to produce the tmp write target. Kept in
+// the same directory as the destination so the rename is atomic on POSIX
+// (same filesystem, same mount point).
+const TMP_SUFFIX = ".tmp";
+// Tentative sentinel TTL: when the snapshot-resolver returns an indeterminate
+// result (CDX unreachable for every variant), the worker writes a short-lived
+// sentinel so the next request fails fast without burning another 47s on
+// BullMQ retries. After expiry the URL gets retried in case CDX has recovered.
+const TENTATIVE_NOT_FOUND_TTL_MS = 60 * 60 * 1000;
 
 export interface CacheHit {
 	absPath: string;
@@ -18,12 +27,41 @@ export interface CacheHit {
 
 export class CacheService {
 	constructor(
-		private readonly config: Pick<Config, "cacheDir" | "cacheEnabled">,
+		private readonly config: Pick<Config, "cacheDir" | "cacheEnabled" | "notFoundTtlDays">,
 		private readonly logger: pino.Logger,
 	) {}
 
 	cacheDirForJob(time: string, host: string): string {
 		return join(this.config.cacheDir, ROOT_VERSION, time, host);
+	}
+
+	/**
+	 * Computes the absolute cache path for a given URL and timestamp.
+	 *
+	 * This is the single source of truth for cache path resolution — both the
+	 * read path (lookup) and the write path (writeFile) call this so they can
+	 * never diverge. Percent-encoded traversal sequences (e.g. %2e%2e%2f) are
+	 * decoded before path.resolve so the startsWith guard catches them.
+	 *
+	 * Directory-style URLs (/ or trailing /) resolve to `<dir>/index.html`.
+	 * Throws HTTP 400 if the resolved path escapes the cache root.
+	 */
+	computeAbsPath(url: string, time: string): string {
+		const u = new URL(url);
+		const root = this.cacheDirForJob(time, u.hostname);
+		let decoded: string;
+		try {
+			decoded = decodeURIComponent(u.pathname);
+		} catch {
+			throw Object.assign(new Error("Malformed URL pathname"), { status: 400 });
+		}
+		const isDirStyle = decoded === "/" || decoded.endsWith("/");
+		const rel = isDirStyle ? `${decoded}index.html` : decoded;
+		const abs = resolve(root, `.${rel}`);
+		if (abs !== root && !abs.startsWith(root + sep)) {
+			throw Object.assign(new Error("Path traversal rejected"), { status: 400 });
+		}
+		return abs;
 	}
 
 	async lookup(url: string, time: string): Promise<CacheHit | null> {
@@ -32,10 +70,10 @@ export class CacheService {
 		// Cache key uses the hostname verbatim. www.example.com and example.com
 		// are deliberately stored as separate entries because they may serve
 		// different content; collapsing them would poison the cache.
+		const primaryAbs = this.computeAbsPath(url, time);
 		const root = this.cacheDirForJob(time, u.hostname);
-		// Decode the pathname so percent-encoded traversal sequences (e.g. %2e%2e%2f)
-		// are normalized before path.resolve, allowing the startsWith guard below
-		// to catch them. URL's own pathname normalization only handles literal "..".
+		// Decode pathname for the directory-index fallback probe. computeAbsPath
+		// already validated against traversal; we only need the decoded form here.
 		let decoded: string;
 		try {
 			decoded = decodeURIComponent(u.pathname);
@@ -43,11 +81,6 @@ export class CacheService {
 			throw Object.assign(new Error("Malformed URL pathname"), { status: 400 });
 		}
 		const isDirStyle = decoded === "/" || decoded.endsWith("/");
-		const primaryRel = isDirStyle ? `${decoded}index.html` : decoded;
-		const primaryAbs = resolve(root, `.${primaryRel}`);
-		if (primaryAbs !== root && !primaryAbs.startsWith(root + sep)) {
-			throw Object.assign(new Error("Path traversal rejected"), { status: 400 });
-		}
 		try {
 			await fs.access(primaryAbs);
 			const contentType = mimeLookup(extname(primaryAbs)) || "application/octet-stream";
@@ -72,15 +105,66 @@ export class CacheService {
 				/* fall through to sentinel check */
 			}
 		}
+		// Tentative sentinel: short-lived (1h) marker written when the worker
+		// couldn't get a definitive answer from CDX (transport failures across
+		// all variants × retries). Avoids re-grinding the BullMQ retry chain
+		// for the same URL within the hour, while still letting the URL retry
+		// after expiry in case CDX has recovered.
+		const tentativeSentinel = this.tentativeSentinelPath(time, url);
+		try {
+			const stat = await fs.stat(tentativeSentinel);
+			const ageMs = Date.now() - stat.mtimeMs;
+			if (ageMs > TENTATIVE_NOT_FOUND_TTL_MS) {
+				await fs.unlink(tentativeSentinel);
+				this.logger.info(
+					{ sentinel: tentativeSentinel, ageMs, ttlMs: TENTATIVE_NOT_FOUND_TTL_MS },
+					"[cache] tentative-sentinel-expired",
+				);
+				// Fall through to permanent sentinel check.
+			} else {
+				throw Object.assign(new Error("Not in archive (tentative)"), { status: 404 });
+			}
+		} catch (e) {
+			if ((e as { status?: number }).status === 404) throw e;
+			/* tentative sentinel absent — fall through to permanent check */
+		}
 		// Negative-cache sentinel: worker writes one when CDX confirms 404.
 		// Lookup throws 404 instead of returning null so the proxy stops re-queuing.
+		// Sentinels older than notFoundTtlDays are deleted so Wayback backfills
+		// become visible on the next request.
 		const sentinel = this.sentinelPath(time, url);
 		try {
-			await fs.access(sentinel);
+			const stat = await fs.stat(sentinel);
+			const ageMs = Date.now() - stat.mtimeMs;
+			const ttlMs = this.config.notFoundTtlDays * 24 * 60 * 60 * 1000;
+			if (ageMs > ttlMs) {
+				await fs.unlink(sentinel);
+				this.logger.info({ sentinel, ageMs, ttlMs }, "[cache] sentinel-expired");
+				return null;
+			}
 		} catch {
 			return null;
 		}
 		throw Object.assign(new Error("Not in archive"), { status: 404 });
+	}
+
+	/**
+	 * Atomically writes `data` into the cache for the given URL + timestamp.
+	 *
+	 * The write goes to a sibling `.tmp` file first; a rename makes it visible
+	 * as an atomic unit. A partial write (crash / concurrent write) therefore
+	 * never satisfies a subsequent lookup — only the rename crosses the
+	 * visibility boundary.
+	 *
+	 * Uses the same computeAbsPath as lookup so read-path and write-path are
+	 * always in sync.
+	 */
+	async writeFile(url: string, time: string, data: Buffer): Promise<void> {
+		const dest = this.computeAbsPath(url, time);
+		await fs.mkdir(dirname(dest), { recursive: true });
+		const tmp = `${dest}${TMP_SUFFIX}`;
+		await fs.writeFile(tmp, data);
+		await fs.rename(tmp, dest);
 	}
 
 	async writeResolvedTimeSidecar(time: string, url: string, resolvedTime: string): Promise<void> {
@@ -107,14 +191,28 @@ export class CacheService {
 		await fs.writeFile(abs, "");
 	}
 
+	async writeTentativeNotFoundSentinel(time: string, url: string): Promise<void> {
+		const abs = this.tentativeSentinelPath(time, url);
+		await fs.mkdir(dirname(abs), { recursive: true });
+		await fs.writeFile(abs, "");
+	}
+
 	private sentinelPath(time: string, url: string): string {
+		return this.buildSentinelPath(time, url, ".notfound");
+	}
+
+	private tentativeSentinelPath(time: string, url: string): string {
+		return this.buildSentinelPath(time, url, ".notfound-tentative");
+	}
+
+	private buildSentinelPath(time: string, url: string, subdir: string): string {
 		const u = new URL(url);
 		const root = this.cacheDirForJob(time, u.hostname);
 		const key = createHash("sha256")
 			.update(`${u.protocol}//${u.host}${u.pathname}${u.search}`)
 			.digest("hex")
 			.slice(0, 16);
-		const abs = resolve(root, ".notfound", key);
+		const abs = resolve(root, subdir, key);
 		if (!abs.startsWith(root + sep)) {
 			throw Object.assign(new Error("Sentinel path traversal rejected"), { status: 400 });
 		}

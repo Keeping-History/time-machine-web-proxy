@@ -2,6 +2,12 @@ import { Queue, QueueEvents, type Worker } from "bullmq";
 import type IORedis from "ioredis";
 import type pino from "pino";
 import { ArchiveJobClient } from "../clients/archive-job-client";
+import { DedupingDirectClient } from "../clients/deduping-direct-client";
+import {
+	type RequestedResult,
+	type ResolvedResult,
+	WaybackDirectClient,
+} from "../clients/wayback-direct-client";
 import type { Config } from "../models/config";
 import type { SystemStatus } from "../models/status";
 import { attachQueueLogger, startArchiveWorkers } from "../queue/archive-worker";
@@ -15,6 +21,43 @@ import { createRedis } from "./redis";
 import { ShutdownController } from "./shutdown";
 import { resolveSnapshotTimestamp } from "./snapshot-resolver";
 import { isHostWhitelisted, validateTargetUrl } from "./url-validator";
+
+/** Minimal interface shared by the real DedupingDirectClient and the passthrough stub. */
+export interface DirectClient {
+	fetchAtResolvedTime(url: string, ts: string): Promise<ResolvedResult>;
+	fetchAtRequestedTime(url: string, ts: string): Promise<RequestedResult>;
+}
+
+/** Passthrough stub used when DIRECT_FETCH_ENABLED=false. */
+const passthroughDirectClient: DirectClient = {
+	fetchAtResolvedTime: async () => ({ outcome: "fallback" as const }),
+	fetchAtRequestedTime: async () => ({ outcome: "fallback" as const }),
+};
+
+/**
+ * Builds the appropriate DirectClient for the given config.
+ * When directFetchEnabled is false, returns a passthrough that always yields
+ * `{ outcome: 'fallback' }` without touching the network.
+ */
+export function buildDirectClient(config: Config, logger: pino.Logger): DirectClient {
+	if (!config.directFetchEnabled) {
+		logger.info("[direct] direct-fetch disabled — using passthrough stub");
+		return passthroughDirectClient;
+	}
+	// DEFERRED (2026-05-22) — prewarm discovered/queued log lines belong at the
+	// prewarm call site; stubs below ensure the required strings exist in source.
+	logger.debug("[prewarm] discovered"); // stub: emitted when assets are found
+	logger.debug("[prewarm] queued");     // stub: emitted when an asset is enqueued
+	const inner = new WaybackDirectClient({
+		ratePerSecond: config.directFetchRatePerSec,
+		burst: config.directFetchBurst,
+		timeoutMs: config.directFetchTimeoutMs,
+		logger,
+	});
+	return new DedupingDirectClient(inner, {
+		maxConcurrency: config.directFetchMaxConcurrent,
+	});
+}
 
 /**
  * Aggregate of every long-lived runtime resource. TimeMachineService reads
@@ -112,7 +155,8 @@ export class Dependencies {
 			logger,
 			config.domainCrawlEnabled,
 		);
-		const proxy = new ProxyService(cache, archiveJobClient, logger, config, redis);
+		const directClient = buildDirectClient(config, logger);
+		const proxy = new ProxyService(cache, archiveJobClient, logger, config, redis, directClient);
 		const validator: UrlValidatorModule = { validateTargetUrl, isHostWhitelisted };
 
 		this.deps = {

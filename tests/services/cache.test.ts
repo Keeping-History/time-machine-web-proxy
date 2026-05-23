@@ -5,8 +5,10 @@ jest.mock("node:fs", () => ({
 		readdir: jest.fn(),
 		unlink: jest.fn(),
 		access: jest.fn(),
+		stat: jest.fn(),
 		rm: jest.fn(),
 		mkdir: jest.fn(),
+		rename: jest.fn(),
 	},
 }));
 
@@ -16,12 +18,18 @@ import { CacheService } from "../../src/services/cache";
 
 const logger = pino({ level: "silent" });
 
-const makeService = (cacheEnabled = true) =>
-	new CacheService({ cacheDir: "/tmp/cache", cacheEnabled }, logger);
+const makeService = (cacheEnabled = true, notFoundTtlDays = 30) =>
+	new CacheService({ cacheDir: "/tmp/cache", cacheEnabled, notFoundTtlDays }, logger);
 
 const mockFs = fs as jest.Mocked<typeof fs>;
 
-beforeEach(() => jest.resetAllMocks());
+beforeEach(() => {
+	jest.resetAllMocks();
+	// Default: sentinel does not exist. Tests that need a present sentinel override this.
+	(mockFs.stat as jest.Mock).mockRejectedValue(
+		Object.assign(new Error("ENOENT"), { code: "ENOENT" }),
+	);
+});
 
 describe("CacheService.cacheDirForJob", () => {
 	it("returns <cacheDir>/v2/<time>/<host> exactly", () => {
@@ -206,11 +214,11 @@ describe("CacheService.writeNotFoundSentinel + sentinel-aware lookup", () => {
 	});
 
 	it("lookup throws {status: 404} when sentinel exists for the URL", async () => {
-		// file access fails; sentinel access succeeds.
-		(mockFs.access as jest.Mock).mockImplementation((p: string) => {
-			if (p.includes("/.notfound/")) return Promise.resolve(undefined);
-			return Promise.reject(Object.assign(new Error("ENOENT"), { code: "ENOENT" }));
-		});
+		// file access fails for the content file; sentinel stat succeeds with a recent mtime.
+		(mockFs.access as jest.Mock).mockRejectedValue(
+			Object.assign(new Error("ENOENT"), { code: "ENOENT" }),
+		);
+		(mockFs.stat as jest.Mock).mockResolvedValue({ mtimeMs: Date.now() });
 		const svc = makeService();
 		await expect(svc.lookup(URL, TIME)).rejects.toMatchObject({
 			status: 404,
@@ -219,6 +227,9 @@ describe("CacheService.writeNotFoundSentinel + sentinel-aware lookup", () => {
 
 	it("lookup returns null when neither file nor sentinel exists (unchanged miss path)", async () => {
 		(mockFs.access as jest.Mock).mockRejectedValue(
+			Object.assign(new Error("ENOENT"), { code: "ENOENT" }),
+		);
+		(mockFs.stat as jest.Mock).mockRejectedValue(
 			Object.assign(new Error("ENOENT"), { code: "ENOENT" }),
 		);
 		const svc = makeService();
@@ -301,6 +312,283 @@ describe("CacheService.writeNotFoundSentinel + sentinel-aware lookup", () => {
 		const a = (mockFs.writeFile as jest.Mock).mock.calls[0][0] as string;
 		const b = (mockFs.writeFile as jest.Mock).mock.calls[1][0] as string;
 		expect(a).not.toBe(b);
+	});
+
+	it("lookup deletes an expired sentinel and returns null", async () => {
+		// Content file misses; permanent sentinel exists but is older than TTL.
+		// Tentative sentinel does NOT exist (path-aware mock).
+		(mockFs.access as jest.Mock).mockRejectedValue(
+			Object.assign(new Error("ENOENT"), { code: "ENOENT" }),
+		);
+		const ttlDays = 7;
+		const oldMtimeMs = Date.now() - (ttlDays + 1) * 24 * 60 * 60 * 1000;
+		(mockFs.stat as jest.Mock).mockImplementation((p: string) => {
+			if (p.includes(".notfound-tentative/")) {
+				return Promise.reject(Object.assign(new Error("ENOENT"), { code: "ENOENT" }));
+			}
+			return Promise.resolve({ mtimeMs: oldMtimeMs });
+		});
+		(mockFs.unlink as jest.Mock).mockResolvedValue(undefined);
+
+		const svc = makeService(true, ttlDays);
+		const result = await svc.lookup(URL, TIME);
+
+		expect(result).toBeNull();
+		expect(mockFs.unlink).toHaveBeenCalledTimes(1);
+	});
+
+	it("lookup throws 404 for a fresh sentinel within TTL", async () => {
+		// Content file misses; permanent sentinel is recent (within TTL).
+		// Tentative sentinel does NOT exist (path-aware mock).
+		(mockFs.access as jest.Mock).mockRejectedValue(
+			Object.assign(new Error("ENOENT"), { code: "ENOENT" }),
+		);
+		const ttlDays = 7;
+		const freshMtimeMs = Date.now() - 1 * 24 * 60 * 60 * 1000; // 1 day old
+		(mockFs.stat as jest.Mock).mockImplementation((p: string) => {
+			if (p.includes(".notfound-tentative/")) {
+				return Promise.reject(Object.assign(new Error("ENOENT"), { code: "ENOENT" }));
+			}
+			return Promise.resolve({ mtimeMs: freshMtimeMs });
+		});
+
+		const svc = makeService(true, ttlDays);
+		await expect(svc.lookup(URL, TIME)).rejects.toMatchObject({ status: 404 });
+		expect(mockFs.unlink).not.toHaveBeenCalled();
+	});
+
+	it("expired sentinel unlink is logged with [cache] sentinel-expired", async () => {
+		(mockFs.access as jest.Mock).mockRejectedValue(
+			Object.assign(new Error("ENOENT"), { code: "ENOENT" }),
+		);
+		const ttlDays = 30;
+		const oldMtimeMs = Date.now() - 60 * 24 * 60 * 60 * 1000; // 60 days old
+		(mockFs.stat as jest.Mock).mockImplementation((p: string) => {
+			if (p.includes(".notfound-tentative/")) {
+				return Promise.reject(Object.assign(new Error("ENOENT"), { code: "ENOENT" }));
+			}
+			return Promise.resolve({ mtimeMs: oldMtimeMs });
+		});
+		(mockFs.unlink as jest.Mock).mockResolvedValue(undefined);
+
+		const logSpy = jest.spyOn(logger, "info");
+		const svc = makeService(true, ttlDays);
+		await svc.lookup(URL, TIME);
+
+		expect(logSpy).toHaveBeenCalledWith(
+			expect.objectContaining({ sentinel: expect.any(String), ageMs: expect.any(Number), ttlMs: expect.any(Number) }),
+			"[cache] sentinel-expired",
+		);
+	});
+});
+
+describe("CacheService.writeTentativeNotFoundSentinel + tentative-aware lookup", () => {
+	const TIME = "20200101000000";
+	const URL = "https://example.com/about";
+
+	it("writes a tentative sentinel at <root>/.notfound-tentative/<sha256-prefix>", async () => {
+		(mockFs.mkdir as jest.Mock).mockResolvedValue(undefined);
+		(mockFs.writeFile as jest.Mock).mockResolvedValue(undefined);
+		const svc = makeService();
+		await svc.writeTentativeNotFoundSentinel(TIME, URL);
+
+		expect(mockFs.writeFile).toHaveBeenCalledTimes(1);
+		const writtenPath = (mockFs.writeFile as jest.Mock).mock.calls[0][0] as string;
+		expect(writtenPath).toMatch(
+			/^\/tmp\/cache\/v2\/20200101000000\/example\.com\/\.notfound-tentative\/[0-9a-f]{16}$/,
+		);
+	});
+
+	it("tentative and permanent sentinels share key derivation but live in separate subdirs", async () => {
+		(mockFs.mkdir as jest.Mock).mockResolvedValue(undefined);
+		(mockFs.writeFile as jest.Mock).mockResolvedValue(undefined);
+		const svc = makeService();
+		await svc.writeTentativeNotFoundSentinel(TIME, URL);
+		await svc.writeNotFoundSentinel(TIME, URL);
+		const tentative = (mockFs.writeFile as jest.Mock).mock.calls[0][0] as string;
+		const permanent = (mockFs.writeFile as jest.Mock).mock.calls[1][0] as string;
+		const tentativeKey = tentative.split("/").pop();
+		const permanentKey = permanent.split("/").pop();
+		expect(tentativeKey).toBe(permanentKey);
+		expect(tentative).toContain("/.notfound-tentative/");
+		expect(permanent).toContain("/.notfound/");
+		expect(permanent).not.toContain("/.notfound-tentative/");
+	});
+
+	it("lookup throws 404 when only the tentative sentinel exists and is within 1h TTL", async () => {
+		(mockFs.access as jest.Mock).mockRejectedValue(
+			Object.assign(new Error("ENOENT"), { code: "ENOENT" }),
+		);
+		const freshMtimeMs = Date.now() - 30 * 60 * 1000; // 30 minutes old
+		(mockFs.stat as jest.Mock).mockImplementation((p: string) => {
+			if (p.includes(".notfound-tentative/")) {
+				return Promise.resolve({ mtimeMs: freshMtimeMs });
+			}
+			return Promise.reject(Object.assign(new Error("ENOENT"), { code: "ENOENT" }));
+		});
+		const svc = makeService();
+		await expect(svc.lookup(URL, TIME)).rejects.toMatchObject({ status: 404 });
+		expect(mockFs.unlink).not.toHaveBeenCalled();
+	});
+
+	it("lookup unlinks an expired tentative sentinel and falls through to permanent check", async () => {
+		(mockFs.access as jest.Mock).mockRejectedValue(
+			Object.assign(new Error("ENOENT"), { code: "ENOENT" }),
+		);
+		const expiredMtimeMs = Date.now() - 2 * 60 * 60 * 1000; // 2 hours old (TTL is 1h)
+		(mockFs.stat as jest.Mock).mockImplementation((p: string) => {
+			if (p.includes(".notfound-tentative/")) {
+				return Promise.resolve({ mtimeMs: expiredMtimeMs });
+			}
+			return Promise.reject(Object.assign(new Error("ENOENT"), { code: "ENOENT" }));
+		});
+		(mockFs.unlink as jest.Mock).mockResolvedValue(undefined);
+		const svc = makeService();
+		const result = await svc.lookup(URL, TIME);
+		expect(result).toBeNull();
+		expect(mockFs.unlink).toHaveBeenCalledTimes(1);
+		const unlinkedPath = (mockFs.unlink as jest.Mock).mock.calls[0][0] as string;
+		expect(unlinkedPath).toContain("/.notfound-tentative/");
+	});
+
+	it("tentative sentinel takes precedence over a stale fresh-looking permanent sentinel", async () => {
+		// Both sentinels exist; tentative is fresh (within 1h), permanent would
+		// also count as fresh. Lookup must short-circuit on the tentative without
+		// touching the permanent (one stat call, not two).
+		(mockFs.access as jest.Mock).mockRejectedValue(
+			Object.assign(new Error("ENOENT"), { code: "ENOENT" }),
+		);
+		const freshMtimeMs = Date.now() - 10 * 60 * 1000; // 10 minutes old
+		(mockFs.stat as jest.Mock).mockResolvedValue({ mtimeMs: freshMtimeMs });
+		const svc = makeService();
+		await expect(svc.lookup(URL, TIME)).rejects.toMatchObject({ status: 404 });
+		expect(mockFs.stat).toHaveBeenCalledTimes(1);
+	});
+});
+
+describe("CacheService.computeAbsPath", () => {
+	const TIME = "20200101000000";
+
+	// Criterion 1: computeAbsPath returns same path as lookup probes for given (url, time)
+	it("returns the same primary path that lookup probes for a plain file URL", () => {
+		const svc = makeService();
+		const abs = svc.computeAbsPath("https://example.com/about.html", TIME);
+		expect(abs).toBe("/tmp/cache/v2/20200101000000/example.com/about.html");
+	});
+
+	it("resolves directory-style URL (trailing /) to index.html — matching lookup primary probe", () => {
+		const svc = makeService();
+		const abs = svc.computeAbsPath("https://example.com/about/", TIME);
+		expect(abs).toBe("/tmp/cache/v2/20200101000000/example.com/about/index.html");
+	});
+
+	it("resolves root / to index.html — matching lookup primary probe", () => {
+		const svc = makeService();
+		const abs = svc.computeAbsPath("https://example.com/", TIME);
+		expect(abs).toBe("/tmp/cache/v2/20200101000000/example.com/index.html");
+	});
+
+	it("preserves www. in hostname verbatim — same as lookup", () => {
+		const svc = makeService();
+		const abs = svc.computeAbsPath("https://www.example.com/page.html", TIME);
+		expect(abs).toBe("/tmp/cache/v2/20200101000000/www.example.com/page.html");
+	});
+
+	// Criterion 2: path-traversal payloads reject with HTTP 400
+	it("rejects percent-encoded traversal (%2e%2e/etc/passwd) with status 400", () => {
+		const svc = makeService();
+		expect(() =>
+			svc.computeAbsPath("https://example.com/%2e%2e%2fetc%2fpasswd", TIME),
+		).toThrow(expect.objectContaining({ status: 400 }));
+	});
+
+	it("rejects deeply nested percent-encoded traversal with status 400", () => {
+		const svc = makeService();
+		expect(() =>
+			svc.computeAbsPath("https://example.com/%2e%2e%2f%2e%2e%2fetc%2fpasswd", TIME),
+		).toThrow(expect.objectContaining({ status: 400 }));
+	});
+});
+
+describe("CacheService.writeFile", () => {
+	const TIME = "20200101000000";
+
+	beforeEach(() => {
+		(mockFs.mkdir as jest.Mock).mockResolvedValue(undefined);
+		(mockFs.writeFile as jest.Mock).mockResolvedValue(undefined);
+		(mockFs.rename as jest.Mock).mockResolvedValue(undefined);
+	});
+
+	// Criterion 3: writeFile round-trips — subsequent lookup returns the bytes
+	// (In the mock environment we verify the write path matches computeAbsPath
+	// and that lookup probes the same path, ensuring they are consistent.)
+	it("writes to the path that computeAbsPath returns — lookup will find it there", async () => {
+		const svc = makeService();
+		const url = "https://example.com/page.html";
+		const expectedDest = svc.computeAbsPath(url, TIME);
+
+		await svc.writeFile(url, TIME, Buffer.from("hello"));
+
+		// rename target must equal computeAbsPath output
+		const renameDest = (mockFs.rename as jest.Mock).mock.calls[0][1] as string;
+		expect(renameDest).toBe(expectedDest);
+	});
+
+	it("creates the parent directory before writing", async () => {
+		const svc = makeService();
+		await svc.writeFile("https://example.com/deep/path/file.html", TIME, Buffer.from("x"));
+
+		expect(mockFs.mkdir).toHaveBeenCalledWith(
+			"/tmp/cache/v2/20200101000000/example.com/deep/path",
+			{ recursive: true },
+		);
+	});
+
+	// Criterion 4: partial tmp file does not satisfy lookup (rename is the visibility boundary)
+	it("writes to a .tmp sibling before renaming — tmp path differs from final path", async () => {
+		const svc = makeService();
+		const url = "https://example.com/asset.js";
+		const dest = svc.computeAbsPath(url, TIME);
+
+		await svc.writeFile(url, TIME, Buffer.from("var x=1;"));
+
+		const writtenPath = (mockFs.writeFile as jest.Mock).mock.calls[0][0] as string;
+		const [renameSrc, renameDest] = (mockFs.rename as jest.Mock).mock.calls[0] as [
+			string,
+			string,
+		];
+
+		// tmp file path must differ from destination
+		expect(writtenPath).not.toBe(dest);
+		expect(writtenPath).toBe(`${dest}.tmp`);
+		// rename moves tmp → dest
+		expect(renameSrc).toBe(`${dest}.tmp`);
+		expect(renameDest).toBe(dest);
+	});
+
+	it("rename happens after writeFile — order of operations is tmp-write then rename", async () => {
+		const order: string[] = [];
+		(mockFs.writeFile as jest.Mock).mockImplementation(async () => {
+			order.push("writeFile");
+		});
+		(mockFs.rename as jest.Mock).mockImplementation(async () => {
+			order.push("rename");
+		});
+
+		const svc = makeService();
+		await svc.writeFile("https://example.com/x.html", TIME, Buffer.from(""));
+
+		expect(order).toEqual(["writeFile", "rename"]);
+	});
+
+	// Criterion 2 also applies to writeFile: traversal rejected before any fs call
+	it("rejects path-traversal URL with status 400 without touching fs", async () => {
+		const svc = makeService();
+		await expect(
+			svc.writeFile("https://example.com/%2e%2e%2fetc%2fpasswd", TIME, Buffer.from("evil")),
+		).rejects.toMatchObject({ status: 400 });
+		expect(mockFs.writeFile).not.toHaveBeenCalled();
+		expect(mockFs.rename).not.toHaveBeenCalled();
 	});
 });
 
