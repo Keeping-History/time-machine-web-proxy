@@ -11,6 +11,11 @@ const ROOT_VERSION = "v2";
 // the same directory as the destination so the rename is atomic on POSIX
 // (same filesystem, same mount point).
 const TMP_SUFFIX = ".tmp";
+// Tentative sentinel TTL: when the snapshot-resolver returns an indeterminate
+// result (CDX unreachable for every variant), the worker writes a short-lived
+// sentinel so the next request fails fast without burning another 47s on
+// BullMQ retries. After expiry the URL gets retried in case CDX has recovered.
+const TENTATIVE_NOT_FOUND_TTL_MS = 60 * 60 * 1000;
 
 export interface CacheHit {
 	absPath: string;
@@ -100,6 +105,29 @@ export class CacheService {
 				/* fall through to sentinel check */
 			}
 		}
+		// Tentative sentinel: short-lived (1h) marker written when the worker
+		// couldn't get a definitive answer from CDX (transport failures across
+		// all variants × retries). Avoids re-grinding the BullMQ retry chain
+		// for the same URL within the hour, while still letting the URL retry
+		// after expiry in case CDX has recovered.
+		const tentativeSentinel = this.tentativeSentinelPath(time, url);
+		try {
+			const stat = await fs.stat(tentativeSentinel);
+			const ageMs = Date.now() - stat.mtimeMs;
+			if (ageMs > TENTATIVE_NOT_FOUND_TTL_MS) {
+				await fs.unlink(tentativeSentinel);
+				this.logger.info(
+					{ sentinel: tentativeSentinel, ageMs, ttlMs: TENTATIVE_NOT_FOUND_TTL_MS },
+					"[cache] tentative-sentinel-expired",
+				);
+				// Fall through to permanent sentinel check.
+			} else {
+				throw Object.assign(new Error("Not in archive (tentative)"), { status: 404 });
+			}
+		} catch (e) {
+			if ((e as { status?: number }).status === 404) throw e;
+			/* tentative sentinel absent — fall through to permanent check */
+		}
 		// Negative-cache sentinel: worker writes one when CDX confirms 404.
 		// Lookup throws 404 instead of returning null so the proxy stops re-queuing.
 		// Sentinels older than notFoundTtlDays are deleted so Wayback backfills
@@ -163,14 +191,28 @@ export class CacheService {
 		await fs.writeFile(abs, "");
 	}
 
+	async writeTentativeNotFoundSentinel(time: string, url: string): Promise<void> {
+		const abs = this.tentativeSentinelPath(time, url);
+		await fs.mkdir(dirname(abs), { recursive: true });
+		await fs.writeFile(abs, "");
+	}
+
 	private sentinelPath(time: string, url: string): string {
+		return this.buildSentinelPath(time, url, ".notfound");
+	}
+
+	private tentativeSentinelPath(time: string, url: string): string {
+		return this.buildSentinelPath(time, url, ".notfound-tentative");
+	}
+
+	private buildSentinelPath(time: string, url: string, subdir: string): string {
 		const u = new URL(url);
 		const root = this.cacheDirForJob(time, u.hostname);
 		const key = createHash("sha256")
 			.update(`${u.protocol}//${u.host}${u.pathname}${u.search}`)
 			.digest("hex")
 			.slice(0, 16);
-		const abs = resolve(root, ".notfound", key);
+		const abs = resolve(root, subdir, key);
 		if (!abs.startsWith(root + sep)) {
 			throw Object.assign(new Error("Sentinel path traversal rejected"), { status: 400 });
 		}

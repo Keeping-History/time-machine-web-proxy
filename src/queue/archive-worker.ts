@@ -24,7 +24,11 @@ export interface StartArchiveWorkersOpts {
 	connection: ConnectionOptions;
 	cache: Pick<
 		CacheService,
-		"cacheDirForJob" | "writeNotFoundSentinel" | "writeResolvedTimeSidecar" | "lookup"
+		| "cacheDirForJob"
+		| "writeNotFoundSentinel"
+		| "writeTentativeNotFoundSentinel"
+		| "writeResolvedTimeSidecar"
+		| "lookup"
 	>;
 	resolver: SnapshotResolverFn;
 	logger: pino.Logger;
@@ -117,6 +121,11 @@ function startDownloadWatcher(
 				// 'rename' fires on creation/deletion; 'change' fires on writes to an
 				// existing inode. New downloads always show up as 'rename' first.
 				if (eventType !== "rename") return;
+				// Concurrent workers writing sentinels into the same host dir would
+				// otherwise surface here as "downloaded files" for this job.
+				if (key.startsWith(".notfound/") || key.startsWith(".notfound-tentative/")) {
+					return;
+				}
 				seen.add(key);
 				onFile(key, seen.size);
 			});
@@ -273,9 +282,24 @@ export function startArchiveWorkers(opts: StartArchiveWorkersOpts): ArchiveWorke
 					);
 				}
 			} catch (e) {
-				await emitProgress(job, QUEUE_EXACT, "error", logger, {
-					error: e instanceof Error ? e.message : String(e),
-				});
+				const errMsg = e instanceof Error ? e.message : String(e);
+				await emitProgress(job, QUEUE_EXACT, "error", logger, { error: errMsg });
+				// snapshot-resolver throws this specific message when CDX is
+				// transport-unreachable for every variant × retry. Retrying the
+				// job 2 more times burns ~45s before BullMQ gives up and only
+				// helps if CDX recovers in that window. Instead, write a 1-hour
+				// tentative sentinel so the next request fails fast, then
+				// retries after expiry in case CDX is healthy by then.
+				if (errMsg.startsWith("[snapshot-resolver] all CDX queries failed")) {
+					assertExactUrlJob(job.data);
+					const { url, time } = job.data;
+					await cache.writeTentativeNotFoundSentinel(time, url);
+					logger.warn(
+						{ url, time },
+						"[worker:exact] indeterminate CDX state — wrote tentative sentinel, skipping retry",
+					);
+					return;
+				}
 				throw e;
 			}
 		},

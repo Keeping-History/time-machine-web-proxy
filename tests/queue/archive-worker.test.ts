@@ -107,12 +107,14 @@ function makeLogger(): pino.Logger {
 function makeCache(dir = "/cache"): {
 	cacheDirForJob: jest.Mock;
 	writeNotFoundSentinel: jest.Mock;
+	writeTentativeNotFoundSentinel: jest.Mock;
 	writeResolvedTimeSidecar: jest.Mock;
 	lookup: jest.Mock;
 } {
 	return {
 		cacheDirForJob: jest.fn((time: string, host: string) => `${dir}/v2/${time}/${host}`),
 		writeNotFoundSentinel: jest.fn().mockResolvedValue(undefined),
+		writeTentativeNotFoundSentinel: jest.fn().mockResolvedValue(undefined),
 		writeResolvedTimeSidecar: jest.fn().mockResolvedValue(undefined),
 		// Default to a non-null hit so the exact worker's post-download
 		// validation passes. Tests that exercise the "downloader produced no
@@ -570,6 +572,53 @@ describe("exact worker processor", () => {
 		);
 		expect(WaybackMachineDownloaderMock).not.toHaveBeenCalled();
 		expect(downloadFilesMock).not.toHaveBeenCalled();
+	});
+
+	it("writes tentative sentinel and completes (no throw) when resolver throws indeterminate-CDX error", async () => {
+		// snapshot-resolver throws this exact prefix when CDX is transport-
+		// unreachable across all variants/retries. Worker must catch, write a
+		// short-lived tentative sentinel, and complete normally so BullMQ does
+		// NOT retry — otherwise foreground requests wait ~47s before 404'ing.
+		const cache = makeCache();
+		const resolver = jest.fn().mockRejectedValue(
+			new Error(
+				"[snapshot-resolver] all CDX queries failed (transport/non-OK/parse) — refusing to claim 'no snapshot' on indeterminate state",
+			),
+		);
+		startArchiveWorkers(baseOpts({ cache, resolver }));
+		const worker = findWorker(QUEUE_EXACT);
+		await expect(
+			worker.processor({
+				id: "j-indet",
+				data: { url: "https://i.ihost.com/i/c.gif", time: "20010913100802" },
+				token: "tk-indet",
+			}),
+		).resolves.toBeUndefined();
+		expect(cache.writeTentativeNotFoundSentinel).toHaveBeenCalledWith(
+			"20010913100802",
+			"https://i.ihost.com/i/c.gif",
+		);
+		expect(cache.writeNotFoundSentinel).not.toHaveBeenCalled();
+		expect(WaybackMachineDownloaderMock).not.toHaveBeenCalled();
+	});
+
+	it("still throws (BullMQ retries) on errors other than the indeterminate-CDX message", async () => {
+		// Generic errors must continue to propagate so BullMQ retries cover
+		// transient pod-restart / network-blip cases. Only the specific
+		// snapshot-resolver throw is treated as a non-retriable signal.
+		const cache = makeCache();
+		const resolver = jest.fn().mockRejectedValue(new Error("kaboom: redis disconnected"));
+		startArchiveWorkers(baseOpts({ cache, resolver }));
+		const worker = findWorker(QUEUE_EXACT);
+		await expect(
+			worker.processor({
+				id: "j-generic",
+				data: { url: "https://example.com/", time: "20200101000000" },
+				token: "tk-generic",
+			}),
+		).rejects.toThrow("kaboom: redis disconnected");
+		expect(cache.writeTentativeNotFoundSentinel).not.toHaveBeenCalled();
+		expect(cache.writeNotFoundSentinel).not.toHaveBeenCalled();
 	});
 
 	it("returns success (no throw, no retry) when resolver returns null", async () => {

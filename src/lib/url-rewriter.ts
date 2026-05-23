@@ -12,11 +12,14 @@ const RE_WAYBACK_JS_HTML = /((?:<html[^>]*>))[\s\S]*?<!-- End Wayback Rewrite JS
 const RE_WAYBACK_TOOLBAR =
 	/<!-- BEGIN WAYBACK TOOLBAR INSERT -->[\s\S]*?<!-- END WAYBACK TOOLBAR INSERT -->/gi;
 
-// Wayback archive URL (absolute or path-relative), with optional 1-3 char
-// content-type modifier (im_, cs_, js_, if_, fw_, …) between timestamp and
-// the original URL. Capture: (timestamp, originalUrl).
+// Wayback archive URL (absolute, protocol-relative, or path-relative), with
+// optional 1-3 char content-type modifier (im_, cs_, js_, if_, fw_, …)
+// between timestamp and the original URL. Capture: (timestamp, originalUrl).
+// Protocol-relative `//web.archive.org/...` is the form `wayback-machine-downloader`
+// stores in cached HTML; missing it caused the rewriter to fall through to
+// new URL() resolution and emit doubly-wrapped paths that the router 404s on.
 const RE_ARCHIVE_URL =
-	/^(?:https?:\/\/web\.archive\.org)?\/web\/(\d{1,14})(?:[a-z]{1,3}_)?\/(https?:\/\/.+)$/i;
+	/^(?:(?:https?:)?\/\/web\.archive\.org)?\/web\/(\d{1,14})(?:[a-z]{1,3}_)?\/(https?:\/\/.+)$/i;
 
 // Proxy path-format request: /web/{14-digit-ts}{optional 1-3 char mod}_/{url}.
 // Modifier (if present) is tolerated and discarded — the proxy serves the

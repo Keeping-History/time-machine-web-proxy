@@ -315,13 +315,19 @@ describe("CacheService.writeNotFoundSentinel + sentinel-aware lookup", () => {
 	});
 
 	it("lookup deletes an expired sentinel and returns null", async () => {
-		// Content file misses; sentinel exists but is older than TTL.
+		// Content file misses; permanent sentinel exists but is older than TTL.
+		// Tentative sentinel does NOT exist (path-aware mock).
 		(mockFs.access as jest.Mock).mockRejectedValue(
 			Object.assign(new Error("ENOENT"), { code: "ENOENT" }),
 		);
 		const ttlDays = 7;
 		const oldMtimeMs = Date.now() - (ttlDays + 1) * 24 * 60 * 60 * 1000;
-		(mockFs.stat as jest.Mock).mockResolvedValue({ mtimeMs: oldMtimeMs });
+		(mockFs.stat as jest.Mock).mockImplementation((p: string) => {
+			if (p.includes(".notfound-tentative/")) {
+				return Promise.reject(Object.assign(new Error("ENOENT"), { code: "ENOENT" }));
+			}
+			return Promise.resolve({ mtimeMs: oldMtimeMs });
+		});
 		(mockFs.unlink as jest.Mock).mockResolvedValue(undefined);
 
 		const svc = makeService(true, ttlDays);
@@ -332,13 +338,19 @@ describe("CacheService.writeNotFoundSentinel + sentinel-aware lookup", () => {
 	});
 
 	it("lookup throws 404 for a fresh sentinel within TTL", async () => {
-		// Content file misses; sentinel exists and is recent (within TTL).
+		// Content file misses; permanent sentinel is recent (within TTL).
+		// Tentative sentinel does NOT exist (path-aware mock).
 		(mockFs.access as jest.Mock).mockRejectedValue(
 			Object.assign(new Error("ENOENT"), { code: "ENOENT" }),
 		);
 		const ttlDays = 7;
 		const freshMtimeMs = Date.now() - 1 * 24 * 60 * 60 * 1000; // 1 day old
-		(mockFs.stat as jest.Mock).mockResolvedValue({ mtimeMs: freshMtimeMs });
+		(mockFs.stat as jest.Mock).mockImplementation((p: string) => {
+			if (p.includes(".notfound-tentative/")) {
+				return Promise.reject(Object.assign(new Error("ENOENT"), { code: "ENOENT" }));
+			}
+			return Promise.resolve({ mtimeMs: freshMtimeMs });
+		});
 
 		const svc = makeService(true, ttlDays);
 		await expect(svc.lookup(URL, TIME)).rejects.toMatchObject({ status: 404 });
@@ -351,7 +363,12 @@ describe("CacheService.writeNotFoundSentinel + sentinel-aware lookup", () => {
 		);
 		const ttlDays = 30;
 		const oldMtimeMs = Date.now() - 60 * 24 * 60 * 60 * 1000; // 60 days old
-		(mockFs.stat as jest.Mock).mockResolvedValue({ mtimeMs: oldMtimeMs });
+		(mockFs.stat as jest.Mock).mockImplementation((p: string) => {
+			if (p.includes(".notfound-tentative/")) {
+				return Promise.reject(Object.assign(new Error("ENOENT"), { code: "ENOENT" }));
+			}
+			return Promise.resolve({ mtimeMs: oldMtimeMs });
+		});
 		(mockFs.unlink as jest.Mock).mockResolvedValue(undefined);
 
 		const logSpy = jest.spyOn(logger, "info");
@@ -362,6 +379,90 @@ describe("CacheService.writeNotFoundSentinel + sentinel-aware lookup", () => {
 			expect.objectContaining({ sentinel: expect.any(String), ageMs: expect.any(Number), ttlMs: expect.any(Number) }),
 			"[cache] sentinel-expired",
 		);
+	});
+});
+
+describe("CacheService.writeTentativeNotFoundSentinel + tentative-aware lookup", () => {
+	const TIME = "20200101000000";
+	const URL = "https://example.com/about";
+
+	it("writes a tentative sentinel at <root>/.notfound-tentative/<sha256-prefix>", async () => {
+		(mockFs.mkdir as jest.Mock).mockResolvedValue(undefined);
+		(mockFs.writeFile as jest.Mock).mockResolvedValue(undefined);
+		const svc = makeService();
+		await svc.writeTentativeNotFoundSentinel(TIME, URL);
+
+		expect(mockFs.writeFile).toHaveBeenCalledTimes(1);
+		const writtenPath = (mockFs.writeFile as jest.Mock).mock.calls[0][0] as string;
+		expect(writtenPath).toMatch(
+			/^\/tmp\/cache\/v2\/20200101000000\/example\.com\/\.notfound-tentative\/[0-9a-f]{16}$/,
+		);
+	});
+
+	it("tentative and permanent sentinels share key derivation but live in separate subdirs", async () => {
+		(mockFs.mkdir as jest.Mock).mockResolvedValue(undefined);
+		(mockFs.writeFile as jest.Mock).mockResolvedValue(undefined);
+		const svc = makeService();
+		await svc.writeTentativeNotFoundSentinel(TIME, URL);
+		await svc.writeNotFoundSentinel(TIME, URL);
+		const tentative = (mockFs.writeFile as jest.Mock).mock.calls[0][0] as string;
+		const permanent = (mockFs.writeFile as jest.Mock).mock.calls[1][0] as string;
+		const tentativeKey = tentative.split("/").pop();
+		const permanentKey = permanent.split("/").pop();
+		expect(tentativeKey).toBe(permanentKey);
+		expect(tentative).toContain("/.notfound-tentative/");
+		expect(permanent).toContain("/.notfound/");
+		expect(permanent).not.toContain("/.notfound-tentative/");
+	});
+
+	it("lookup throws 404 when only the tentative sentinel exists and is within 1h TTL", async () => {
+		(mockFs.access as jest.Mock).mockRejectedValue(
+			Object.assign(new Error("ENOENT"), { code: "ENOENT" }),
+		);
+		const freshMtimeMs = Date.now() - 30 * 60 * 1000; // 30 minutes old
+		(mockFs.stat as jest.Mock).mockImplementation((p: string) => {
+			if (p.includes(".notfound-tentative/")) {
+				return Promise.resolve({ mtimeMs: freshMtimeMs });
+			}
+			return Promise.reject(Object.assign(new Error("ENOENT"), { code: "ENOENT" }));
+		});
+		const svc = makeService();
+		await expect(svc.lookup(URL, TIME)).rejects.toMatchObject({ status: 404 });
+		expect(mockFs.unlink).not.toHaveBeenCalled();
+	});
+
+	it("lookup unlinks an expired tentative sentinel and falls through to permanent check", async () => {
+		(mockFs.access as jest.Mock).mockRejectedValue(
+			Object.assign(new Error("ENOENT"), { code: "ENOENT" }),
+		);
+		const expiredMtimeMs = Date.now() - 2 * 60 * 60 * 1000; // 2 hours old (TTL is 1h)
+		(mockFs.stat as jest.Mock).mockImplementation((p: string) => {
+			if (p.includes(".notfound-tentative/")) {
+				return Promise.resolve({ mtimeMs: expiredMtimeMs });
+			}
+			return Promise.reject(Object.assign(new Error("ENOENT"), { code: "ENOENT" }));
+		});
+		(mockFs.unlink as jest.Mock).mockResolvedValue(undefined);
+		const svc = makeService();
+		const result = await svc.lookup(URL, TIME);
+		expect(result).toBeNull();
+		expect(mockFs.unlink).toHaveBeenCalledTimes(1);
+		const unlinkedPath = (mockFs.unlink as jest.Mock).mock.calls[0][0] as string;
+		expect(unlinkedPath).toContain("/.notfound-tentative/");
+	});
+
+	it("tentative sentinel takes precedence over a stale fresh-looking permanent sentinel", async () => {
+		// Both sentinels exist; tentative is fresh (within 1h), permanent would
+		// also count as fresh. Lookup must short-circuit on the tentative without
+		// touching the permanent (one stat call, not two).
+		(mockFs.access as jest.Mock).mockRejectedValue(
+			Object.assign(new Error("ENOENT"), { code: "ENOENT" }),
+		);
+		const freshMtimeMs = Date.now() - 10 * 60 * 1000; // 10 minutes old
+		(mockFs.stat as jest.Mock).mockResolvedValue({ mtimeMs: freshMtimeMs });
+		const svc = makeService();
+		await expect(svc.lookup(URL, TIME)).rejects.toMatchObject({ status: 404 });
+		expect(mockFs.stat).toHaveBeenCalledTimes(1);
 	});
 });
 

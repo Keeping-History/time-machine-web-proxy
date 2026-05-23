@@ -206,6 +206,34 @@ describe("rewriteHtmlUrls — archive-prefixed URLs", () => {
 		const { html: r } = rewriteHtmlUrls(html, TARGET, TIME);
 		expect(r).toContain(`/web/20191231235959/http://example.com/img.png`);
 	});
+
+	it("rewrites protocol-relative //web.archive.org with im_ modifier (downloader form)", () => {
+		const html = `<img src="//web.archive.org/web/20191231235959im_/http://example.com/img.png">`;
+		const { html: r } = rewriteHtmlUrls(html, TARGET, TIME);
+		expect(r).toContain(`/web/20191231235959/http://example.com/img.png`);
+		expect(r).not.toContain(`web.archive.org`);
+	});
+
+	it("rewrites protocol-relative //web.archive.org with no modifier", () => {
+		const html = `<a href="//web.archive.org/web/20191231235959/http://example.com/page">x</a>`;
+		const { html: r } = rewriteHtmlUrls(html, TARGET, TIME);
+		expect(r).toContain(`/web/20191231235959/http://example.com/page`);
+		expect(r).not.toContain(`web.archive.org`);
+	});
+
+	it("rewrites protocol-relative //web.archive.org with cs_ modifier in <link>", () => {
+		const html = `<link rel="stylesheet" href="//web.archive.org/web/20191231235959cs_/http://example.com/main.css">`;
+		const { html: r } = rewriteHtmlUrls(html, TARGET, TIME);
+		expect(r).toContain(`/web/20191231235959/http://example.com/main.css`);
+		expect(r).not.toContain(`web.archive.org`);
+	});
+
+	it("rewrites protocol-relative //web.archive.org cross-origin asset (not page host)", () => {
+		const html = `<img src="//web.archive.org/web/20010913100802im_/http://i.ihost.com/i/c.gif">`;
+		const { html: r } = rewriteHtmlUrls(html, TARGET, TIME);
+		expect(r).toContain(`/web/20010913100802/http://i.ihost.com/i/c.gif`);
+		expect(r).not.toContain(`web.archive.org`);
+	});
 });
 
 describe("rewriteHtmlUrls — relative URLs resolved against targetUrl", () => {
@@ -435,6 +463,13 @@ describe("rewriteCssUrls", () => {
 		const css = `background: url('data:image/png;base64,iVBORw0KGgo=')`;
 		const r = rewriteCssUrls(css, "http://example.com/page", TIME);
 		expect(r).toContain(`url('data:image/png;base64,iVBORw0KGgo=')`);
+	});
+
+	it("rewrites protocol-relative archive url() to path-based", () => {
+		const css = `background: url('//web.archive.org/web/20191231235959im_/http://example.com/img.png')`;
+		const r = rewriteCssUrls(css, "http://example.com/page", TIME);
+		expect(r).toContain(`url('/web/20191231235959/http://example.com/img.png')`);
+		expect(r).not.toContain(`web.archive.org`);
 	});
 });
 

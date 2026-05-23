@@ -23,6 +23,12 @@ export const generateShimScript = (ts: string, originalUrl: string): string => `
 
   // Opaque/non-network schemes that must never be rewritten.
   var SKIP_RE = /^(?:data:|blob:|javascript:|mailto:|tel:|sms:|about:|#)/i;
+  // Wayback wrappers embedded in cached JS/HTML (the downloader fetches via
+  // wayback's default mode, which rewrites URLs to /web/<ts>[mod_]/<url> form
+  // inside JS bodies). Without unwrapping these, the browser issues requests
+  // like /web/<page-ts>im_/http://web.archive.org/web/<inner-ts>/<url> — a
+  // doubly-wrapped path the proxy 404s on.
+  var WAYBACK_ABS_RE = /^(?:https?:)?\\/\\/web\\.archive\\.org\\/web\\/(\\d{1,14})(?:[a-z]{1,3}_)?\\/(https?:\\/\\/.+)$/i;
 
   function rewrite(url) {
     if (!url || typeof url !== 'string') return url;
@@ -30,6 +36,10 @@ export const generateShimScript = (ts: string, originalUrl: string): string => `
     if (!trimmed) return url;
     // Opaque schemes: pass through unchanged.
     if (SKIP_RE.test(trimmed)) return url;
+    // Wayback-wrapped (absolute or protocol-relative): unwrap to the embedded
+    // (ts, url) and emit a clean path-form URL the proxy understands.
+    var wm = trimmed.match(WAYBACK_ABS_RE);
+    if (wm) return '/web/' + wm[1] + '/' + wm[2];
     // Already proxied: idempotent pass-through.
     if (trimmed.indexOf('/web/') === 0) return url;
     // Resolve relative URLs against the original page URL.

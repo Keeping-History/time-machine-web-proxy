@@ -4,7 +4,11 @@ services:
     develop:
       watch:
         - path: ./
-          action: rebuild       # Trigger a full image rebuild
+          action: rebuild
+        - path: ./.env
+          action: rebuild
+        - path: ./.env.prod
+          action: rebuild
     env_file:
       - .env
     ports:
