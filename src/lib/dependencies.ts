@@ -155,7 +155,8 @@ export class Dependencies {
 			logger,
 			config.domainCrawlEnabled,
 		);
-		const proxy = new ProxyService(cache, archiveJobClient, logger, config, redis);
+		const directClient = buildDirectClient(config, logger);
+		const proxy = new ProxyService(cache, archiveJobClient, logger, config, redis, directClient);
 		const validator: UrlValidatorModule = { validateTargetUrl, isHostWhitelisted };
 
 		this.deps = {
