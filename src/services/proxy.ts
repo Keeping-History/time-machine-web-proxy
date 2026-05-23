@@ -2,6 +2,7 @@ import { promises as fs } from "node:fs";
 import type IORedis from "ioredis";
 import type pino from "pino";
 import type { ArchiveJobClientPort, JobProgressListener } from "../clients/archive-job-client";
+import type { DirectClient } from "../lib/dependencies";
 import { dayWindow } from "../lib/archive-time";
 import { rewriteCssUrls, rewriteHtmlUrls, stripWaybackToolbar } from "../lib/url-rewriter";
 import { isHostWhitelisted } from "../lib/url-validator";
@@ -23,13 +24,20 @@ const statusError = (message: string, status: number): StatusError =>
 	Object.assign(new Error(message), { status });
 
 /**
- * Proxy fetch pipeline (post-TASK-009):
+ * Proxy fetch pipeline (three-tier MISS resolution):
  *   1. cache.lookup(url, time) → CacheHit | null
- *   2. on MISS: archiveJobClient.enqueueExactAndWait → re-lookup
- *      (502 if still empty — worker completed but cache write failed)
- *   3. read file from disk
- *   4. HTML/CSS rewrites (binary returned as-is)
- *   5. on HTML MISS only: maybeEnqueueDomainCrawl (fire-and-forget),
+ *   2. on MISS — Tier 2 (direct fetch):
+ *        ok       → write to cache, set MISS_DIRECT, skip worker
+ *        not_found → write sentinel, throw 404
+ *        fallback  → fall through to Tier 3
+ *   3. on Tier 2 fallback — Tier 3 (worker):
+ *        enqueueExactAndWait → re-lookup → set MISS_WORKER
+ *        (502 if still empty — worker completed but cache write failed)
+ *   4. read file from disk
+ *   5. HTML/CSS rewrites (binary returned as-is)
+ *   6. on HTML response: fire-and-forget prewarm for each discoveredAsset
+ *      via fetchAtResolvedTime (Tier 1)
+ *   7. on HTML MISS only: maybeEnqueueDomainCrawl (fire-and-forget),
  *      gated by whitelist + Redis per-host 24h budget + CDX preflight cap
  *
  * SSRF policy is NOT enforced here. TimeMachineService.validateTargetUrl
@@ -46,6 +54,7 @@ export class ProxyService {
 			"whitelistHosts" | "crawlMaxCdxPages" | "bullmqPrefix" | "domainCrawlEnabled"
 		>,
 		private readonly redis: IORedis | null = null,
+		private readonly directClient: DirectClient | null = null,
 	) {}
 
 	async fetch(
@@ -55,22 +64,48 @@ export class ProxyService {
 	): Promise<ProxyResult> {
 		const u = new URL(targetUrl);
 		let hit = await this.cache.lookup(targetUrl, time);
-		let cacheStatus: "HIT" | "MISS" = "HIT";
+		let cacheStatus: "HIT" | "MISS_DIRECT" | "MISS_WORKER" = "HIT";
 
 		if (!hit) {
-			this.logger.info({ targetUrl, time }, "[CACHE MISS] enqueueing exact-url job");
-			// Only forward onProgress when defined so the client receives a clean
-			// 2-arg call in the no-callback case (avoids leaking `undefined` into
-			// jest.toHaveBeenCalledWith assertions and matches the spec).
-			if (onProgress) {
-				await this.archiveJobClient.enqueueExactAndWait(targetUrl, time, onProgress);
-			} else {
-				await this.archiveJobClient.enqueueExactAndWait(targetUrl, time);
+			// Tier 2: direct fetch (fast path)
+			if (this.directClient) {
+				const direct = await this.directClient.fetchAtRequestedTime(targetUrl, time);
+				if (direct.outcome === "ok" && direct.body) {
+					await this.cache.writeFile(targetUrl, time, direct.body);
+					if (direct.resolvedTime) {
+						await this.cache.writeResolvedTimeSidecar(time, targetUrl, direct.resolvedTime);
+					}
+					hit = await this.cache.lookup(targetUrl, time);
+					cacheStatus = "MISS_DIRECT";
+					this.logger.info({ targetUrl, time }, "[CACHE MISS_DIRECT] direct fetch ok");
+				} else if (direct.outcome === "not_found") {
+					await this.cache.writeNotFoundSentinel(time, targetUrl);
+					throw statusError(`Not in archive: ${targetUrl} @ ${time}`, 404);
+				} else {
+					// fallback: proceed to Tier 3 (worker)
+					this.logger.info(
+						{ targetUrl, time, reason: (direct as { reason?: string }).reason },
+						"[direct] fallback to worker",
+					);
+				}
 			}
-			hit = await this.cache.lookup(targetUrl, time);
-			cacheStatus = "MISS";
+
+			// Tier 3: worker (fallback or no directClient)
 			if (!hit) {
-				throw statusError(`Job completed but cache empty for ${targetUrl} @ ${time}`, 502);
+				this.logger.info({ targetUrl, time }, "[CACHE MISS] enqueueing exact-url job");
+				// Only forward onProgress when defined so the client receives a clean
+				// 2-arg call in the no-callback case (avoids leaking `undefined` into
+				// jest.toHaveBeenCalledWith assertions and matches the spec).
+				if (onProgress) {
+					await this.archiveJobClient.enqueueExactAndWait(targetUrl, time, onProgress);
+				} else {
+					await this.archiveJobClient.enqueueExactAndWait(targetUrl, time);
+				}
+				hit = await this.cache.lookup(targetUrl, time);
+				cacheStatus = "MISS_WORKER";
+				if (!hit) {
+					throw statusError(`Job completed but cache empty for ${targetUrl} @ ${time}`, 502);
+				}
 			}
 		} else {
 			this.logger.info({ targetUrl, time }, "[CACHE HIT]");
@@ -83,8 +118,30 @@ export class ProxyService {
 
 		if (isHtml) {
 			const stripped = stripWaybackToolbar(raw.toString("utf-8"));
-			body = rewriteHtmlUrls(stripped, targetUrl, time).html;
-			if (cacheStatus === "MISS") {
+			const { html, discoveredAssets } = rewriteHtmlUrls(stripped, targetUrl, time);
+			body = html;
+
+			// Tier 1 (prewarm): fire-and-forget prefetch of discovered assets.
+			// Errors are swallowed so prewarm failures never affect the foreground response.
+			if (this.directClient && discoveredAssets.length > 0) {
+				for (const asset of discoveredAssets) {
+					void this.directClient
+						.fetchAtResolvedTime(asset.url, asset.embeddedTs)
+						.then((result) => {
+							if (result.outcome === "ok" && result.body) {
+								return this.cache.writeFile(asset.url, asset.embeddedTs, result.body);
+							}
+						})
+						.catch((err: unknown) => {
+							this.logger.info(
+								{ url: asset.url, ts: asset.embeddedTs, error: err instanceof Error ? err.message : String(err) },
+								"[prewarm] asset prefetch error (ignored)",
+							);
+						});
+				}
+			}
+
+			if (cacheStatus !== "HIT") {
 				void this.maybeEnqueueDomainCrawl(u.hostname, time);
 			}
 		} else if (isCss) {

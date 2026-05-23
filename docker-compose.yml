@@ -1,13 +1,10 @@
 services:
   timemachine:
     build: .
-    # develop:
-    #   watch:
-    #     - path: ./package.json  # Monitor specific file
-    #       action: rebuild       # Trigger a full image rebuild
-    #     - path: ./src           # Monitor directory
-    #       action: sync          # Just sync files (useful for hot-reload)
-    #       target: /app/src
+    develop:
+      watch:
+        - path: ./
+          action: rebuild       # Trigger a full image rebuild
     env_file:
       - .env
     ports:

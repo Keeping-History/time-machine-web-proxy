@@ -36,6 +36,14 @@ const config: Config = {
 	snapshotWindowDays: [30, 365, 3650, 0],
 	allowLaterFallback: false,
 	assetLaterFallback: true,
+	directFetchEnabled: true,
+	directFetchMaxConcurrent: 10,
+	directFetchTimeoutMs: 15_000,
+	directFetchRatePerSec: 20,
+	directFetchBurst: 30,
+	prewarmEnabled: true,
+	prewarmMaxAssetsPerPage: 100,
+	notFoundTtlDays: 30,
 };
 
 type ProxyMock = jest.Mocked<Pick<ProxyService, "fetch" | "triggerDomainCrawl">>;
