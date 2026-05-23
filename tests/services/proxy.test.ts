@@ -52,6 +52,7 @@ const makeCache = (lookupImpl?: jest.Mock): jest.Mocked<CacheService> =>
 		writeFile: jest.fn().mockResolvedValue(undefined),
 		writeNotFoundSentinel: jest.fn().mockResolvedValue(undefined),
 		writeResolvedTimeSidecar: jest.fn().mockResolvedValue(undefined),
+		writeContentTypeSidecar: jest.fn().mockResolvedValue(undefined),
 	}) as unknown as jest.Mocked<CacheService>;
 
 const makeClient = (): jest.Mocked<ArchiveJobClientPort> => ({
@@ -281,6 +282,71 @@ describe("ProxyService.fetch — Tier 2 direct fetch", () => {
 		expect(cache.writeFile).toHaveBeenCalledWith(TARGET_HTML_URL, TIME, directBody);
 		expect(cache.writeResolvedTimeSidecar).toHaveBeenCalledWith(TIME, TARGET_HTML_URL, "20200101010000");
 		expect(lookup).toHaveBeenCalledTimes(2);
+	});
+
+	it("MISS_DIRECT: writes content-type sidecar when direct returns a Content-Type", async () => {
+		// Regression: without the sidecar, a re-lookup of /r/ci (no extension)
+		// would fall back to application/octet-stream and the browser would
+		// download instead of render. Verify the proxy persists the upstream
+		// type so the next read serves the right Content-Type.
+		const lookup = jest
+			.fn<Promise<CacheHit | null>, [string, string]>()
+			.mockResolvedValueOnce(null)
+			.mockResolvedValueOnce(htmlHit);
+		const cache = makeCache(lookup);
+		const client = makeClient();
+		const directClient = makeDirectClient();
+		directClient.fetchAtRequestedTime.mockResolvedValue({
+			outcome: "ok",
+			body: Buffer.from(PLAIN_HTML_BODY),
+			contentType: "text/html; charset=utf-8",
+			resolvedTime: "20200101010000",
+		});
+		mockedReadFile.mockResolvedValue(Buffer.from(PLAIN_HTML_BODY));
+		const svc = new ProxyService(
+			cache,
+			client,
+			logger,
+			{ ...baseConfig, whitelistHosts: "other.com" },
+			null,
+			directClient,
+		);
+
+		await svc.fetch("http://www.yahoo.com/r/ci", TIME);
+
+		expect(cache.writeContentTypeSidecar).toHaveBeenCalledWith(
+			"http://www.yahoo.com/r/ci",
+			TIME,
+			"text/html; charset=utf-8",
+		);
+	});
+
+	it("MISS_DIRECT: ok WITHOUT contentType skips writeContentTypeSidecar", async () => {
+		const lookup = jest
+			.fn<Promise<CacheHit | null>, [string, string]>()
+			.mockResolvedValueOnce(null)
+			.mockResolvedValueOnce(htmlHit);
+		const cache = makeCache(lookup);
+		const client = makeClient();
+		const directClient = makeDirectClient();
+		directClient.fetchAtRequestedTime.mockResolvedValue({
+			outcome: "ok",
+			body: Buffer.from(PLAIN_HTML_BODY),
+			// no contentType on the direct result
+		});
+		mockedReadFile.mockResolvedValue(Buffer.from(PLAIN_HTML_BODY));
+		const svc = new ProxyService(
+			cache,
+			client,
+			logger,
+			{ ...baseConfig, whitelistHosts: "other.com" },
+			null,
+			directClient,
+		);
+
+		await svc.fetch(TARGET_HTML_URL, TIME);
+
+		expect(cache.writeContentTypeSidecar).not.toHaveBeenCalled();
 	});
 
 	it("MISS_DIRECT: ok without resolvedTime skips writeResolvedTimeSidecar", async () => {

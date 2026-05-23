@@ -16,6 +16,13 @@ const TMP_SUFFIX = ".tmp";
 // sentinel so the next request fails fast without burning another 47s on
 // BullMQ retries. After expiry the URL gets retried in case CDX has recovered.
 const TENTATIVE_NOT_FOUND_TTL_MS = 60 * 60 * 1000;
+// Per-URL subdir holding upstream Content-Type strings written by the direct
+// fetch path. Lives under <root>/.content-types/<sha-16> so a request for a
+// URL that happens to look like `/r/ci.tmctype` can't read the metadata.
+const CONTENT_TYPE_SUBDIR = ".content-types";
+// Bytes inspected by sniffContentType when extension lookup yields nothing.
+// Generous enough to cover `<!DOCTYPE html ... >` with leading whitespace.
+const SNIFF_BYTES = 1024;
 
 export interface CacheHit {
 	absPath: string;
@@ -83,7 +90,7 @@ export class CacheService {
 		const isDirStyle = decoded === "/" || decoded.endsWith("/");
 		try {
 			await fs.access(primaryAbs);
-			const contentType = mimeLookup(extname(primaryAbs)) || "application/octet-stream";
+			const contentType = await this.resolveContentType(primaryAbs, url, time);
 			const archiveTime = await this.readResolvedTime(time, u.hostname);
 			return { absPath: primaryAbs, contentType, archiveTime };
 		} catch {
@@ -174,6 +181,52 @@ export class CacheService {
 		await fs.writeFile(join(root, ".resolved-time"), resolvedTime);
 	}
 
+	/**
+	 * Persist the upstream Content-Type for a directly-fetched URL. Read back
+	 * on lookup so URLs whose path has no useful extension (e.g. /r/ci,
+	 * /search) serve with the real type instead of application/octet-stream
+	 * (which makes browsers download the file).
+	 */
+	async writeContentTypeSidecar(url: string, time: string, contentType: string): Promise<void> {
+		const abs = this.buildPerUrlSubpath(time, url, CONTENT_TYPE_SUBDIR);
+		await fs.mkdir(dirname(abs), { recursive: true });
+		await fs.writeFile(abs, contentType);
+	}
+
+	/**
+	 * Resolves the response Content-Type for a cache hit, in priority order:
+	 *   1. `.content-types/<key>` sidecar — authoritative; the direct-fetch
+	 *      path writes the upstream header here.
+	 *   2. `mime-types` lookup against the file extension — covers nearly all
+	 *      assets (`.html`, `.css`, `.png`, …) cheaply.
+	 *   3. Content sniffing — only invoked when the URL path has no extension
+	 *      at all (e.g. `/r/ci`). Such files are overwhelmingly HTML in
+	 *      practice; without this they'd serve as octet-stream and download.
+	 *   4. `application/octet-stream` fallback.
+	 */
+	private async resolveContentType(absPath: string, url: string, time: string): Promise<string> {
+		try {
+			const sidecar = this.buildPerUrlSubpath(time, url, CONTENT_TYPE_SUBDIR);
+			const raw = await fs.readFile(sidecar, "utf-8");
+			const trimmed = raw?.trim();
+			if (trimmed) return trimmed;
+		} catch {
+			/* no sidecar — fall through */
+		}
+		const ext = extname(absPath);
+		const fromExt = mimeLookup(ext);
+		if (fromExt) return fromExt;
+		// Only sniff when there's no extension at all. Files with an unknown
+		// extension (`.unknownext`) are likely custom binaries; sniffing them
+		// would be wasted I/O and risk false-positive HTML detection on
+		// pathological inputs.
+		if (!ext) {
+			const sniffed = await sniffContentType(absPath);
+			if (sniffed) return sniffed;
+		}
+		return "application/octet-stream";
+	}
+
 	private async readResolvedTime(time: string, hostname: string): Promise<string | undefined> {
 		const root = this.cacheDirForJob(time, hostname);
 		try {
@@ -198,14 +251,21 @@ export class CacheService {
 	}
 
 	private sentinelPath(time: string, url: string): string {
-		return this.buildSentinelPath(time, url, ".notfound");
+		return this.buildPerUrlSubpath(time, url, ".notfound");
 	}
 
 	private tentativeSentinelPath(time: string, url: string): string {
-		return this.buildSentinelPath(time, url, ".notfound-tentative");
+		return this.buildPerUrlSubpath(time, url, ".notfound-tentative");
 	}
 
-	private buildSentinelPath(time: string, url: string, subdir: string): string {
+	/**
+	 * Per-URL path under `<root>/<subdir>/<sha-16>`, keyed by a sha256 prefix
+	 * of `protocol+host+path+search`. Shared by sentinels (.notfound,
+	 * .notfound-tentative) and the content-type sidecar (.content-types) so
+	 * none of them can collide with a user URL even one that ends in a
+	 * dot-segment.
+	 */
+	private buildPerUrlSubpath(time: string, url: string, subdir: string): string {
 		const u = new URL(url);
 		const root = this.cacheDirForJob(time, u.hostname);
 		const key = createHash("sha256")
@@ -214,7 +274,7 @@ export class CacheService {
 			.slice(0, 16);
 		const abs = resolve(root, subdir, key);
 		if (!abs.startsWith(root + sep)) {
-			throw Object.assign(new Error("Sentinel path traversal rejected"), { status: 400 });
+			throw Object.assign(new Error("Per-URL subpath traversal rejected"), { status: 400 });
 		}
 		return abs;
 	}
@@ -307,5 +367,46 @@ export class CacheService {
 			return host === apex || host.endsWith(suffix);
 		}
 		return host === filter;
+	}
+}
+
+/**
+ * Best-effort Content-Type detection by reading the first SNIFF_BYTES of a
+ * file. Returns `null` if no recognised signature is present so the caller
+ * falls through to its own default (octet-stream).
+ *
+ * Intentionally narrow: only matches signatures that the worker path (which
+ * persists raw bytes with no upstream header) realistically produces for
+ * extensionless URLs — old-web redirect pages and dynamic HTML endpoints.
+ * We don't infer application/json from a leading `{` because JS literals
+ * embedded in HTML or text files would match.
+ */
+async function sniffContentType(absPath: string): Promise<string | null> {
+	try {
+		const raw = await fs.readFile(absPath);
+		if (!raw || raw.length === 0) return null;
+		const buf = raw instanceof Buffer ? raw : Buffer.from(raw);
+		const head = buf
+			.subarray(0, Math.min(SNIFF_BYTES, buf.length))
+			.toString("utf-8")
+			.trimStart()
+			.toLowerCase();
+		if (
+			head.startsWith("<!doctype") ||
+			head.startsWith("<html") ||
+			head.startsWith("<head") ||
+			head.startsWith("<body") ||
+			head.startsWith("<frameset") ||
+			head.startsWith("<title") ||
+			head.startsWith("<meta")
+		) {
+			return "text/html; charset=utf-8";
+		}
+		if (head.startsWith("<?xml")) {
+			return "application/xml";
+		}
+		return null;
+	} catch {
+		return null;
 	}
 }

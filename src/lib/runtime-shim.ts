@@ -25,9 +25,9 @@ export const generateShimScript = (ts: string, originalUrl: string): string => `
   var SKIP_RE = /^(?:data:|blob:|javascript:|mailto:|tel:|sms:|about:|#)/i;
   // Wayback wrappers embedded in cached JS/HTML (the downloader fetches via
   // wayback's default mode, which rewrites URLs to /web/<ts>[mod_]/<url> form
-  // inside JS bodies). Without unwrapping these, the browser issues requests
-  // like /web/<page-ts>im_/http://web.archive.org/web/<inner-ts>/<url> — a
-  // doubly-wrapped path the proxy 404s on.
+  // inside JS bodies). Without unwrapping these, the browser issues
+  // doubly-wrapped paths the proxy 404s on:
+  //   /web/<page-ts>im_/<archive-host>/web/<inner-ts>/<url>
   var WAYBACK_ABS_RE = /^(?:https?:)?\\/\\/web\\.archive\\.org\\/web\\/(\\d{1,14})(?:[a-z]{1,3}_)?\\/(https?:\\/\\/.+)$/i;
 
   function rewrite(url) {
