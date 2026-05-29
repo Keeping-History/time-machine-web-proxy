@@ -463,7 +463,11 @@ describe("CacheService.writeNotFoundSentinel + sentinel-aware lookup", () => {
 		await svc.lookup(URL, TIME);
 
 		expect(logSpy).toHaveBeenCalledWith(
-			expect.objectContaining({ sentinel: expect.any(String), ageMs: expect.any(Number), ttlMs: expect.any(Number) }),
+			expect.objectContaining({
+				sentinel: expect.any(String),
+				ageMs: expect.any(Number),
+				ttlMs: expect.any(Number),
+			}),
 			"[cache] sentinel-expired",
 		);
 	});
@@ -584,9 +588,9 @@ describe("CacheService.computeAbsPath", () => {
 	// Criterion 2: path-traversal payloads reject with HTTP 400
 	it("rejects percent-encoded traversal (%2e%2e/etc/passwd) with status 400", () => {
 		const svc = makeService();
-		expect(() =>
-			svc.computeAbsPath("https://example.com/%2e%2e%2fetc%2fpasswd", TIME),
-		).toThrow(expect.objectContaining({ status: 400 }));
+		expect(() => svc.computeAbsPath("https://example.com/%2e%2e%2fetc%2fpasswd", TIME)).toThrow(
+			expect.objectContaining({ status: 400 }),
+		);
 	});
 
 	it("rejects deeply nested percent-encoded traversal with status 400", () => {
@@ -673,10 +677,7 @@ describe("CacheService.writeFile", () => {
 		await svc.writeFile(url, TIME, Buffer.from("var x=1;"));
 
 		const writtenPath = (mockFs.writeFile as jest.Mock).mock.calls[0][0] as string;
-		const [renameSrc, renameDest] = (mockFs.rename as jest.Mock).mock.calls[0] as [
-			string,
-			string,
-		];
+		const [renameSrc, renameDest] = (mockFs.rename as jest.Mock).mock.calls[0] as [string, string];
 
 		// tmp file path must differ from destination
 		expect(writtenPath).not.toBe(dest);

@@ -278,9 +278,7 @@ describe("ArchiveJobClient.enqueueExactAndWait", () => {
 		const exactQueue: FakeQueue = { add: jest.fn().mockResolvedValue(job) };
 		const { client, exactEvents } = makeClient({ exactQueue });
 		const onProgress = jest.fn();
-		await expect(
-			client.enqueueExactAndWait(TARGET_URL, TIME, onProgress),
-		).rejects.toThrow("boom");
+		await expect(client.enqueueExactAndWait(TARGET_URL, TIME, onProgress)).rejects.toThrow("boom");
 		expect(exactEvents.off).toHaveBeenCalledWith("progress", expect.any(Function));
 	});
 

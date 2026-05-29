@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { Agent, type Headers, ProxyAgent, fetch } from "undici";
+import { Agent, fetch, type Headers, ProxyAgent } from "undici";
 
 export interface FetchResult {
 	label: string;
@@ -57,13 +57,8 @@ export async function fetchOne(
 		});
 		const buf = Buffer.from(await response.arrayBuffer());
 		const contentLengthHeader = response.headers.get("content-length");
-		const contentLength =
-			contentLengthHeader != null ? Number(contentLengthHeader) : null;
-		const preview = buf
-			.subarray(0, PREVIEW_CHARS)
-			.toString("utf8")
-			.replace(/\s+/g, " ")
-			.trim();
+		const contentLength = contentLengthHeader != null ? Number(contentLengthHeader) : null;
+		const preview = buf.subarray(0, PREVIEW_CHARS).toString("utf8").replace(/\s+/g, " ").trim();
 
 		return {
 			label,
@@ -106,9 +101,7 @@ export function buildProxyAgent(proxyUrl: string): ProxyAgent {
 	const username = process.env.OUTBOUND_PROXY_USERNAME;
 	const password = process.env.OUTBOUND_PROXY_PASSWORD;
 	const token =
-		username && password
-			? Buffer.from(`${username}:${password}`).toString("base64")
-			: null;
+		username && password ? Buffer.from(`${username}:${password}`).toString("base64") : null;
 	return new ProxyAgent({
 		uri: proxyUrl,
 		token: token ? `Basic ${token}` : undefined,

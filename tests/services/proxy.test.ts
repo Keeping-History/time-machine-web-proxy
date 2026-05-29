@@ -253,7 +253,7 @@ describe("ProxyService.fetch — Tier 2 direct fetch", () => {
 	it("MISS_DIRECT: directClient ok → writeFile, re-lookup, enqueueExactAndWait NOT called", async () => {
 		const lookup = jest
 			.fn<Promise<CacheHit | null>, [string, string]>()
-			.mockResolvedValueOnce(null)   // initial lookup → MISS
+			.mockResolvedValueOnce(null) // initial lookup → MISS
 			.mockResolvedValueOnce(htmlHit); // re-lookup after writeFile
 		const cache = makeCache(lookup);
 		const client = makeClient();
@@ -280,7 +280,11 @@ describe("ProxyService.fetch — Tier 2 direct fetch", () => {
 		expect(result.cache).toBe("MISS_DIRECT");
 		expect(client.enqueueExactAndWait).not.toHaveBeenCalled();
 		expect(cache.writeFile).toHaveBeenCalledWith(TARGET_HTML_URL, TIME, directBody);
-		expect(cache.writeResolvedTimeSidecar).toHaveBeenCalledWith(TIME, TARGET_HTML_URL, "20200101010000");
+		expect(cache.writeResolvedTimeSidecar).toHaveBeenCalledWith(
+			TIME,
+			TARGET_HTML_URL,
+			"20200101010000",
+		);
 		expect(lookup).toHaveBeenCalledTimes(2);
 	});
 
@@ -388,7 +392,7 @@ describe("ProxyService.fetch — Tier 2 direct fetch", () => {
 	it("Tier 2 fallback → Tier 3 worker invoked, cacheStatus is MISS_WORKER", async () => {
 		const lookup = jest
 			.fn<Promise<CacheHit | null>, [string, string]>()
-			.mockResolvedValueOnce(null)   // initial lookup
+			.mockResolvedValueOnce(null) // initial lookup
 			.mockResolvedValueOnce(htmlHit); // re-lookup after worker
 		const cache = makeCache(lookup);
 		const client = makeClient();
@@ -474,7 +478,9 @@ describe("ProxyService.fetch — Tier 1 prewarm (fire-and-forget)", () => {
 		const client = makeClient();
 		const directClient = makeDirectClient();
 		let prewarmResolve!: () => void;
-		const prewarmBarrier = new Promise<void>((r) => { prewarmResolve = r; });
+		const prewarmBarrier = new Promise<void>((r) => {
+			prewarmResolve = r;
+		});
 		directClient.fetchAtResolvedTime.mockReturnValue(
 			prewarmBarrier.then(() => ({ outcome: "fallback" as const, reason: "test" })),
 		);

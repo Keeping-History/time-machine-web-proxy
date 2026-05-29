@@ -18,8 +18,7 @@ const CDX_TIMEOUT_MS = 30_000;
 const CDX_RETRY_MAX_ATTEMPTS = 3;
 const CDX_RETRY_BASE_DELAY_MS = 500;
 
-const sleep = (ms: number): Promise<void> =>
-	new Promise((resolve) => setTimeout(resolve, ms));
+const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
 const isRetryableStatus = (status: number): boolean => status === 429 || status >= 500;
 
@@ -171,20 +170,14 @@ async function cdxQuery(
 		} catch (e) {
 			const detail = e instanceof Error ? e.message : String(e);
 			lastReason = { kind: "transport", detail };
-			logger.debug(
-				{ url, attempt, error: detail },
-				"[snapshot-resolver] CDX fetch failed",
-			);
+			logger.debug({ url, attempt, error: detail }, "[snapshot-resolver] CDX fetch failed");
 			if (isLastAttempt) return giveUp(logger, url, lastReason, startedAt, attempt);
 			await sleep(CDX_RETRY_BASE_DELAY_MS * 2 ** (attempt - 1));
 			continue;
 		}
 		if (!res.ok) {
 			lastReason = { kind: "non-ok", detail: `HTTP ${res.status}` };
-			logger.debug(
-				{ url, attempt, status: res.status },
-				"[snapshot-resolver] CDX non-OK",
-			);
+			logger.debug({ url, attempt, status: res.status }, "[snapshot-resolver] CDX non-OK");
 			// 4xx (except 429) are not transient — no amount of retry will fix
 			// a malformed query. Give up immediately so we don't waste budget.
 			if (!isRetryableStatus(res.status) || isLastAttempt) {
@@ -209,9 +202,7 @@ async function cdxQuery(
 		tracker.anyOk = true;
 		if (!Array.isArray(json) || json.length === 0) return [];
 		const rows =
-			Array.isArray(json[0]) && (json[0] as unknown[])[0] === "timestamp"
-				? json.slice(1)
-				: json;
+			Array.isArray(json[0]) && (json[0] as unknown[])[0] === "timestamp" ? json.slice(1) : json;
 		const timestamps: string[] = [];
 		for (const row of rows) {
 			const ts = Array.isArray(row) ? row[0] : null;

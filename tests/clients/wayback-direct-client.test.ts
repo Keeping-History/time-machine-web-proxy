@@ -84,9 +84,7 @@ describe("WaybackDirectClient.fetchAtResolvedTime", () => {
 	});
 
 	it("constructs the correct id_ URL", async () => {
-		globalThis.fetch = jest
-			.fn()
-			.mockResolvedValue(makeFetchResponse({ status: 200, body: "" }));
+		globalThis.fetch = jest.fn().mockResolvedValue(makeFetchResponse({ status: 200, body: "" }));
 		const client = makeClient({ ratePerSecond: 1000, burst: 1000 });
 		await client.fetchAtResolvedTime("http://example.com/page", "20200615120000");
 		expect(globalThis.fetch).toHaveBeenCalledWith(
@@ -96,9 +94,7 @@ describe("WaybackDirectClient.fetchAtResolvedTime", () => {
 	});
 
 	it("returns not_found on HTTP 404", async () => {
-		globalThis.fetch = jest
-			.fn()
-			.mockResolvedValue(makeFetchResponse({ status: 404 }));
+		globalThis.fetch = jest.fn().mockResolvedValue(makeFetchResponse({ status: 404 }));
 		const client = makeClient({ ratePerSecond: 1000, burst: 1000 });
 		const result = await client.fetchAtResolvedTime("http://example.com/", "20200101000000");
 		expect(result.outcome).toBe("not_found");
@@ -106,9 +102,7 @@ describe("WaybackDirectClient.fetchAtResolvedTime", () => {
 
 	it("returns fallback on 3xx (redirect: manual)", async () => {
 		for (const status of [301, 302, 307, 308]) {
-			globalThis.fetch = jest
-				.fn()
-				.mockResolvedValue(makeFetchResponse({ status }));
+			globalThis.fetch = jest.fn().mockResolvedValue(makeFetchResponse({ status }));
 			const client = makeClient({ ratePerSecond: 1000, burst: 1000 });
 			const result = await client.fetchAtResolvedTime("http://example.com/", "20200101000000");
 			expect(result.outcome).toBe("fallback");
@@ -117,9 +111,7 @@ describe("WaybackDirectClient.fetchAtResolvedTime", () => {
 	});
 
 	it("returns fallback on 5xx", async () => {
-		globalThis.fetch = jest
-			.fn()
-			.mockResolvedValue(makeFetchResponse({ status: 503 }));
+		globalThis.fetch = jest.fn().mockResolvedValue(makeFetchResponse({ status: 503 }));
 		const client = makeClient({ ratePerSecond: 1000, burst: 1000 });
 		const result = await client.fetchAtResolvedTime("http://example.com/", "20200101000000");
 		expect(result.outcome).toBe("fallback");
@@ -151,9 +143,7 @@ describe("WaybackDirectClient.fetchAtResolvedTime", () => {
 	});
 
 	it("uses redirect: 'manual' in the fetch call", async () => {
-		globalThis.fetch = jest
-			.fn()
-			.mockResolvedValue(makeFetchResponse({ status: 200, body: "" }));
+		globalThis.fetch = jest.fn().mockResolvedValue(makeFetchResponse({ status: 200, body: "" }));
 		const client = makeClient({ ratePerSecond: 1000, burst: 1000 });
 		await client.fetchAtResolvedTime("http://example.com/", "20200101000000");
 		const [, opts] = (globalThis.fetch as jest.Mock).mock.calls[0] as [string, RequestInit];
@@ -161,9 +151,7 @@ describe("WaybackDirectClient.fetchAtResolvedTime", () => {
 	});
 
 	it("passes AbortSignal.timeout to fetch (respects timeoutMs)", async () => {
-		globalThis.fetch = jest
-			.fn()
-			.mockResolvedValue(makeFetchResponse({ status: 200, body: "" }));
+		globalThis.fetch = jest.fn().mockResolvedValue(makeFetchResponse({ status: 200, body: "" }));
 		const client = makeClient({ ratePerSecond: 1000, burst: 1000, timeoutMs: 5000 });
 		await client.fetchAtResolvedTime("http://example.com/", "20200101000000");
 		const [, opts] = (globalThis.fetch as jest.Mock).mock.calls[0] as [string, RequestInit];
@@ -187,8 +175,7 @@ describe("WaybackDirectClient.fetchAtRequestedTime", () => {
 	});
 
 	it("returns ok with resolvedTime parsed from the final response URL", async () => {
-		const finalUrl =
-			"https://web.archive.org/web/20200615120000id_/http://example.com/page";
+		const finalUrl = "https://web.archive.org/web/20200615120000id_/http://example.com/page";
 		globalThis.fetch = jest.fn().mockResolvedValue(
 			makeFetchResponse({
 				status: 200,
@@ -205,9 +192,9 @@ describe("WaybackDirectClient.fetchAtRequestedTime", () => {
 	});
 
 	it("constructs the correct im_ URL", async () => {
-		globalThis.fetch = jest.fn().mockResolvedValue(
-			makeFetchResponse({ status: 200, url: "", body: "" }),
-		);
+		globalThis.fetch = jest
+			.fn()
+			.mockResolvedValue(makeFetchResponse({ status: 200, url: "", body: "" }));
 		const client = makeClient({ ratePerSecond: 1000, burst: 1000 });
 		await client.fetchAtRequestedTime("http://example.com/", "20200101000000");
 		expect(globalThis.fetch).toHaveBeenCalledWith(
@@ -217,18 +204,14 @@ describe("WaybackDirectClient.fetchAtRequestedTime", () => {
 	});
 
 	it("returns not_found on HTTP 404", async () => {
-		globalThis.fetch = jest
-			.fn()
-			.mockResolvedValue(makeFetchResponse({ status: 404 }));
+		globalThis.fetch = jest.fn().mockResolvedValue(makeFetchResponse({ status: 404 }));
 		const client = makeClient({ ratePerSecond: 1000, burst: 1000 });
 		const result = await client.fetchAtRequestedTime("http://example.com/", "20200101000000");
 		expect(result.outcome).toBe("not_found");
 	});
 
 	it("returns fallback on 5xx", async () => {
-		globalThis.fetch = jest
-			.fn()
-			.mockResolvedValue(makeFetchResponse({ status: 500 }));
+		globalThis.fetch = jest.fn().mockResolvedValue(makeFetchResponse({ status: 500 }));
 		const client = makeClient({ ratePerSecond: 1000, burst: 1000 });
 		const result = await client.fetchAtRequestedTime("http://example.com/", "20200101000000");
 		expect(result.outcome).toBe("fallback");
@@ -267,9 +250,9 @@ describe("WaybackDirectClient.fetchAtRequestedTime", () => {
 	});
 
 	it("follows redirects (redirect: 'follow')", async () => {
-		globalThis.fetch = jest.fn().mockResolvedValue(
-			makeFetchResponse({ status: 200, url: "", body: "" }),
-		);
+		globalThis.fetch = jest
+			.fn()
+			.mockResolvedValue(makeFetchResponse({ status: 200, url: "", body: "" }));
 		const client = makeClient({ ratePerSecond: 1000, burst: 1000 });
 		await client.fetchAtRequestedTime("http://example.com/", "20200101000000");
 		const [, opts] = (globalThis.fetch as jest.Mock).mock.calls[0] as [string, RequestInit];
@@ -287,9 +270,7 @@ describe("WaybackDirectClient token bucket", () => {
 	beforeEach(() => {
 		originalFetch = globalThis.fetch;
 		// Minimal fetch stub that resolves immediately
-		globalThis.fetch = jest.fn().mockResolvedValue(
-			makeFetchResponse({ status: 200, body: "" }),
-		);
+		globalThis.fetch = jest.fn().mockResolvedValue(makeFetchResponse({ status: 200, body: "" }));
 		jest.useFakeTimers();
 	});
 

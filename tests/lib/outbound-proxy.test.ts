@@ -154,15 +154,16 @@ describe("installOutboundProxy", () => {
 			).toBe(2);
 			// The "all probes failed → install anyway" warning fires once.
 			expect(
-				errorSpy.mock.calls.filter((c) =>
-					typeof c[1] === "string" && c[1].startsWith("[outbound-proxy] all startup probes failed"),
+				errorSpy.mock.calls.filter(
+					(c) =>
+						typeof c[1] === "string" &&
+						c[1].startsWith("[outbound-proxy] all startup probes failed"),
 				).length,
 			).toBe(1);
 			// Both agents seeded in cooldown.
 			expect(
-				errorSpy.mock.calls.filter(
-					(c) => c[1] === "[outbound-proxy] proxy taken out of rotation",
-				).length,
+				errorSpy.mock.calls.filter((c) => c[1] === "[outbound-proxy] proxy taken out of rotation")
+					.length,
 			).toBe(2);
 		});
 
@@ -182,8 +183,10 @@ describe("installOutboundProxy", () => {
 			);
 			expect(setGlobalDispatcherMock).toHaveBeenCalledTimes(1);
 			expect(
-				errorSpy.mock.calls.filter((c) =>
-					typeof c[1] === "string" && c[1].startsWith("[outbound-proxy] all startup probes failed"),
+				errorSpy.mock.calls.filter(
+					(c) =>
+						typeof c[1] === "string" &&
+						c[1].startsWith("[outbound-proxy] all startup probes failed"),
 				).length,
 			).toBe(1);
 		});

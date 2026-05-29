@@ -1,9 +1,4 @@
-import {
-	TEST_URLS,
-	buildDirectAgent,
-	fetchOne,
-	printResult,
-} from "./archive-fetch-lib.js";
+import { buildDirectAgent, fetchOne, printResult, TEST_URLS } from "./archive-fetch-lib.js";
 
 async function main(): Promise<void> {
 	const agent = buildDirectAgent();

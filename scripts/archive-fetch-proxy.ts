@@ -1,9 +1,4 @@
-import {
-	TEST_URLS,
-	buildProxyAgent,
-	fetchOne,
-	printResult,
-} from "./archive-fetch-lib.js";
+import { buildProxyAgent, fetchOne, printResult, TEST_URLS } from "./archive-fetch-lib.js";
 
 const DEFAULT_PROXY_URL = "http://us-ca.proxymesh.com:31280";
 

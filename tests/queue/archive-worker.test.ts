@@ -385,7 +385,16 @@ describe("attachQueueLogger progress event", () => {
 			logger,
 		);
 		expect(events.on).toHaveBeenCalledWith("progress", expect.any(Function));
-		handlers.progress({ jobId: "p1", data: { stage: "resolved", jobId: "p1", queue: "archive-exact", ts: 1, resolved: "20200115000000" } });
+		handlers.progress({
+			jobId: "p1",
+			data: {
+				stage: "resolved",
+				jobId: "p1",
+				queue: "archive-exact",
+				ts: 1,
+				resolved: "20200115000000",
+			},
+		});
 		expect(logger.debug).toHaveBeenCalledWith(
 			expect.objectContaining({
 				queue: "archive-exact",
@@ -595,11 +604,13 @@ describe("exact worker processor", () => {
 		// progress stage="error", and foreground requests would still wait
 		// ~47s before 404'ing on retry.
 		const cache = makeCache();
-		const resolver = jest.fn().mockRejectedValue(
-			new Error(
-				"[snapshot-resolver] all CDX queries failed (transport/non-OK/parse) — refusing to claim 'no snapshot' on indeterminate state",
-			),
-		);
+		const resolver = jest
+			.fn()
+			.mockRejectedValue(
+				new Error(
+					"[snapshot-resolver] all CDX queries failed (transport/non-OK/parse) — refusing to claim 'no snapshot' on indeterminate state",
+				),
+			);
 		startArchiveWorkers(baseOpts({ cache, resolver }));
 		const worker = findWorker(QUEUE_EXACT);
 		await expect(

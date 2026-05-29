@@ -12,11 +12,7 @@ import { dayWindow } from "../lib/archive-time";
 import { installDownloaderLogging, runWithDownloaderLogging } from "../lib/downloader-logger";
 import { normalizeBaseUrlInput } from "../lib/normalize-base-url";
 import { isAssetUrl } from "../lib/url-rewriter";
-import type {
-	JobProgress,
-	JobProgressQueue,
-	JobProgressStage,
-} from "../models/job-progress";
+import type { JobProgress, JobProgressQueue, JobProgressStage } from "../models/job-progress";
 import type { CacheService } from "../services/cache";
 import { assertDomainCrawlJob, assertExactUrlJob, QUEUE_CRAWL, QUEUE_EXACT } from "./jobs";
 
@@ -214,10 +210,7 @@ export function startArchiveWorkers(opts: StartArchiveWorkersOpts): ArchiveWorke
 				// sees the page state at the time they asked for.
 				const isAsset = isAssetUrl(url);
 				const allowLaterFallback = isAsset ? allowLaterFallbackAsset : allowLaterFallbackDirect;
-				logger.info(
-					{ url, time, directory, isAsset, allowLaterFallback },
-					"[worker:exact] start",
-				);
+				logger.info({ url, time, directory, isAsset, allowLaterFallback }, "[worker:exact] start");
 				await emitProgress(job, QUEUE_EXACT, "availability_start", logger, { url, time });
 				const resolved = await resolver(base.variants, time, allowLaterFallback);
 				if (resolved === null) {

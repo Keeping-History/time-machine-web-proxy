@@ -59,11 +59,7 @@ export type JobProgressListener = (progress: JobProgress) => void;
  * can swap in a real or stub instance without breaking ProxyService.
  */
 export interface ArchiveJobClientPort {
-	enqueueExactAndWait(
-		url: string,
-		time: string,
-		onProgress?: JobProgressListener,
-	): Promise<void>;
+	enqueueExactAndWait(url: string, time: string, onProgress?: JobProgressListener): Promise<void>;
 	enqueueDomainCrawl(host: string, time: string): Promise<void>;
 }
 
@@ -111,13 +107,7 @@ export class ArchiveJobClient implements ArchiveJobClientPort {
 		// `{ jobId, data }` where data is the JobProgress we passed to
 		// updateProgress in the worker. Unsubscribe in finally so a hung
 		// callback can't leak listeners across calls.
-		const progressHandler = ({
-			jobId: evJobId,
-			data,
-		}: {
-			jobId: string;
-			data: unknown;
-		}): void => {
+		const progressHandler = ({ jobId: evJobId, data }: { jobId: string; data: unknown }): void => {
 			if (evJobId !== job.id) return;
 			if (!onProgress) return;
 			if (!isJobProgress(data)) return;

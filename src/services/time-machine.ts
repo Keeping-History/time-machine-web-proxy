@@ -171,9 +171,7 @@ export class TimeMachineService {
 					res.setHeader("Content-Type", "application/json");
 					res
 						.writeHead(500)
-						.end(
-							JSON.stringify({ error: e instanceof Error ? e.message : "status probe failed" }),
-						);
+						.end(JSON.stringify({ error: e instanceof Error ? e.message : "status probe failed" }));
 					this.logRequest(req, 500, start);
 				}
 				return;

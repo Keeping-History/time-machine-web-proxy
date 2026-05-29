@@ -1,4 +1,4 @@
-import type { ResolvedResult, RequestedResult, WaybackDirectClient } from "./wayback-direct-client";
+import type { RequestedResult, ResolvedResult, WaybackDirectClient } from "./wayback-direct-client";
 
 export interface DedupingDirectClientOptions {
 	maxConcurrency?: number;
@@ -62,10 +62,7 @@ export class DedupingDirectClient {
 	// Dedup + semaphore wrapper
 	// ---------------------------------------------------------------------------
 
-	private dedupedFetch<T extends ResolvedResult>(
-		key: string,
-		fn: () => Promise<T>,
-	): Promise<T> {
+	private dedupedFetch<T extends ResolvedResult>(key: string, fn: () => Promise<T>): Promise<T> {
 		const existing = this.inflight.get(key);
 		if (existing) {
 			return existing as Promise<T>;
@@ -78,8 +75,16 @@ export class DedupingDirectClient {
 			// observable immediately (no extra microtask hop before invocation).
 			this.running++;
 			promise = fn().then(
-				(v) => { this.release(); this.inflight.delete(key); return v; },
-				(e) => { this.release(); this.inflight.delete(key); return Promise.reject(e); },
+				(v) => {
+					this.release();
+					this.inflight.delete(key);
+					return v;
+				},
+				(e) => {
+					this.release();
+					this.inflight.delete(key);
+					return Promise.reject(e);
+				},
 			);
 		} else {
 			// All slots busy — build the outer promise now and queue a thunk
@@ -94,8 +99,16 @@ export class DedupingDirectClient {
 			this.waiters.push(() => {
 				// Called synchronously by release() — fn() runs immediately here.
 				fn().then(
-					(v) => { this.release(); this.inflight.delete(key); outerResolve(v); },
-					(e) => { this.release(); this.inflight.delete(key); outerReject(e); },
+					(v) => {
+						this.release();
+						this.inflight.delete(key);
+						outerResolve(v);
+					},
+					(e) => {
+						this.release();
+						this.inflight.delete(key);
+						outerReject(e);
+					},
 				);
 			});
 		}

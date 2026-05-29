@@ -1,10 +1,10 @@
 import {
-	type FetchResult,
-	TEST_URLS,
 	buildDirectAgent,
 	buildProxyAgent,
+	type FetchResult,
 	fetchOne,
 	printResult,
+	TEST_URLS,
 } from "./archive-fetch-lib.js";
 
 const DEFAULT_PROXY_URL = "http://us-ca.proxymesh.com:31280";
@@ -36,7 +36,8 @@ async function main(): Promise<void> {
 
 	console.log(`Comparing DIRECT vs ${proxyUrl}\n`);
 
-	const rows: Array<{ url: string; verdict: string; direct: FetchResult; proxied: FetchResult }> = [];
+	const rows: Array<{ url: string; verdict: string; direct: FetchResult; proxied: FetchResult }> =
+		[];
 
 	try {
 		for (const url of TEST_URLS) {

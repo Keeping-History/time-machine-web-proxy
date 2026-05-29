@@ -1,5 +1,5 @@
-import { logger as defaultLogger } from "../lib/logger";
 import type pino from "pino";
+import { logger as defaultLogger } from "../lib/logger";
 
 const TIMESTAMP_RE = /^\d{14}$/;
 const RESOLVED_TIME_RE = /\/web\/(\d{14})id_\//;
