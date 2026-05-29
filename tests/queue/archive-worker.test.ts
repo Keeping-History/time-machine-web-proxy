@@ -84,7 +84,11 @@ jest.mock("bullmq", () => ({
 // --- Imports (after mocks) ---------------------------------------------------
 
 import type pino from "pino";
-import { attachQueueLogger, startArchiveWorkers } from "../../src/queue/archive-worker";
+import {
+	attachQueueLogger,
+	startArchiveWorkers,
+	startDownloadWatcher,
+} from "../../src/queue/archive-worker";
 import { QUEUE_CRAWL, QUEUE_EXACT } from "../../src/queue/jobs";
 
 // --- Helpers -----------------------------------------------------------------
@@ -925,6 +929,209 @@ describe("crawl worker processor", () => {
 		);
 		resolveDownload();
 		await jobPromise;
+	});
+});
+
+// --- startDownloadWatcher sentinel filter ------------------------------------
+//
+// `fs.watch` recursive is system-resource dependent (kqueue/inotify) and
+// flakes under jest. We test the watcher logic by injecting a fake `watchFn`
+// that captures the change callback, then driving filesystem events
+// synchronously. The filter under test (.notfound/, .notfound-tentative/
+// prefix drop) is exactly the production code — only the event SOURCE is
+// faked, not the behavior being asserted.
+
+describe("startDownloadWatcher — sentinel-subpath filter", () => {
+	interface FakeWatcher {
+		fire: (eventType: "rename" | "change", filename: string) => void;
+		close: jest.Mock;
+		watchFn: jest.Mock;
+		callbackReady: Promise<void>;
+	}
+
+	function makeFakeWatchFn(): FakeWatcher {
+		let cb: ((eventType: string, filename: string) => void) | null = null;
+		let resolveReady: () => void = () => undefined;
+		const callbackReady = new Promise<void>((r) => {
+			resolveReady = r;
+		});
+		const close = jest.fn();
+		const watchFn = jest.fn(
+			(_dir: string, _opts: object, callback: (et: string, fn: string) => void) => {
+				cb = callback;
+				resolveReady();
+				return { close } as unknown as ReturnType<typeof import("node:fs").watch>;
+			},
+		);
+		return {
+			fire: (eventType, filename) => {
+				if (!cb) throw new Error("watchFn callback not yet registered");
+				cb(eventType, filename);
+			},
+			close,
+			watchFn: watchFn as unknown as jest.Mock,
+			callbackReady,
+		};
+	}
+
+	let tmpRoot: string;
+
+	beforeEach(async () => {
+		const { promises: fsp } = await import("node:fs");
+		const path = await import("node:path");
+		const os = await import("node:os");
+		tmpRoot = await fsp.mkdtemp(path.join(os.tmpdir(), "tm-watcher-"));
+	});
+
+	afterEach(async () => {
+		const { promises: fsp } = await import("node:fs");
+		await fsp.rm(tmpRoot, { recursive: true, force: true });
+	});
+
+	it("drops 'rename' events for .notfound/<hash> sentinel writes", async () => {
+		const onFile = jest.fn();
+		const fake = makeFakeWatchFn();
+		const logger = makeLogger();
+		const stop = startDownloadWatcher(
+			tmpRoot,
+			onFile,
+			logger,
+			fake.watchFn as unknown as typeof import("node:fs").watch,
+		);
+
+		await fake.callbackReady;
+		fake.fire("rename", ".notfound/abc123");
+		fake.fire("rename", ".notfound/def456");
+
+		expect(onFile).not.toHaveBeenCalled();
+
+		stop();
+	});
+
+	it("drops 'rename' events for .notfound-tentative/<hash> sentinel writes", async () => {
+		const onFile = jest.fn();
+		const fake = makeFakeWatchFn();
+		const logger = makeLogger();
+		const stop = startDownloadWatcher(
+			tmpRoot,
+			onFile,
+			logger,
+			fake.watchFn as unknown as typeof import("node:fs").watch,
+		);
+
+		await fake.callbackReady;
+		fake.fire("rename", ".notfound-tentative/abc123");
+		fake.fire("rename", ".notfound-tentative/def456");
+
+		expect(onFile).not.toHaveBeenCalled();
+
+		stop();
+	});
+
+	it("forwards 'rename' events for legitimate files and increments filesSeen", async () => {
+		const onFile = jest.fn();
+		const fake = makeFakeWatchFn();
+		const logger = makeLogger();
+		const stop = startDownloadWatcher(
+			tmpRoot,
+			onFile,
+			logger,
+			fake.watchFn as unknown as typeof import("node:fs").watch,
+		);
+
+		await fake.callbackReady;
+		fake.fire("rename", "pics/sunlogo.gif");
+		fake.fire("rename", "css/main.css");
+
+		expect(onFile).toHaveBeenCalledTimes(2);
+		expect(onFile).toHaveBeenNthCalledWith(1, "pics/sunlogo.gif", 1);
+		expect(onFile).toHaveBeenNthCalledWith(2, "css/main.css", 2);
+
+		stop();
+	});
+
+	it("filesSeen counter is NOT incremented by filtered sentinel events", async () => {
+		const onFile = jest.fn();
+		const fake = makeFakeWatchFn();
+		const logger = makeLogger();
+		const stop = startDownloadWatcher(
+			tmpRoot,
+			onFile,
+			logger,
+			fake.watchFn as unknown as typeof import("node:fs").watch,
+		);
+
+		await fake.callbackReady;
+		// Interleave sentinel between legitimate files — would be off-by-one
+		// (1, 3) instead of (1, 2) if the filter incremented the counter.
+		fake.fire("rename", "pics/sunlogo.gif");
+		fake.fire("rename", ".notfound/sentinel-hash");
+		fake.fire("rename", ".notfound-tentative/sentinel-hash");
+		fake.fire("rename", "css/main.css");
+
+		expect(onFile).toHaveBeenCalledTimes(2);
+		expect(onFile).toHaveBeenNthCalledWith(1, "pics/sunlogo.gif", 1);
+		expect(onFile).toHaveBeenNthCalledWith(2, "css/main.css", 2);
+
+		stop();
+	});
+
+	it("ignores 'change' events (only 'rename' indicates new files)", async () => {
+		const onFile = jest.fn();
+		const fake = makeFakeWatchFn();
+		const logger = makeLogger();
+		const stop = startDownloadWatcher(
+			tmpRoot,
+			onFile,
+			logger,
+			fake.watchFn as unknown as typeof import("node:fs").watch,
+		);
+
+		await fake.callbackReady;
+		fake.fire("change", "pics/sunlogo.gif");
+
+		expect(onFile).not.toHaveBeenCalled();
+
+		stop();
+	});
+
+	it("deduplicates repeated 'rename' events for the same filename", async () => {
+		const onFile = jest.fn();
+		const fake = makeFakeWatchFn();
+		const logger = makeLogger();
+		const stop = startDownloadWatcher(
+			tmpRoot,
+			onFile,
+			logger,
+			fake.watchFn as unknown as typeof import("node:fs").watch,
+		);
+
+		await fake.callbackReady;
+		fake.fire("rename", "pics/sunlogo.gif");
+		fake.fire("rename", "pics/sunlogo.gif");
+		fake.fire("rename", "pics/sunlogo.gif");
+
+		expect(onFile).toHaveBeenCalledTimes(1);
+		expect(onFile).toHaveBeenCalledWith("pics/sunlogo.gif", 1);
+
+		stop();
+	});
+
+	it("calling the returned stop() closes the watcher", async () => {
+		const onFile = jest.fn();
+		const fake = makeFakeWatchFn();
+		const logger = makeLogger();
+		const stop = startDownloadWatcher(
+			tmpRoot,
+			onFile,
+			logger,
+			fake.watchFn as unknown as typeof import("node:fs").watch,
+		);
+
+		await fake.callbackReady;
+		stop();
+
+		expect(fake.close).toHaveBeenCalledTimes(1);
 	});
 });
 

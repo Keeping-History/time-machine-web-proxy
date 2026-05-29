@@ -97,10 +97,11 @@ async function emitProgress(
  * (Linux inotify can't reliably classify), which is acceptable — count is
  * approximate by design.
  */
-function startDownloadWatcher(
+export function startDownloadWatcher(
 	directory: string,
 	onFile: (relPath: string, count: number) => void,
 	logger: pino.Logger,
+	watchFn: typeof fsWatch = fsWatch,
 ): () => void {
 	let watcher: FSWatcher | null = null;
 	let closed = false;
@@ -114,7 +115,7 @@ function startDownloadWatcher(
 		.mkdir(directory, { recursive: true })
 		.then(() => {
 			if (closed) return;
-			watcher = fsWatch(directory, { recursive: true }, (eventType, filename) => {
+			watcher = watchFn(directory, { recursive: true }, (eventType, filename) => {
 				if (!filename) return;
 				const key = filename.toString();
 				if (seen.has(key)) return;
