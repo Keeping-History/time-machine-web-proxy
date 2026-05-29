@@ -75,10 +75,18 @@ const WorkerMock = jest
 // `Worker.RateLimitError` is a static factory method on the BullMQ Worker class.
 (WorkerMock as unknown as { RateLimitError: jest.Mock }).RateLimitError = rateLimitErrorMock;
 
+class UnrecoverableErrorMock extends Error {
+	constructor(message?: string) {
+		super(message);
+		this.name = "UnrecoverableError";
+	}
+}
+
 jest.mock("bullmq", () => ({
 	__esModule: true,
 	Worker: WorkerMock,
 	QueueEvents: jest.fn(),
+	UnrecoverableError: UnrecoverableErrorMock,
 }));
 
 // --- Imports (after mocks) ---------------------------------------------------
@@ -578,11 +586,14 @@ describe("exact worker processor", () => {
 		expect(downloadFilesMock).not.toHaveBeenCalled();
 	});
 
-	it("writes tentative sentinel and completes (no throw) when resolver throws indeterminate-CDX error", async () => {
+	it("writes tentative sentinel and fails with UnrecoverableError when resolver throws indeterminate-CDX error", async () => {
 		// snapshot-resolver throws this exact prefix when CDX is transport-
 		// unreachable across all variants/retries. Worker must catch, write a
-		// short-lived tentative sentinel, and complete normally so BullMQ does
-		// NOT retry — otherwise foreground requests wait ~47s before 404'ing.
+		// short-lived tentative sentinel, then throw UnrecoverableError so the
+		// job lands in the Failed column (BullMQ skips retries for this error
+		// subclass) — otherwise the job would be marked completed despite
+		// progress stage="error", and foreground requests would still wait
+		// ~47s before 404'ing on retry.
 		const cache = makeCache();
 		const resolver = jest.fn().mockRejectedValue(
 			new Error(
@@ -597,7 +608,7 @@ describe("exact worker processor", () => {
 				data: { url: "https://i.ihost.com/i/c.gif", time: "20010913100802" },
 				token: "tk-indet",
 			}),
-		).resolves.toBeUndefined();
+		).rejects.toThrow(UnrecoverableErrorMock);
 		expect(cache.writeTentativeNotFoundSentinel).toHaveBeenCalledWith(
 			"20010913100802",
 			"https://i.ihost.com/i/c.gif",

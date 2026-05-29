@@ -1,5 +1,11 @@
 import { type FSWatcher, promises as fsp, watch as fsWatch } from "node:fs";
-import { type ConnectionOptions, type Job, type QueueEvents, Worker } from "bullmq";
+import {
+	type ConnectionOptions,
+	type Job,
+	type QueueEvents,
+	UnrecoverableError,
+	Worker,
+} from "bullmq";
 import type pino from "pino";
 import { WaybackMachineDownloader } from "wayback-machine-downloader";
 import { dayWindow } from "../lib/archive-time";
@@ -288,18 +294,20 @@ export function startArchiveWorkers(opts: StartArchiveWorkersOpts): ArchiveWorke
 				// snapshot-resolver throws this specific message when CDX is
 				// transport-unreachable for every variant × retry. Retrying the
 				// job 2 more times burns ~45s before BullMQ gives up and only
-				// helps if CDX recovers in that window. Instead, write a 1-hour
-				// tentative sentinel so the next request fails fast, then
-				// retries after expiry in case CDX is healthy by then.
+				// helps if CDX recovers in that window. Write a 1-hour tentative
+				// sentinel so the next request fails fast, then surface the job
+				// as failed via UnrecoverableError — BullMQ marks it failed
+				// without retrying, so it appears in the Error column instead of
+				// being silently completed with stage="error".
 				if (errMsg.startsWith("[snapshot-resolver] all CDX queries failed")) {
 					assertExactUrlJob(job.data);
 					const { url, time } = job.data;
 					await cache.writeTentativeNotFoundSentinel(time, url);
 					logger.warn(
 						{ url, time },
-						"[worker:exact] indeterminate CDX state — wrote tentative sentinel, skipping retry",
+						"[worker:exact] indeterminate CDX state — wrote tentative sentinel, failing job without retry",
 					);
-					return;
+					throw new UnrecoverableError(errMsg);
 				}
 				throw e;
 			}
