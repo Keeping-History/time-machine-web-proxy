@@ -44,6 +44,7 @@ const config: Config = {
 	prewarmEnabled: true,
 	prewarmMaxAssetsPerPage: 100,
 	notFoundTtlDays: 30,
+	cdxCacheEnabled: true,
 };
 
 type ProxyMock = jest.Mocked<Pick<ProxyService, "fetch" | "triggerDomainCrawl">>;

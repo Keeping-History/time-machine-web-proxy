@@ -61,6 +61,11 @@ export interface Config {
 	/** Max asset URLs to prewarm per page. Env: PREWARM_MAX_ASSETS_PER_PAGE (default 100, 0-500). */
 	prewarmMaxAssetsPerPage: number;
 
+	// — CDX response cache —
+	/** Cache CDX responses in Redis to dedupe snapshot-resolver and crawl-preflight calls.
+	 *  Env: CDX_CACHE_ENABLED (default true). */
+	cdxCacheEnabled: boolean;
+
 	// — Sentinel TTL —
 	/** Age in days after which a not-found sentinel is considered stale and deleted on next lookup.
 	 *  Env: NOT_FOUND_TTL_DAYS (default 30, 1-3650). */

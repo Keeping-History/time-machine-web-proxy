@@ -109,6 +109,7 @@ const baseConfig: Config = {
 	prewarmEnabled: true,
 	prewarmMaxAssetsPerPage: 100,
 	notFoundTtlDays: 30,
+	cdxCacheEnabled: true,
 };
 
 describe("Dependencies (TASK-010)", () => {

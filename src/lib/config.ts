@@ -154,6 +154,9 @@ export function loadConfig(): Config {
 			500,
 		),
 
+		// CDX response cache
+		cdxCacheEnabled: parseBool(process.env.CDX_CACHE_ENABLED, "CDX_CACHE_ENABLED", true),
+
 		// Sentinel TTL
 		notFoundTtlDays: parseIntInRange(
 			process.env.NOT_FOUND_TTL_DAYS,

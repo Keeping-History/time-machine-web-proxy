@@ -229,6 +229,30 @@ describe("loadConfig", () => {
 		expect(config.crawlMaxCdxPages).toBe(100);
 	});
 
+	it("CDX_CACHE_ENABLED defaults to true when unset or empty", () => {
+		delete process.env.CDX_CACHE_ENABLED;
+		expect(loadConfig().cdxCacheEnabled).toBe(true);
+
+		process.env.CDX_CACHE_ENABLED = "";
+		expect(loadConfig().cdxCacheEnabled).toBe(true);
+	});
+
+	it("CDX_CACHE_ENABLED=false (case-insensitive) disables the cache", () => {
+		process.env.CDX_CACHE_ENABLED = "false";
+		expect(loadConfig().cdxCacheEnabled).toBe(false);
+
+		process.env.CDX_CACHE_ENABLED = "FALSE";
+		expect(loadConfig().cdxCacheEnabled).toBe(false);
+
+		process.env.CDX_CACHE_ENABLED = "False";
+		expect(loadConfig().cdxCacheEnabled).toBe(false);
+	});
+
+	it("CDX_CACHE_ENABLED=true keeps the cache enabled", () => {
+		process.env.CDX_CACHE_ENABLED = "true";
+		expect(loadConfig().cdxCacheEnabled).toBe(true);
+	});
+
 	it("reads outbound proxy env vars", () => {
 		process.env.OUTBOUND_PROXY_URLS = "http://proxymesh.example.com:31280";
 		process.env.OUTBOUND_PROXY_USERNAME = "user";
