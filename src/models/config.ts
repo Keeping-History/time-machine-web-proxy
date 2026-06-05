@@ -48,12 +48,20 @@ export interface Config {
 	directFetchEnabled: boolean;
 	/** Max simultaneous direct fetch connections. Env: DIRECT_FETCH_MAX_CONCURRENT (default 10, 1-50). */
 	directFetchMaxConcurrent: number;
-	/** Per-fetch timeout in ms. Env: DIRECT_FETCH_TIMEOUT_MS (default 15000, 1000-60000). */
+	/** Per-fetch timeout in ms. Env: DIRECT_FETCH_TIMEOUT_MS (default 30000, 1000-60000). */
 	directFetchTimeoutMs: number;
 	/** Sustained rate cap in requests/sec for direct fetches. Env: DIRECT_FETCH_RATE_PER_SEC (default 20, 1-100). */
 	directFetchRatePerSec: number;
 	/** Burst allowance above the sustained rate. Env: DIRECT_FETCH_BURST (default 30, 1-200). */
 	directFetchBurst: number;
+	/** Max TCP connections in the direct-fetch pool. Env: DIRECT_FETCH_POOL_CONNECTIONS (default 5, 1-50). */
+	directFetchPoolConnections: number;
+	/** Idle keepalive timeout for direct-fetch pool sockets, ms. Env: DIRECT_FETCH_POOL_KEEPALIVE_MS (default 30000, 1000-300000). */
+	directFetchPoolKeepaliveMs: number;
+	/** Cap on concurrent HTTP/2 streams per TCP socket. Env: DIRECT_FETCH_POOL_MAX_STREAMS (default 10, 1-100). */
+	directFetchPoolMaxConcurrentStreams: number;
+	/** Advertise h2 in ALPN when negotiating with Wayback. Env: DIRECT_FETCH_HTTP2_ENABLED (default true). */
+	directFetchHttp2Enabled: boolean;
 
 	// — Prewarm knobs —
 	/** Whether to prewarm asset URLs discovered during crawl. Env: PREWARM_ENABLED (default true). */
@@ -70,6 +78,13 @@ export interface Config {
 	/** Age in days after which a not-found sentinel is considered stale and deleted on next lookup.
 	 *  Env: NOT_FOUND_TTL_DAYS (default 30, 1-3650). */
 	notFoundTtlDays: number;
+
+	// — URL rewriter behaviour —
+	/** Strip the timestamp segment from rewritten URLs in HTML/CSS responses
+	 *  and from the runtime shim. Rewritten links become `/web/{url}` rather
+	 *  than `/web/{ts}/{url}`, so navigation always falls back to the
+	 *  configured default time. Env: LOCK_TIME (default false). */
+	lockTime: boolean;
 }
 
 export type OutboundProxyChooser = "sequential" | "random";

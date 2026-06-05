@@ -38,13 +38,18 @@ const config: Config = {
 	assetLaterFallback: true,
 	directFetchEnabled: true,
 	directFetchMaxConcurrent: 10,
-	directFetchTimeoutMs: 15_000,
+	directFetchTimeoutMs: 30_000,
 	directFetchRatePerSec: 20,
 	directFetchBurst: 30,
+	directFetchPoolConnections: 5,
+	directFetchPoolKeepaliveMs: 30_000,
+	directFetchPoolMaxConcurrentStreams: 10,
+	directFetchHttp2Enabled: true,
 	prewarmEnabled: true,
 	prewarmMaxAssetsPerPage: 100,
 	notFoundTtlDays: 30,
 	cdxCacheEnabled: true,
+	lockTime: false,
 };
 
 type ProxyMock = jest.Mocked<Pick<ProxyService, "fetch" | "triggerDomainCrawl">>;
@@ -277,10 +282,9 @@ describe("TimeMachineService HTTP handler — SSE (Accept: text/event-stream)", 
 		const { svc } = makeService(fetchMock);
 		const port = await startAndAwaitListening(svc);
 		try {
-			const r = await fetch(
-				`http://127.0.0.1:${port}/web/20020401000000/http://example.com/page`,
-				{ headers: { Accept: "text/event-stream" } },
-			);
+			const r = await fetch(`http://127.0.0.1:${port}/web/20020401000000/http://example.com/page`, {
+				headers: { Accept: "text/event-stream" },
+			});
 			expect(r.status).toBe(200);
 			expect(r.headers.get("content-type")).toContain("text/event-stream");
 			await readSseBody(r);
@@ -290,29 +294,30 @@ describe("TimeMachineService HTTP handler — SSE (Accept: text/event-stream)", 
 	});
 
 	it("emits progress events forwarded from ProxyService.fetch followed by a result event", async () => {
-		const fetchMock = jest.fn(async (_url: string, _time: string, onProgress?: (p: unknown) => void) => {
-			onProgress?.({
-				stage: "resolved",
-				jobId: "job-1",
-				queue: "archive-exact",
-				ts: 1,
-				resolved: "20020401000000",
-			});
-			onProgress?.({
-				stage: "download_done",
-				jobId: "job-1",
-				queue: "archive-exact",
-				ts: 2,
-			});
-			return okResult;
-		});
+		const fetchMock = jest.fn(
+			async (_url: string, _time: string, onProgress?: (p: unknown) => void) => {
+				onProgress?.({
+					stage: "resolved",
+					jobId: "job-1",
+					queue: "archive-exact",
+					ts: 1,
+					resolved: "20020401000000",
+				});
+				onProgress?.({
+					stage: "download_done",
+					jobId: "job-1",
+					queue: "archive-exact",
+					ts: 2,
+				});
+				return okResult;
+			},
+		);
 		const { svc } = makeService(fetchMock as unknown as ProxyMock["fetch"]);
 		const port = await startAndAwaitListening(svc);
 		try {
-			const r = await fetch(
-				`http://127.0.0.1:${port}/web/20020401000000/http://example.com/page`,
-				{ headers: { Accept: "text/event-stream" } },
-			);
+			const r = await fetch(`http://127.0.0.1:${port}/web/20020401000000/http://example.com/page`, {
+				headers: { Accept: "text/event-stream" },
+			});
 			const events = parseEvents(await readSseBody(r));
 			const stages = events
 				.filter((e) => e.event === "progress")
@@ -332,19 +337,16 @@ describe("TimeMachineService HTTP handler — SSE (Accept: text/event-stream)", 
 		const { svc } = makeService(fetchMock);
 		const port = await startAndAwaitListening(svc);
 		try {
-			const r = await fetch(
-				`http://127.0.0.1:${port}/web/20020401000000/http://example.com/page`,
-				{ headers: { Accept: "text/event-stream" } },
-			);
+			const r = await fetch(`http://127.0.0.1:${port}/web/20020401000000/http://example.com/page`, {
+				headers: { Accept: "text/event-stream" },
+			});
 			// Stream opens with 200 — error is delivered as a frame.
 			expect(r.status).toBe(200);
 			const events = parseEvents(await readSseBody(r));
 			const errEvent = events.find((e) => e.event === "error");
 			expect(errEvent).toBeDefined();
 			expect((errEvent?.data as { status: number; message: string }).status).toBe(502);
-			expect((errEvent?.data as { status: number; message: string }).message).toBe(
-				"upstream gone",
-			);
+			expect((errEvent?.data as { status: number; message: string }).message).toBe("upstream gone");
 		} finally {
 			await svc.stop();
 		}
@@ -355,10 +357,9 @@ describe("TimeMachineService HTTP handler — SSE (Accept: text/event-stream)", 
 		const { svc } = makeService(fetchMock);
 		const port = await startAndAwaitListening(svc);
 		try {
-			const r = await fetch(
-				`http://127.0.0.1:${port}/web/20020401000000/http://example.com/page`,
-				{ headers: { Accept: "text/html" } },
-			);
+			const r = await fetch(`http://127.0.0.1:${port}/web/20020401000000/http://example.com/page`, {
+				headers: { Accept: "text/html" },
+			});
 			expect(r.status).toBe(200);
 			expect(r.headers.get("content-type")).toContain("text/html");
 			expect(r.headers.get("content-type")).not.toContain("event-stream");
@@ -519,10 +520,10 @@ describe("TimeMachineService HTTP handler — POST /crawl (admin)", () => {
 		});
 		const port = await startAndAwaitListening(svc);
 		try {
-			const r = await fetch(
-				`http://127.0.0.1:${port}/crawl?host=example.com&time=20010913000000`,
-				{ method: "POST", headers: { Authorization: `Bearer ${TOKEN}` } },
-			);
+			const r = await fetch(`http://127.0.0.1:${port}/crawl?host=example.com&time=20010913000000`, {
+				method: "POST",
+				headers: { Authorization: `Bearer ${TOKEN}` },
+			});
 			expect(r.status).toBe(202);
 			expect(r.headers.get("content-type")).toContain("application/json");
 			const body = await r.json();
@@ -628,9 +629,7 @@ describe("TimeMachineService HTTP handler — POST /crawl (admin)", () => {
 			.fn()
 			.mockRejectedValueOnce(Object.assign(new Error("Host not whitelisted"), { status: 403 }))
 			.mockRejectedValueOnce(Object.assign(new Error("Crawl too large"), { status: 413 }))
-			.mockRejectedValueOnce(
-				Object.assign(new Error("Domain crawl is disabled"), { status: 503 }),
-			);
+			.mockRejectedValueOnce(Object.assign(new Error("Domain crawl is disabled"), { status: 503 }));
 		const { svc } = makeService(undefined, {
 			triggerDomainCrawl: trigger,
 			config: { cacheClearToken: TOKEN },
@@ -673,18 +672,16 @@ describe("TimeMachineService HTTP handler — POST /crawl (admin)", () => {
 		});
 		const port = await startAndAwaitListening(svc);
 		try {
-			const r = await fetch(
-				`http://127.0.0.1:${port}/crawl?host=example.com&skip_preflight=true`,
-				{ method: "POST", headers: { Authorization: `Bearer ${TOKEN}` } },
-			);
+			const r = await fetch(`http://127.0.0.1:${port}/crawl?host=example.com&skip_preflight=true`, {
+				method: "POST",
+				headers: { Authorization: `Bearer ${TOKEN}` },
+			});
 			expect(r.status).toBe(202);
 			const body = await r.json();
 			expect(body.preflightSkipped).toBe(true);
-			expect(proxy.triggerDomainCrawl).toHaveBeenCalledWith(
-				"example.com",
-				config.defaultTime,
-				{ skipPreflight: true },
-			);
+			expect(proxy.triggerDomainCrawl).toHaveBeenCalledWith("example.com", config.defaultTime, {
+				skipPreflight: true,
+			});
 		} finally {
 			await svc.stop();
 		}
@@ -706,11 +703,9 @@ describe("TimeMachineService HTTP handler — POST /crawl (admin)", () => {
 			expect(r.status).toBe(202);
 			const body = await r.json();
 			expect(body.preflightSkipped).toBe(false);
-			expect(proxy.triggerDomainCrawl).toHaveBeenCalledWith(
-				"example.com",
-				config.defaultTime,
-				{ skipPreflight: false },
-			);
+			expect(proxy.triggerDomainCrawl).toHaveBeenCalledWith("example.com", config.defaultTime, {
+				skipPreflight: false,
+			});
 		} finally {
 			await svc.stop();
 		}
@@ -748,15 +743,30 @@ describe("TimeMachineService HTTP handler — POST /crawl (admin)", () => {
 			});
 			expect((await r.json()).preflightSkipped).toBe(true);
 
-			expect(proxy.triggerDomainCrawl).toHaveBeenNthCalledWith(1, "example.com", config.defaultTime, {
-				skipPreflight: false,
-			});
-			expect(proxy.triggerDomainCrawl).toHaveBeenNthCalledWith(2, "example.com", config.defaultTime, {
-				skipPreflight: false,
-			});
-			expect(proxy.triggerDomainCrawl).toHaveBeenNthCalledWith(3, "example.com", config.defaultTime, {
-				skipPreflight: true,
-			});
+			expect(proxy.triggerDomainCrawl).toHaveBeenNthCalledWith(
+				1,
+				"example.com",
+				config.defaultTime,
+				{
+					skipPreflight: false,
+				},
+			);
+			expect(proxy.triggerDomainCrawl).toHaveBeenNthCalledWith(
+				2,
+				"example.com",
+				config.defaultTime,
+				{
+					skipPreflight: false,
+				},
+			);
+			expect(proxy.triggerDomainCrawl).toHaveBeenNthCalledWith(
+				3,
+				"example.com",
+				config.defaultTime,
+				{
+					skipPreflight: true,
+				},
+			);
 		} finally {
 			await svc.stop();
 		}

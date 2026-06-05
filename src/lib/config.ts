@@ -125,7 +125,7 @@ export function loadConfig(): Config {
 		directFetchTimeoutMs: parseIntInRange(
 			process.env.DIRECT_FETCH_TIMEOUT_MS,
 			"DIRECT_FETCH_TIMEOUT_MS",
-			15_000,
+			30_000,
 			1_000,
 			60_000,
 		),
@@ -142,6 +142,32 @@ export function loadConfig(): Config {
 			30,
 			1,
 			200,
+		),
+		directFetchPoolConnections: parseIntInRange(
+			process.env.DIRECT_FETCH_POOL_CONNECTIONS,
+			"DIRECT_FETCH_POOL_CONNECTIONS",
+			5,
+			1,
+			50,
+		),
+		directFetchPoolKeepaliveMs: parseIntInRange(
+			process.env.DIRECT_FETCH_POOL_KEEPALIVE_MS,
+			"DIRECT_FETCH_POOL_KEEPALIVE_MS",
+			30_000,
+			1_000,
+			300_000,
+		),
+		directFetchPoolMaxConcurrentStreams: parseIntInRange(
+			process.env.DIRECT_FETCH_POOL_MAX_STREAMS,
+			"DIRECT_FETCH_POOL_MAX_STREAMS",
+			10,
+			1,
+			100,
+		),
+		directFetchHttp2Enabled: parseBool(
+			process.env.DIRECT_FETCH_HTTP2_ENABLED,
+			"DIRECT_FETCH_HTTP2_ENABLED",
+			true,
 		),
 
 		// Prewarm knobs
@@ -165,6 +191,9 @@ export function loadConfig(): Config {
 			1,
 			3650,
 		),
+
+		// URL rewriter — omit timestamp segment from rewritten links
+		lockTime: parseBool(process.env.LOCK_TIME, "LOCK_TIME", false),
 	};
 }
 
