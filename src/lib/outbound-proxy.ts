@@ -90,9 +90,12 @@ export async function installOutboundProxy(
 		buildProxyUri(raw, cfg.outboundProxyUsername, cfg.outboundProxyPassword, hasUser),
 	);
 
+	// allowH2 affects the proxy→origin TLS inside the CONNECT tunnel,
+	// NOT the client→proxy hop (always HTTP/1.1 CONNECT). Per undici v8 docs.
+	const poolOpts = buildPoolOpts(cfg);
 	const built = uris.map((u) => ({
 		host: u.host,
-		agent: new ProxyAgent({ uri: u.value }),
+		agent: new ProxyAgent({ uri: u.value, ...poolOpts }),
 	}));
 
 	const probeResults = await Promise.all(built.map((b) => probeAgent(b.host, b.agent)));

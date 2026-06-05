@@ -344,6 +344,46 @@ describe("installOutboundProxy", () => {
 			expect(callArg.uri).toMatch(/^https:\/\/secure-proxy\.example\.com:8443\/?$/);
 		});
 
+		it("passes pool options (allowH2, connections, keepAliveTimeout, maxConcurrentStreams) to every ProxyAgent", async () => {
+			const { logger } = makeLogger();
+			await installOutboundProxy(
+				makeConfig({
+					outboundProxyUrls: ["http://a.example.com:31280", "http://b.example.com:31280"],
+					directFetchPoolConnections: 7,
+					directFetchPoolKeepaliveMs: 12_000,
+					directFetchPoolMaxConcurrentStreams: 25,
+					directFetchHttp2Enabled: true,
+				}),
+				logger,
+			);
+			expect(ProxyAgentMock).toHaveBeenCalledTimes(2);
+			for (const call of ProxyAgentMock.mock.calls) {
+				expect(call[0]).toEqual(
+					expect.objectContaining({
+						uri: expect.stringMatching(/^http:\/\/[ab]\.example\.com:31280\/?$/),
+						connections: 7,
+						keepAliveTimeout: 12_000,
+						allowH2: true,
+						maxConcurrentStreams: 25,
+					}),
+				);
+			}
+		});
+
+		it("propagates allowH2: false to ProxyAgent when directFetchHttp2Enabled is false", async () => {
+			const { logger } = makeLogger();
+			await installOutboundProxy(
+				makeConfig({
+					outboundProxyUrls: ["http://a.example.com:31280"],
+					directFetchHttp2Enabled: false,
+				}),
+				logger,
+			);
+			expect(ProxyAgentMock).toHaveBeenCalledWith(
+				expect.objectContaining({ allowH2: false }),
+			);
+		});
+
 		it("never includes the password in log call arguments", async () => {
 			const { logger, infoSpy, errorSpy } = makeLogger();
 			const password = "super-secret-do-not-log-me-12345";
