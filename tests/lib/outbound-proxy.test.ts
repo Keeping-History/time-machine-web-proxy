@@ -7,6 +7,13 @@ const ProxyAgentMock = jest.fn().mockImplementation((opts: { uri: string }) => (
 	close: jest.fn().mockResolvedValue(undefined),
 	destroy: jest.fn().mockResolvedValue(undefined),
 }));
+const poolInstanceMarker = Symbol("Pool");
+const PoolMock = jest.fn().mockImplementation(() => ({
+	__isPool: poolInstanceMarker,
+	dispatch: jest.fn().mockReturnValue(true),
+	close: jest.fn().mockResolvedValue(undefined),
+	destroy: jest.fn().mockResolvedValue(undefined),
+}));
 
 // Minimal Dispatcher stub: matches the shape RotatingProxyDispatcher needs from
 // the base class (EventEmitter + the three throwing stubs that subclasses must
@@ -32,6 +39,7 @@ jest.mock("undici", () => ({
 	__esModule: true,
 	setGlobalDispatcher: setGlobalDispatcherMock,
 	ProxyAgent: ProxyAgentMock,
+	Pool: PoolMock,
 	Dispatcher: DispatcherStub,
 	request: requestMock,
 }));
@@ -53,6 +61,10 @@ function makeConfig(overrides: Partial<ProxyConfig> = {}): ProxyConfig {
 		outboundProxyUsername: "",
 		outboundProxyPassword: "",
 		outboundProxyCooldownMs: 60_000,
+		directFetchPoolConnections: 5,
+		directFetchPoolKeepaliveMs: 30_000,
+		directFetchPoolMaxConcurrentStreams: 10,
+		directFetchHttp2Enabled: true,
 		...overrides,
 	};
 }
@@ -82,6 +94,7 @@ describe("installOutboundProxy", () => {
 	beforeEach(() => {
 		setGlobalDispatcherMock.mockClear();
 		ProxyAgentMock.mockClear();
+		PoolMock.mockClear();
 		requestMock.mockClear();
 		requestMock.mockImplementation(async () => ({
 			statusCode: 200,
@@ -89,13 +102,36 @@ describe("installOutboundProxy", () => {
 		}));
 	});
 
-	it("does not install when outboundProxyUrls is empty (no-op)", async () => {
-		const { logger, infoSpy } = makeLogger();
-		await installOutboundProxy(makeConfig({ outboundProxyUrls: [] }), logger);
-		expect(setGlobalDispatcherMock).not.toHaveBeenCalled();
+	it("installs a direct Pool for web.archive.org when outboundProxyUrls is empty", async () => {
+		const { logger } = makeLogger();
+		const result = await installOutboundProxy(makeConfig({ outboundProxyUrls: [] }), logger);
+		expect(PoolMock).toHaveBeenCalledTimes(1);
+		expect(PoolMock).toHaveBeenCalledWith(
+			"https://web.archive.org",
+			expect.objectContaining({
+				connections: 5,
+				keepAliveTimeout: 30_000,
+				allowH2: true,
+				maxConcurrentStreams: 10,
+			}),
+		);
+		expect(setGlobalDispatcherMock).toHaveBeenCalledTimes(1);
+		expect(setGlobalDispatcherMock.mock.calls[0][0]).toMatchObject({ __isPool: poolInstanceMarker });
 		expect(ProxyAgentMock).not.toHaveBeenCalled();
 		expect(requestMock).not.toHaveBeenCalled();
-		expect(infoSpy).not.toHaveBeenCalled();
+		expect(result).toBeNull();
+	});
+
+	it("passes allowH2: false to Pool when directFetchHttp2Enabled is false", async () => {
+		const { logger } = makeLogger();
+		await installOutboundProxy(
+			makeConfig({ outboundProxyUrls: [], directFetchHttp2Enabled: false }),
+			logger,
+		);
+		expect(PoolMock).toHaveBeenCalledWith(
+			"https://web.archive.org",
+			expect.objectContaining({ allowH2: false }),
+		);
 	});
 
 	describe("startup connectivity probe", () => {
@@ -679,6 +715,10 @@ type _AssertProxyConfigShape =
 		| "outboundProxyUsername"
 		| "outboundProxyPassword"
 		| "outboundProxyCooldownMs"
+		| "directFetchPoolConnections"
+		| "directFetchPoolKeepaliveMs"
+		| "directFetchPoolMaxConcurrentStreams"
+		| "directFetchHttp2Enabled"
 	>
 		? true
 		: never;

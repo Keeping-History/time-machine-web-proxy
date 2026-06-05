@@ -1,5 +1,5 @@
 import type pino from "pino";
-import { Dispatcher, ProxyAgent, request, setGlobalDispatcher } from "undici";
+import { Dispatcher, Pool, ProxyAgent, request, setGlobalDispatcher } from "undici";
 import type { Config, OutboundProxyChooser } from "../models/config";
 
 type ProxyConfig = Pick<
@@ -9,7 +9,24 @@ type ProxyConfig = Pick<
 	| "outboundProxyUsername"
 	| "outboundProxyPassword"
 	| "outboundProxyCooldownMs"
+	| "directFetchPoolConnections"
+	| "directFetchPoolKeepaliveMs"
+	| "directFetchPoolMaxConcurrentStreams"
+	| "directFetchHttp2Enabled"
 >;
+
+// Pool only handles one origin. Any future fetch() to a non-web.archive.org
+// host will throw InvalidArgumentError — intentional boundary defence.
+const WAYBACK_ORIGIN = "https://web.archive.org";
+
+function buildPoolOpts(cfg: ProxyConfig): Pool.Options {
+	return {
+		connections: cfg.directFetchPoolConnections,
+		keepAliveTimeout: cfg.directFetchPoolKeepaliveMs,
+		allowH2: cfg.directFetchHttp2Enabled,
+		maxConcurrentStreams: cfg.directFetchPoolMaxConcurrentStreams,
+	};
+}
 
 /** URL hit by both the startup probe and the runtime re-probe. Chosen as the
  * real workload target so a successful probe implies the proxy can reach
@@ -53,7 +70,15 @@ export async function installOutboundProxy(
 	cfg: ProxyConfig,
 	logger: pino.Logger,
 ): Promise<RotatingProxyDispatcher | null> {
-	if (cfg.outboundProxyUrls.length === 0) return null;
+	if (cfg.outboundProxyUrls.length === 0) {
+		const pool = new Pool(WAYBACK_ORIGIN, buildPoolOpts(cfg));
+		setGlobalDispatcher(pool);
+		logger.info(
+			{ origin: WAYBACK_ORIGIN, ...buildPoolOpts(cfg) },
+			"[outbound-proxy] no proxy configured; installed direct Pool for web.archive.org",
+		);
+		return null;
+	}
 
 	const hasUser = !!cfg.outboundProxyUsername;
 	const hasPass = !!cfg.outboundProxyPassword;
