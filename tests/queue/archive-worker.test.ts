@@ -1,46 +1,13 @@
-// Tests for src/queue/archive-worker.ts (TASK-007).
+// Tests for src/queue/archive-worker.ts.
 //
-// `wayback-machine-downloader` is pure ESM and cannot be `require()`-d under
-// ts-jest's CommonJS harness. We jest.mock both the package and its
-// /lib/utils.js subpath with `__esModule: true` markers so the worker module
-// loads without touching the real runtime. The same pattern is used for
-// `bullmq` so the Worker constructor calls can be captured and verified.
+// The exact worker calls `directClient.fetchAtRequestedTime(url, time)` and
+// lets Wayback's `im_` endpoint pick the nearest capture server-side — the
+// CDX snapshot-resolver is no longer involved. The crawl worker enumerates
+// URLs via a passed-in cdxFetch, then downloads each via
+// `fetchAtResolvedTime`. Mocks stay tight: directClient and cdxFetch are
+// jest.fn()s wired through the public StartArchiveWorkersOpts contract.
 
-// --- Module mocks ------------------------------------------------------------
-
-const downloadFilesMock = jest.fn().mockResolvedValue(undefined);
-const WaybackMachineDownloaderMock = jest
-	.fn()
-	.mockImplementation(() => ({ download_files: downloadFilesMock }));
-const normalizeBaseUrlInputMock = jest.fn((url: string) => {
-	const host = new URL(url).hostname.replace(/^www\./, "");
-	return {
-		canonicalUrl: `https://${host}/`,
-		variants: [`https://${host}/`],
-		bareHost: host,
-		unicodeHost: host,
-	};
-});
-
-const setDebugModeMock = jest.fn();
-
-jest.mock(
-	"wayback-machine-downloader",
-	() => ({
-		__esModule: true,
-		WaybackMachineDownloader: WaybackMachineDownloaderMock,
-		setDebugMode: setDebugModeMock,
-	}),
-	{ virtual: true },
-);
-// We inlined `normalizeBaseUrlInput` into our own shim module (see
-// `src/lib/normalize-base-url.ts`) because the upstream `lib/utils.js` is not
-// in the package's `exports` field — esbuild and strict ESM resolvers reject
-// the subpath. Mock the shim instead.
-jest.mock("../../src/lib/normalize-base-url", () => ({
-	__esModule: true,
-	normalizeBaseUrlInput: normalizeBaseUrlInputMock,
-}));
+// --- bullmq harness ----------------------------------------------------------
 
 interface CapturedWorker {
 	name: string;
@@ -72,30 +39,22 @@ const WorkerMock = jest
 			return instance;
 		},
 	) as unknown as jest.Mock & { RateLimitError: jest.Mock };
-// `Worker.RateLimitError` is a static factory method on the BullMQ Worker class.
 (WorkerMock as unknown as { RateLimitError: jest.Mock }).RateLimitError = rateLimitErrorMock;
-
-class UnrecoverableErrorMock extends Error {
-	constructor(message?: string) {
-		super(message);
-		this.name = "UnrecoverableError";
-	}
-}
 
 jest.mock("bullmq", () => ({
 	__esModule: true,
 	Worker: WorkerMock,
 	QueueEvents: jest.fn(),
-	UnrecoverableError: UnrecoverableErrorMock,
 }));
 
 // --- Imports (after mocks) ---------------------------------------------------
 
 import type pino from "pino";
+import type { RequestedResult, ResolvedResult } from "../../src/clients/wayback-direct-client";
 import {
+	type ArchiveDirectClient,
 	attachQueueLogger,
 	startArchiveWorkers,
-	startDownloadWatcher,
 } from "../../src/queue/archive-worker";
 import { QUEUE_CRAWL, QUEUE_EXACT } from "../../src/queue/jobs";
 
@@ -107,9 +66,6 @@ function makeLogger(): pino.Logger {
 		warn: jest.fn(),
 		error: jest.fn(),
 		debug: jest.fn(),
-		// `child()` mirrors pino's API. The worker uses it to scope downloader
-		// output; returning the same stub is enough for these tests because
-		// they assert on log content, not on child-binding propagation.
 		child: jest.fn(),
 	};
 	stub.child.mockReturnValue(stub);
@@ -118,19 +74,21 @@ function makeLogger(): pino.Logger {
 
 function makeCache(dir = "/cache"): {
 	cacheDirForJob: jest.Mock;
+	writeFile: jest.Mock;
+	writeContentTypeSidecar: jest.Mock;
 	writeNotFoundSentinel: jest.Mock;
-	writeTentativeNotFoundSentinel: jest.Mock;
 	writeResolvedTimeSidecar: jest.Mock;
 	lookup: jest.Mock;
 } {
 	return {
 		cacheDirForJob: jest.fn((time: string, host: string) => `${dir}/v2/${time}/${host}`),
+		writeFile: jest.fn().mockResolvedValue(undefined),
+		writeContentTypeSidecar: jest.fn().mockResolvedValue(undefined),
 		writeNotFoundSentinel: jest.fn().mockResolvedValue(undefined),
-		writeTentativeNotFoundSentinel: jest.fn().mockResolvedValue(undefined),
 		writeResolvedTimeSidecar: jest.fn().mockResolvedValue(undefined),
 		// Default to a non-null hit so the exact worker's post-download
-		// validation passes. Tests that exercise the "downloader produced no
-		// usable file" path override this explicitly.
+		// sanity check passes. Tests that exercise the "no usable file" path
+		// override this explicitly.
 		lookup: jest.fn().mockResolvedValue({
 			absPath: `${dir}/v2/anytime/anyhost/index.html`,
 			contentType: "text/html",
@@ -138,11 +96,39 @@ function makeCache(dir = "/cache"): {
 	};
 }
 
-// Default resolver echoes the requested time so legacy tests that expect
-// from_timestamp === to_timestamp === requested still pass without changes.
-// Tests that exercise resolution semantics override this explicitly.
-function defaultResolver(): jest.Mock {
-	return jest.fn((_variants: string[], time: string) => Promise.resolve(time));
+function defaultDirectClient(): {
+	fetchAtRequestedTime: jest.Mock;
+	fetchAtResolvedTime: jest.Mock;
+} {
+	return {
+		fetchAtRequestedTime: jest.fn(
+			async (_url: string, _ts: string): Promise<RequestedResult> => ({
+				outcome: "ok" as const,
+				body: Buffer.from("<html></html>"),
+				contentType: "text/html",
+				resolvedTime: "20200115000000",
+			}),
+		),
+		fetchAtResolvedTime: jest.fn(
+			async (_url: string, _ts: string): Promise<ResolvedResult> => ({
+				outcome: "ok" as const,
+				body: Buffer.from("<html></html>"),
+				contentType: "text/html",
+			}),
+		),
+	};
+}
+
+function jsonResponse(body: unknown, init: ResponseInit = {}): Response {
+	return new Response(JSON.stringify(body), {
+		status: 200,
+		headers: { "content-type": "application/json" },
+		...init,
+	});
+}
+
+function emptyCdxFetch(): jest.Mock {
+	return jest.fn(async () => jsonResponse([]));
 }
 
 function baseOpts(
@@ -154,16 +140,12 @@ function baseOpts(
 			typeof startArchiveWorkers
 		>[0]["connection"],
 		cache: cache as unknown as Parameters<typeof startArchiveWorkers>[0]["cache"],
-		resolver: defaultResolver() as unknown as Parameters<typeof startArchiveWorkers>[0]["resolver"],
+		directClient: defaultDirectClient() as unknown as ArchiveDirectClient,
+		cdxFetch: emptyCdxFetch() as unknown as typeof fetch,
 		logger: makeLogger(),
 		bullmqPrefix: "tm",
 		workerConcurrency: 2,
 		workerRateLimitPerSec: 1,
-		downloaderThreadsCount: 3,
-		// Default: bidirectional disabled for both — keeps existing test assertions
-		// stable. Tests exercising asset-vs-direct policy override these explicitly.
-		allowLaterFallbackDirect: false,
-		allowLaterFallbackAsset: false,
 		...overrides,
 	};
 }
@@ -177,9 +159,6 @@ function findWorker(name: string): CapturedWorker {
 beforeEach(() => {
 	WorkerMock.mockClear();
 	rateLimitErrorMock.mockClear();
-	WaybackMachineDownloaderMock.mockClear();
-	downloadFilesMock.mockReset().mockResolvedValue(undefined);
-	normalizeBaseUrlInputMock.mockClear();
 	workerInstances.length = 0;
 });
 
@@ -264,66 +243,75 @@ describe("worker progress emission", () => {
 		return updateProgress.mock.calls.map((c) => (c[0] as { stage: string }).stage);
 	}
 
-	it("exact processor emits picked_up → availability_start → resolved → download_start → download_done", async () => {
-		const resolver = jest.fn().mockResolvedValue("20200115000000");
-		startArchiveWorkers(baseOpts({ resolver }));
+	it("exact processor emits picked_up → download_start → download_file → download_done on ok", async () => {
+		startArchiveWorkers(baseOpts());
 		const worker = findWorker(QUEUE_EXACT);
 		const job = makeJob("e1", { url: "https://example.com/", time: "20200101000000" });
 		await worker.processor(job);
 		expect(progressStages(job.updateProgress)).toEqual([
 			"picked_up",
-			"availability_start",
-			"resolved",
 			"download_start",
+			"download_file",
 			"download_done",
 		]);
 	});
 
-	it("exact processor emits no_snapshot (not resolved) when resolver returns null", async () => {
-		const resolver = jest.fn().mockResolvedValue(null);
-		startArchiveWorkers(baseOpts({ resolver }));
+	it("exact processor stops at download_start when direct fetch returns not_found", async () => {
+		const directClient: ArchiveDirectClient = {
+			fetchAtRequestedTime: jest.fn(async () => ({ outcome: "not_found" as const })),
+			fetchAtResolvedTime: jest.fn(),
+		};
+		startArchiveWorkers(baseOpts({ directClient }));
 		const worker = findWorker(QUEUE_EXACT);
-		const job = makeJob("e2", { url: "https://example.com/", time: "20200101000000" });
+		const job = makeJob("e-nf", { url: "https://example.com/gone", time: "20200101000000" });
 		await worker.processor(job);
-		expect(progressStages(job.updateProgress)).toEqual([
-			"picked_up",
-			"availability_start",
-			"no_snapshot",
-		]);
+		// not_found is terminal: sentinel written, no download_done.
+		expect(progressStages(job.updateProgress)).toEqual(["picked_up", "download_start"]);
 	});
 
-	it("exact processor emits error stage before re-throwing on downloader failure", async () => {
-		downloadFilesMock.mockRejectedValueOnce(new Error("boom"));
-		const resolver = jest.fn().mockResolvedValue("20200115000000");
-		startArchiveWorkers(baseOpts({ resolver }));
+	it("exact processor emits error stage before re-throwing on fallback", async () => {
+		const directClient: ArchiveDirectClient = {
+			fetchAtRequestedTime: jest.fn(async () => ({
+				outcome: "fallback" as const,
+				reason: "boom",
+			})),
+			fetchAtResolvedTime: jest.fn(),
+		};
+		startArchiveWorkers(baseOpts({ directClient }));
 		const worker = findWorker(QUEUE_EXACT);
 		const job = makeJob("e3", { url: "https://example.com/", time: "20200101000000" });
-		await expect(worker.processor(job)).rejects.toThrow("boom");
+		await expect(worker.processor(job)).rejects.toThrow(/boom/);
 		const stages = progressStages(job.updateProgress);
 		expect(stages).toContain("error");
-		// error must be the final stage (after download_start)
 		expect(stages[stages.length - 1]).toBe("error");
-		// payload carries error message
 		const errCall = job.updateProgress.mock.calls.find(
 			(c) => (c[0] as { stage: string }).stage === "error",
 		);
-		expect((errCall?.[0] as { error?: string }).error).toBe("boom");
+		expect((errCall?.[0] as { error?: string }).error).toMatch(/boom/);
 	});
 
-	it("exact processor's resolved-stage payload carries url, time, resolved, queue, jobId", async () => {
-		const resolver = jest.fn().mockResolvedValue("20200115000000");
-		startArchiveWorkers(baseOpts({ resolver }));
+	it("download_done payload carries the resolvedTime extracted from the im_ redirect", async () => {
+		const directClient: ArchiveDirectClient = {
+			fetchAtRequestedTime: jest.fn(async () => ({
+				outcome: "ok" as const,
+				body: Buffer.from("ok"),
+				contentType: "text/html",
+				resolvedTime: "20200115000000",
+			})),
+			fetchAtResolvedTime: jest.fn(),
+		};
+		startArchiveWorkers(baseOpts({ directClient }));
 		const worker = findWorker(QUEUE_EXACT);
 		const job = makeJob("e-payload", {
 			url: "https://example.com/",
 			time: "20200101000000",
 		});
 		await worker.processor(job);
-		const resolvedCall = job.updateProgress.mock.calls.find(
-			(c) => (c[0] as { stage: string }).stage === "resolved",
+		const doneCall = job.updateProgress.mock.calls.find(
+			(c) => (c[0] as { stage: string }).stage === "download_done",
 		);
-		expect(resolvedCall?.[0]).toMatchObject({
-			stage: "resolved",
+		expect(doneCall?.[0]).toMatchObject({
+			stage: "download_done",
 			queue: QUEUE_EXACT,
 			jobId: "e-payload",
 			url: "https://example.com/",
@@ -332,7 +320,7 @@ describe("worker progress emission", () => {
 		});
 	});
 
-	it("crawl processor emits picked_up → download_start → download_done", async () => {
+	it("crawl processor emits picked_up → download_start → download_done (empty enumeration)", async () => {
 		startArchiveWorkers(baseOpts());
 		const worker = findWorker(QUEUE_CRAWL);
 		const job = makeJob("c1", { host: "example.com", time: "20200101000000" });
@@ -344,26 +332,24 @@ describe("worker progress emission", () => {
 		]);
 	});
 
-	it("crawl processor emits error stage before re-throwing", async () => {
-		downloadFilesMock.mockRejectedValueOnce(new Error("crawl-bust"));
-		startArchiveWorkers(baseOpts());
+	it("crawl processor emits error stage before re-throwing on CDX failure", async () => {
+		const cdxFetch = jest.fn(async () => new Response("err", { status: 500 }));
+		startArchiveWorkers(baseOpts({ cdxFetch: cdxFetch as unknown as typeof fetch }));
 		const worker = findWorker(QUEUE_CRAWL);
 		const job = makeJob("c2", { host: "example.com", time: "20200101000000" });
-		await expect(worker.processor(job)).rejects.toThrow("crawl-bust");
+		await expect(worker.processor(job)).rejects.toThrow(/CDX enumeration 500/);
 		const stages = progressStages(job.updateProgress);
 		expect(stages[stages.length - 1]).toBe("error");
 	});
 
 	it("worker does NOT fail the job when updateProgress throws (observability never blocks correctness)", async () => {
-		const resolver = jest.fn().mockResolvedValue("20200115000000");
-		startArchiveWorkers(baseOpts({ resolver }));
+		startArchiveWorkers(baseOpts());
 		const worker = findWorker(QUEUE_EXACT);
 		const job = makeJob("e-update-fails", {
 			url: "https://example.com/",
 			time: "20200101000000",
 		});
 		job.updateProgress.mockRejectedValue(new Error("redis down"));
-		// Should still resolve successfully — progress writes are best-effort.
 		await expect(worker.processor(job)).resolves.toBeUndefined();
 	});
 });
@@ -388,7 +374,7 @@ describe("attachQueueLogger progress event", () => {
 		handlers.progress({
 			jobId: "p1",
 			data: {
-				stage: "resolved",
+				stage: "download_done",
 				jobId: "p1",
 				queue: "archive-exact",
 				ts: 1,
@@ -400,7 +386,7 @@ describe("attachQueueLogger progress event", () => {
 				queue: "archive-exact",
 				jobId: "p1",
 				event: "progress",
-				progress: expect.objectContaining({ stage: "resolved" }),
+				progress: expect.objectContaining({ stage: "download_done" }),
 			}),
 			expect.stringContaining("progress"),
 		);
@@ -410,26 +396,55 @@ describe("attachQueueLogger progress event", () => {
 // --- Exact processor ---------------------------------------------------------
 
 describe("exact worker processor", () => {
-	it("constructs WaybackMachineDownloader with exact_url:true and matching from/to timestamps", async () => {
+	it("invokes directClient.fetchAtRequestedTime with the URL and requested timestamp (no CDX)", async () => {
 		const cache = makeCache();
-		startArchiveWorkers(baseOpts({ cache }));
+		const directClient = defaultDirectClient();
+		startArchiveWorkers(baseOpts({ cache, directClient }));
 		const worker = findWorker(QUEUE_EXACT);
 		await worker.processor({
 			id: "j1",
 			data: { url: "https://example.com/", time: "20200101000000" },
 			token: "tk-1",
 		});
-		expect(WaybackMachineDownloaderMock).toHaveBeenCalledTimes(1);
-		const args = WaybackMachineDownloaderMock.mock.calls[0][0];
-		expect(args.exact_url).toBe(true);
-		expect(args.from_timestamp).toBe("20200101000000");
-		expect(args.to_timestamp).toBe("20200101000000");
-		expect(args.threads_count).toBe(3);
-		expect(args.rewrite_mode).toBe("as-is");
-		expect(args.canonical_action).toBe("keep");
-		// download_external_assets is true on the exact worker so referenced
-		// CSS/images are pulled in the same job rather than re-queuing per-asset.
-		expect(args.download_external_assets).toBe(true);
+		expect(directClient.fetchAtRequestedTime).toHaveBeenCalledTimes(1);
+		expect(directClient.fetchAtRequestedTime).toHaveBeenCalledWith(
+			"https://example.com/",
+			"20200101000000",
+		);
+		// Worker never touches fetchAtResolvedTime — that path was the CDX-resolved
+		// download leg, removed when CDX dependency was dropped.
+		expect(directClient.fetchAtResolvedTime).not.toHaveBeenCalled();
+	});
+
+	it("writes the response body to cache.writeFile keyed on (url, requested time, body)", async () => {
+		const cache = makeCache();
+		const body = Buffer.from("page-bytes");
+		const directClient: ArchiveDirectClient = {
+			fetchAtRequestedTime: jest.fn(async () => ({
+				outcome: "ok" as const,
+				body,
+				contentType: "text/html; charset=utf-8",
+				resolvedTime: "20200115000000",
+			})),
+			fetchAtResolvedTime: jest.fn(),
+		};
+		startArchiveWorkers(baseOpts({ cache, directClient }));
+		const worker = findWorker(QUEUE_EXACT);
+		await worker.processor({
+			id: "j-write",
+			data: { url: "https://example.com/about", time: "20200101000000" },
+			token: "tk-w",
+		});
+		expect(cache.writeFile).toHaveBeenCalledWith(
+			"https://example.com/about",
+			"20200101000000",
+			body,
+		);
+		expect(cache.writeContentTypeSidecar).toHaveBeenCalledWith(
+			"https://example.com/about",
+			"20200101000000",
+			"text/html; charset=utf-8",
+		);
 	});
 
 	it("derives directory from cache.cacheDirForJob(time, hostname) — preserves 'www.'", async () => {
@@ -444,19 +459,6 @@ describe("exact worker processor", () => {
 		// hostname preserves "www." — www.example.com and example.com are
 		// stored as separate cache entries.
 		expect(cache.cacheDirForJob).toHaveBeenCalledWith("20200101000000", "www.example.com");
-		const args = WaybackMachineDownloaderMock.mock.calls[0][0];
-		expect(args.directory).toBe("/c/v2/20200101000000/www.example.com");
-	});
-
-	it("invokes download_files exactly once", async () => {
-		startArchiveWorkers(baseOpts());
-		const worker = findWorker(QUEUE_EXACT);
-		await worker.processor({
-			id: "j3",
-			data: { url: "https://example.com/", time: "20200101000000" },
-			token: "tk-3",
-		});
-		expect(downloadFilesMock).toHaveBeenCalledTimes(1);
 	});
 
 	it("rejects invalid ExactUrlJob payloads via the asserter", async () => {
@@ -471,9 +473,15 @@ describe("exact worker processor", () => {
 		).rejects.toThrow(/Invalid job/);
 	});
 
-	it("calls worker.rateLimit(60000) and throws Worker.RateLimitError() on a 429 error", async () => {
-		downloadFilesMock.mockRejectedValueOnce(new Error("HTTP 429 too many requests"));
-		startArchiveWorkers(baseOpts());
+	it("calls worker.rateLimit(60000) and throws Worker.RateLimitError() on a 429 fallback", async () => {
+		const directClient: ArchiveDirectClient = {
+			fetchAtRequestedTime: jest.fn(async () => ({
+				outcome: "fallback" as const,
+				reason: "http-429",
+			})),
+			fetchAtResolvedTime: jest.fn(),
+		};
+		startArchiveWorkers(baseOpts({ directClient }));
 		const worker = findWorker(QUEUE_EXACT);
 		await expect(
 			worker.processor({
@@ -486,9 +494,15 @@ describe("exact worker processor", () => {
 		expect(rateLimitErrorMock).toHaveBeenCalledTimes(1);
 	});
 
-	it("re-throws non-rate-limit errors so BullMQ exponential backoff retries", async () => {
-		downloadFilesMock.mockRejectedValueOnce(new Error("network blip"));
-		startArchiveWorkers(baseOpts());
+	it("re-throws non-rate-limit fallback errors so BullMQ exponential backoff retries", async () => {
+		const directClient: ArchiveDirectClient = {
+			fetchAtRequestedTime: jest.fn(async () => ({
+				outcome: "fallback" as const,
+				reason: "ETIMEDOUT",
+			})),
+			fetchAtResolvedTime: jest.fn(),
+		};
+		startArchiveWorkers(baseOpts({ directClient }));
 		const worker = findWorker(QUEUE_EXACT);
 		await expect(
 			worker.processor({
@@ -496,175 +510,48 @@ describe("exact worker processor", () => {
 				data: { url: "https://example.com/", time: "20200101000000" },
 				token: "tk-err",
 			}),
-		).rejects.toThrow("network blip");
+		).rejects.toThrow(/ETIMEDOUT/);
 		expect(worker.rateLimit).not.toHaveBeenCalled();
 		expect(rateLimitErrorMock).not.toHaveBeenCalled();
 	});
 
-	it("calls resolver with base.variants and requestedTime BEFORE constructing downloader", async () => {
+	it("on not_found: writes sentinel, returns cleanly, skips writeFile and post-validation lookup", async () => {
 		const cache = makeCache();
-		const resolver = jest.fn().mockResolvedValue("20200115000000");
-		startArchiveWorkers(baseOpts({ cache, resolver }));
+		const directClient: ArchiveDirectClient = {
+			fetchAtRequestedTime: jest.fn(async () => ({ outcome: "not_found" as const })),
+			fetchAtResolvedTime: jest.fn(),
+		};
+		startArchiveWorkers(baseOpts({ cache, directClient }));
 		const worker = findWorker(QUEUE_EXACT);
-		await worker.processor({
-			id: "j-r",
-			data: { url: "https://example.com/", time: "20200101000000" },
-			token: "tk-r",
-		});
-		expect(resolver).toHaveBeenCalledTimes(1);
-		const [variants, requestedTime] = resolver.mock.calls[0];
-		expect(Array.isArray(variants)).toBe(true);
-		expect(requestedTime).toBe("20200101000000");
-		// Downloader receives the RESOLVED time, not the requested time.
-		expect(WaybackMachineDownloaderMock).toHaveBeenCalledTimes(1);
-		const args = WaybackMachineDownloaderMock.mock.calls[0][0];
-		expect(args.from_timestamp).toBe("20200115000000");
-		expect(args.to_timestamp).toBe("20200115000000");
-	});
-
-	it("passes allowLaterFallbackDirect=true to resolver for a direct/top-level URL", async () => {
-		// Direct URL (no asset extension) → worker selects the "direct" flag.
-		const resolver = jest.fn().mockResolvedValue("20200115000000");
-		startArchiveWorkers(
-			baseOpts({ resolver, allowLaterFallbackDirect: true, allowLaterFallbackAsset: false }),
-		);
-		const worker = findWorker(QUEUE_EXACT);
-		await worker.processor({
-			id: "j-direct",
-			data: { url: "https://example.com/", time: "20200101000000" },
-			token: "tk-d",
-		});
-		const [, , allowLaterFallback] = resolver.mock.calls[0];
-		expect(allowLaterFallback).toBe(true);
-	});
-
-	it("passes allowLaterFallbackAsset=true to resolver for an asset URL", async () => {
-		// Asset URL (.gif) → worker selects the "asset" flag, regardless of
-		// the direct policy. This is the AOL screenname_logo.gif regression
-		// fix: the proxy will no longer write a 404 sentinel just because the
-		// exact requested timestamp had no statuscode:200 capture.
-		const resolver = jest.fn().mockResolvedValue("20010914224112");
-		startArchiveWorkers(
-			baseOpts({ resolver, allowLaterFallbackDirect: false, allowLaterFallbackAsset: true }),
-		);
-		const worker = findWorker(QUEUE_EXACT);
-		await worker.processor({
-			id: "j-asset",
-			data: {
-				url: "https://www.aol.com/gr/hp01/screenname_logo.gif",
-				time: "20010913100012",
-			},
-			token: "tk-a",
-		});
-		const [, , allowLaterFallback] = resolver.mock.calls[0];
-		expect(allowLaterFallback).toBe(true);
-	});
-
-	it("passes allowLaterFallbackDirect=false to resolver for a direct URL when configured strict", async () => {
-		// Asymmetric config: direct strict, asset bidirectional (the default
-		// shipped policy). A direct URL must NOT inherit the asset flag.
-		const resolver = jest.fn().mockResolvedValue("20200101000000");
-		startArchiveWorkers(
-			baseOpts({ resolver, allowLaterFallbackDirect: false, allowLaterFallbackAsset: true }),
-		);
-		const worker = findWorker(QUEUE_EXACT);
-		await worker.processor({
-			id: "j-direct-strict",
-			data: { url: "https://example.com/about", time: "20200101000000" },
-			token: "tk-ds",
-		});
-		const [, , allowLaterFallback] = resolver.mock.calls[0];
-		expect(allowLaterFallback).toBe(false);
-	});
-
-	it("writes sentinel and skips downloader when resolver returns null", async () => {
-		const cache = makeCache();
-		const resolver = jest.fn().mockResolvedValue(null);
-		startArchiveWorkers(baseOpts({ cache, resolver }));
-		const worker = findWorker(QUEUE_EXACT);
-		await worker.processor({
-			id: "j-null",
-			data: { url: "https://example.com/", time: "20200101000000" },
-			token: "tk-null",
-		});
-		expect(cache.writeNotFoundSentinel).toHaveBeenCalledWith(
-			"20200101000000",
-			"https://example.com/",
-		);
-		expect(WaybackMachineDownloaderMock).not.toHaveBeenCalled();
-		expect(downloadFilesMock).not.toHaveBeenCalled();
-	});
-
-	it("writes tentative sentinel and fails with UnrecoverableError when resolver throws indeterminate-CDX error", async () => {
-		// snapshot-resolver throws this exact prefix when CDX is transport-
-		// unreachable across all variants/retries. Worker must catch, write a
-		// short-lived tentative sentinel, then throw UnrecoverableError so the
-		// job lands in the Failed column (BullMQ skips retries for this error
-		// subclass) — otherwise the job would be marked completed despite
-		// progress stage="error", and foreground requests would still wait
-		// ~47s before 404'ing on retry.
-		const cache = makeCache();
-		const resolver = jest
-			.fn()
-			.mockRejectedValue(
-				new Error(
-					"[snapshot-resolver] all CDX queries failed (transport/non-OK/parse) — refusing to claim 'no snapshot' on indeterminate state",
-				),
-			);
-		startArchiveWorkers(baseOpts({ cache, resolver }));
-		const worker = findWorker(QUEUE_EXACT);
+		// Must NOT throw — not_found is the terminal "definitely not in archive"
+		// outcome. The proxy will see the sentinel on its next lookup and 404.
 		await expect(
 			worker.processor({
-				id: "j-indet",
-				data: { url: "https://i.ihost.com/i/c.gif", time: "20010913100802" },
-				token: "tk-indet",
-			}),
-		).rejects.toThrow(UnrecoverableErrorMock);
-		expect(cache.writeTentativeNotFoundSentinel).toHaveBeenCalledWith(
-			"20010913100802",
-			"https://i.ihost.com/i/c.gif",
-		);
-		expect(cache.writeNotFoundSentinel).not.toHaveBeenCalled();
-		expect(WaybackMachineDownloaderMock).not.toHaveBeenCalled();
-	});
-
-	it("still throws (BullMQ retries) on errors other than the indeterminate-CDX message", async () => {
-		// Generic errors must continue to propagate so BullMQ retries cover
-		// transient pod-restart / network-blip cases. Only the specific
-		// snapshot-resolver throw is treated as a non-retriable signal.
-		const cache = makeCache();
-		const resolver = jest.fn().mockRejectedValue(new Error("kaboom: redis disconnected"));
-		startArchiveWorkers(baseOpts({ cache, resolver }));
-		const worker = findWorker(QUEUE_EXACT);
-		await expect(
-			worker.processor({
-				id: "j-generic",
-				data: { url: "https://example.com/", time: "20200101000000" },
-				token: "tk-generic",
-			}),
-		).rejects.toThrow("kaboom: redis disconnected");
-		expect(cache.writeTentativeNotFoundSentinel).not.toHaveBeenCalled();
-		expect(cache.writeNotFoundSentinel).not.toHaveBeenCalled();
-	});
-
-	it("returns success (no throw, no retry) when resolver returns null", async () => {
-		const resolver = jest.fn().mockResolvedValue(null);
-		startArchiveWorkers(baseOpts({ resolver }));
-		const worker = findWorker(QUEUE_EXACT);
-		// Should resolve successfully so BullMQ does not retry.
-		await expect(
-			worker.processor({
-				id: "j-null2",
-				data: { url: "https://example.com/", time: "20200101000000" },
-				token: "tk-null2",
+				id: "j-nf",
+				data: { url: "https://example.com/missing", time: "20200101000000" },
+				token: "tk-nf",
 			}),
 		).resolves.toBeUndefined();
+		expect(cache.writeNotFoundSentinel).toHaveBeenCalledWith(
+			"20200101000000",
+			"https://example.com/missing",
+		);
+		expect(cache.writeFile).not.toHaveBeenCalled();
+		expect(cache.lookup).not.toHaveBeenCalled();
 	});
 
-	it("writes resolved-time sidecar after successful download (exact worker)", async () => {
+	it("writes resolved-time sidecar from the im_ redirect's timestamp", async () => {
 		const cache = makeCache();
-		const resolver = jest.fn().mockResolvedValue("20010822231227");
-		startArchiveWorkers(baseOpts({ cache, resolver }));
+		const directClient: ArchiveDirectClient = {
+			fetchAtRequestedTime: jest.fn(async () => ({
+				outcome: "ok" as const,
+				body: Buffer.from("ok"),
+				contentType: "text/html",
+				resolvedTime: "20010822231227",
+			})),
+			fetchAtResolvedTime: jest.fn(),
+		};
+		startArchiveWorkers(baseOpts({ cache, directClient }));
 		const worker = findWorker(QUEUE_EXACT);
 		await worker.processor({
 			id: "j-sidecar",
@@ -678,27 +565,55 @@ describe("exact worker processor", () => {
 		);
 	});
 
-	it("does NOT write resolved-time sidecar when resolver returns null", async () => {
+	it("does NOT write resolved-time sidecar when the im_ redirect carried no extractable timestamp", async () => {
 		const cache = makeCache();
-		const resolver = jest.fn().mockResolvedValue(null);
-		startArchiveWorkers(baseOpts({ cache, resolver }));
+		const directClient: ArchiveDirectClient = {
+			fetchAtRequestedTime: jest.fn(async () => ({
+				outcome: "ok" as const,
+				body: Buffer.from("ok"),
+				contentType: "text/html",
+				// resolvedTime intentionally omitted
+			})),
+			fetchAtResolvedTime: jest.fn(),
+		};
+		startArchiveWorkers(baseOpts({ cache, directClient }));
 		const worker = findWorker(QUEUE_EXACT);
 		await worker.processor({
-			id: "j-nosidecar",
+			id: "j-no-sidecar",
 			data: { url: "https://example.com/", time: "20010912000000" },
 			token: "tk-ns",
 		});
 		expect(cache.writeResolvedTimeSidecar).not.toHaveBeenCalled();
 	});
 
-	it("throws when downloader produces no usable file for THIS (url, time)", async () => {
+	it("ignores malformed resolvedTime values from the direct client", async () => {
 		const cache = makeCache();
-		// Downloader "succeeds" but no file for the requested URL ends up on disk.
-		// Without this validation a host-level "any file present" check would
-		// have marked the job complete and the proxy would 502 on re-lookup.
+		const directClient: ArchiveDirectClient = {
+			fetchAtRequestedTime: jest.fn(async () => ({
+				outcome: "ok" as const,
+				body: Buffer.from("ok"),
+				contentType: "text/html",
+				resolvedTime: "not-a-timestamp",
+			})),
+			fetchAtResolvedTime: jest.fn(),
+		};
+		startArchiveWorkers(baseOpts({ cache, directClient }));
+		const worker = findWorker(QUEUE_EXACT);
+		await worker.processor({
+			id: "j-bad-ts",
+			data: { url: "https://example.com/", time: "20010912000000" },
+			token: "tk-bts",
+		});
+		// Malformed values must never be written as a sidecar — readResolvedTime
+		// on lookup re-validates with the same regex, but the write path must
+		// not pollute the cache with non-conforming data.
+		expect(cache.writeResolvedTimeSidecar).not.toHaveBeenCalled();
+	});
+
+	it("throws when post-download lookup yields no file for THIS (url, time)", async () => {
+		const cache = makeCache();
 		cache.lookup.mockResolvedValueOnce(null);
-		const resolver = jest.fn().mockResolvedValue("20010822231227");
-		startArchiveWorkers(baseOpts({ cache, resolver }));
+		startArchiveWorkers(baseOpts({ cache }));
 		const worker = findWorker(QUEUE_EXACT);
 		await expect(
 			worker.processor({
@@ -709,11 +624,16 @@ describe("exact worker processor", () => {
 		).rejects.toThrow(/no usable file/);
 	});
 
-	it("does NOT write resolved-time sidecar when downloader throws", async () => {
+	it("does NOT write resolved-time sidecar when direct fetch fails", async () => {
 		const cache = makeCache();
-		const resolver = jest.fn().mockResolvedValue("20010822231227");
-		downloadFilesMock.mockRejectedValueOnce(new Error("download failed"));
-		startArchiveWorkers(baseOpts({ cache, resolver }));
+		const directClient: ArchiveDirectClient = {
+			fetchAtRequestedTime: jest.fn(async () => ({
+				outcome: "fallback" as const,
+				reason: "download failed",
+			})),
+			fetchAtResolvedTime: jest.fn(),
+		};
+		startArchiveWorkers(baseOpts({ cache, directClient }));
 		const worker = findWorker(QUEUE_EXACT);
 		await expect(
 			worker.processor({
@@ -721,34 +641,17 @@ describe("exact worker processor", () => {
 				data: { url: "https://example.com/", time: "20010912000000" },
 				token: "tk-th",
 			}),
-		).rejects.toThrow("download failed");
+		).rejects.toThrow(/download failed/);
 		expect(cache.writeResolvedTimeSidecar).not.toHaveBeenCalled();
 	});
 
-	it("logs resolved snapshot at info level on successful resolution", async () => {
+	it("logs warning on not_found", async () => {
 		const logger = makeLogger();
-		const resolver = jest.fn().mockResolvedValue("20200115000000");
-		startArchiveWorkers(baseOpts({ logger, resolver }));
-		const worker = findWorker(QUEUE_EXACT);
-		await worker.processor({
-			id: "j-log",
-			data: { url: "https://example.com/", time: "20200101000000" },
-			token: "tk-log",
-		});
-		expect(logger.info).toHaveBeenCalledWith(
-			expect.objectContaining({
-				url: "https://example.com/",
-				time: "20200101000000",
-				resolved: "20200115000000",
-			}),
-			expect.stringContaining("resolved"),
-		);
-	});
-
-	it("logs warning on null resolution (no snapshot)", async () => {
-		const logger = makeLogger();
-		const resolver = jest.fn().mockResolvedValue(null);
-		startArchiveWorkers(baseOpts({ logger, resolver }));
+		const directClient: ArchiveDirectClient = {
+			fetchAtRequestedTime: jest.fn(async () => ({ outcome: "not_found" as const })),
+			fetchAtResolvedTime: jest.fn(),
+		};
+		startArchiveWorkers(baseOpts({ logger, directClient }));
 		const worker = findWorker(QUEUE_EXACT);
 		await worker.processor({
 			id: "j-warn",
@@ -799,24 +702,100 @@ describe("crawl worker processor", () => {
 		jest.useRealTimers();
 	});
 
-	it("constructs WaybackMachineDownloader with exact_url:false, dayWindow timestamps, and base from 'https://<host>'", async () => {
-		const cache = makeCache();
-		startArchiveWorkers(baseOpts({ cache }));
+	function makeCrawlJob(
+		id: string,
+		data: Record<string, unknown>,
+		extendLock = jest.fn().mockResolvedValue(0),
+	): {
+		id: string;
+		data: Record<string, unknown>;
+		token: string;
+		updateProgress: jest.Mock;
+		extendLock: jest.Mock;
+	} {
+		return {
+			id,
+			data,
+			token: `tk-${id}`,
+			updateProgress: jest.fn().mockResolvedValue(undefined),
+			extendLock,
+		};
+	}
+
+	it("queries CDX with url=host/*, the dayWindow from/to, and statuscode:200/collapse=urlkey filters", async () => {
+		const cdxFetch = jest.fn(async () => jsonResponse([]));
+		startArchiveWorkers(baseOpts({ cdxFetch: cdxFetch as unknown as typeof fetch }));
 		const worker = findWorker(QUEUE_CRAWL);
-		const jobPromise = worker.processor({
-			id: "c1",
-			data: { host: "example.com", time: "20200101000000" },
-			token: "tk-c1",
-			extendLock: jest.fn().mockResolvedValue(0),
-		});
-		await jobPromise;
-		expect(normalizeBaseUrlInputMock).toHaveBeenCalledWith("https://example.com");
-		const args = WaybackMachineDownloaderMock.mock.calls[0][0];
-		expect(args.exact_url).toBe(false);
-		// Crawl uses dayWindow(time): all captures across the calendar day.
-		expect(args.from_timestamp).toBe("20200101000000");
-		expect(args.to_timestamp).toBe("20200101235959");
-		expect(args.directory).toBe("/cache/v2/20200101000000/example.com");
+		await worker.processor(makeCrawlJob("c-q", { host: "example.com", time: "20200101000000" }));
+		expect(cdxFetch).toHaveBeenCalledTimes(1);
+		const calledUrl = String((cdxFetch.mock.calls[0] as unknown[])[0]);
+		expect(calledUrl).toContain("url=example.com%2F*");
+		expect(calledUrl).toContain("from=20200101000000");
+		expect(calledUrl).toContain("to=20200101235959");
+		expect(calledUrl).toContain("filter=statuscode%3A200");
+		expect(calledUrl).toContain("collapse=urlkey");
+		expect(calledUrl).toContain("fl=original%2Ctimestamp");
+	});
+
+	it("writes each enumerated URL via cache.writeFile keyed on the JOB time, not the snapshot timestamp", async () => {
+		const cache = makeCache();
+		const cdxFetch = jest.fn(async () =>
+			jsonResponse([
+				["original", "timestamp"],
+				["http://example.com/", "20200101120000"],
+				["http://example.com/about", "20200101130000"],
+			]),
+		);
+		const body = Buffer.from("snap");
+		const directClient: ArchiveDirectClient = {
+			fetchAtRequestedTime: jest.fn(),
+			fetchAtResolvedTime: jest.fn(async () => ({
+				outcome: "ok" as const,
+				body,
+				contentType: "text/html",
+			})),
+		};
+		startArchiveWorkers(
+			baseOpts({ cache, cdxFetch: cdxFetch as unknown as typeof fetch, directClient }),
+		);
+		const worker = findWorker(QUEUE_CRAWL);
+		await worker.processor(
+			makeCrawlJob("c-write", { host: "example.com", time: "20200101000000" }),
+		);
+		expect(directClient.fetchAtResolvedTime).toHaveBeenCalledTimes(2);
+		expect(directClient.fetchAtResolvedTime).toHaveBeenCalledWith(
+			"http://example.com/",
+			"20200101120000",
+		);
+		expect(directClient.fetchAtResolvedTime).toHaveBeenCalledWith(
+			"http://example.com/about",
+			"20200101130000",
+		);
+		expect(cache.writeFile).toHaveBeenCalledWith("http://example.com/", "20200101000000", body);
+		expect(cache.writeFile).toHaveBeenCalledWith(
+			"http://example.com/about",
+			"20200101000000",
+			body,
+		);
+	});
+
+	it("skips CDX rows whose hostname differs from the job host (no cache layout drift)", async () => {
+		const cdxFetch = jest.fn(async () =>
+			jsonResponse([
+				["original", "timestamp"],
+				["http://example.com/", "20200101120000"],
+				["http://other.com/strange", "20200101130000"],
+			]),
+		);
+		const directClient = defaultDirectClient();
+		startArchiveWorkers(baseOpts({ cdxFetch: cdxFetch as unknown as typeof fetch, directClient }));
+		const worker = findWorker(QUEUE_CRAWL);
+		await worker.processor(makeCrawlJob("c-host", { host: "example.com", time: "20200101000000" }));
+		expect(directClient.fetchAtResolvedTime).toHaveBeenCalledTimes(1);
+		expect(directClient.fetchAtResolvedTime).toHaveBeenCalledWith(
+			"http://example.com/",
+			"20200101120000",
+		);
 	});
 
 	it("rejects invalid DomainCrawlJob payloads via the asserter", async () => {
@@ -833,327 +812,276 @@ describe("crawl worker processor", () => {
 	});
 
 	it("schedules a lock-extender that calls job.extendLock every 110s and clears in finally", async () => {
-		// Use a deferred resolution so we can advance timers while download_files is pending.
-		let resolveDownload: () => void = () => undefined;
-		downloadFilesMock.mockImplementationOnce(
+		let resolveCdx: (r: Response) => void = () => undefined;
+		const cdxFetch = jest.fn(
 			() =>
-				new Promise<void>((res) => {
-					resolveDownload = res;
+				new Promise<Response>((res) => {
+					resolveCdx = res;
 				}),
 		);
 		const extendLockMock = jest.fn().mockResolvedValue(0);
-		startArchiveWorkers(baseOpts());
+		startArchiveWorkers(baseOpts({ cdxFetch: cdxFetch as unknown as typeof fetch }));
 		const worker = findWorker(QUEUE_CRAWL);
-		const jobPromise = worker.processor({
-			id: "c-lock",
-			data: { host: "example.com", time: "20200101000000" },
-			token: "tk-lock",
-			extendLock: extendLockMock,
-		});
-		// Flush the resolver microtask so setInterval is scheduled before we advance timers.
+		const jobPromise = worker.processor(
+			makeCrawlJob("c-lock", { host: "example.com", time: "20200101000000" }, extendLockMock),
+		);
 		await Promise.resolve();
 		await Promise.resolve();
-		// Advance to just before the first interval fire to confirm 110s cadence.
 		jest.advanceTimersByTime(109_999);
 		expect(extendLockMock).not.toHaveBeenCalled();
 		jest.advanceTimersByTime(1);
 		expect(extendLockMock).toHaveBeenCalledTimes(1);
-		expect(extendLockMock).toHaveBeenCalledWith("tk-lock", 120_000);
-		// Second fire after another 110s.
+		expect(extendLockMock).toHaveBeenCalledWith("tk-c-lock", 120_000);
 		jest.advanceTimersByTime(110_000);
 		expect(extendLockMock).toHaveBeenCalledTimes(2);
-		// Resolve download and confirm the interval is cleared (no extra fires).
-		resolveDownload();
+		resolveCdx(jsonResponse([]));
 		await jobPromise;
 		jest.advanceTimersByTime(500_000);
 		expect(extendLockMock).toHaveBeenCalledTimes(2);
 	});
 
-	it("clears the lock-extender interval even when download_files throws", async () => {
-		downloadFilesMock.mockRejectedValueOnce(new Error("crawl failure"));
+	it("clears the lock-extender interval even when enumeration throws", async () => {
+		const cdxFetch = jest.fn(async () => new Response("err", { status: 500 }));
 		const extendLockMock = jest.fn().mockResolvedValue(0);
-		startArchiveWorkers(baseOpts());
+		startArchiveWorkers(baseOpts({ cdxFetch: cdxFetch as unknown as typeof fetch }));
 		const worker = findWorker(QUEUE_CRAWL);
 		await expect(
-			worker.processor({
-				id: "c-err",
-				data: { host: "example.com", time: "20200101000000" },
-				token: "tk-err",
-				extendLock: extendLockMock,
-			}),
-		).rejects.toThrow("crawl failure");
+			worker.processor(
+				makeCrawlJob("c-err", { host: "example.com", time: "20200101000000" }, extendLockMock),
+			),
+		).rejects.toThrow(/CDX enumeration 500/);
 		jest.advanceTimersByTime(500_000);
 		expect(extendLockMock).not.toHaveBeenCalled();
-	});
-
-	it("crawl worker does NOT invoke the snapshot resolver — it crawls the whole day window", async () => {
-		const resolver = jest.fn().mockResolvedValue("20200115000000");
-		startArchiveWorkers(baseOpts({ resolver }));
-		const worker = findWorker(QUEUE_CRAWL);
-		await worker.processor({
-			id: "c-r",
-			data: { host: "example.com", time: "20200101000000" },
-			token: "tk-cr",
-			extendLock: jest.fn().mockResolvedValue(0),
-		});
-		// Crawl uses dayWindow(time) directly, not the resolver — the goal
-		// is to capture all sibling pages within the day, not snap to one.
-		expect(resolver).not.toHaveBeenCalled();
-		const args = WaybackMachineDownloaderMock.mock.calls[0][0];
-		expect(args.from_timestamp).toBe("20200101000000");
-		expect(args.to_timestamp).toBe("20200101235959");
 	});
 
 	it("crawl worker does NOT write the not-found sentinel — sentinels are exact-URL-only", async () => {
 		const cache = makeCache();
 		startArchiveWorkers(baseOpts({ cache }));
 		const worker = findWorker(QUEUE_CRAWL);
-		await worker.processor({
-			id: "c-no-sentinel",
-			data: { host: "example.com", time: "20200101000000" },
-			token: "tk-cns",
-			extendLock: jest.fn().mockResolvedValue(0),
-		});
+		await worker.processor(
+			makeCrawlJob("c-no-sentinel", { host: "example.com", time: "20200101000000" }),
+		);
 		// Empty crawl results do not imply "404" — they may just mean the day
 		// window had no captures of any sibling. Sentinels would poison the
 		// negative cache for the host root.
 		expect(cache.writeNotFoundSentinel).not.toHaveBeenCalled();
 	});
 
+	it("triggers rateLimit() and re-throws RateLimitError when CDX rows return 429 fallback", async () => {
+		const cdxFetch = jest.fn(async () =>
+			jsonResponse([
+				["original", "timestamp"],
+				["http://example.com/", "20200101120000"],
+			]),
+		);
+		const directClient: ArchiveDirectClient = {
+			fetchAtRequestedTime: jest.fn(),
+			fetchAtResolvedTime: jest.fn(async () => ({
+				outcome: "fallback" as const,
+				reason: "http-429",
+			})),
+		};
+		startArchiveWorkers(baseOpts({ cdxFetch: cdxFetch as unknown as typeof fetch, directClient }));
+		const worker = findWorker(QUEUE_CRAWL);
+		await expect(
+			worker.processor(makeCrawlJob("c-429", { host: "example.com", time: "20200101000000" })),
+		).rejects.toThrow("RateLimitError");
+		expect(worker.rateLimit).toHaveBeenCalledWith(60_000);
+	});
+
+	it("processes CDX rows strictly sequentially (call N+1 waits for call N)", async () => {
+		// Use real timers — this test orchestrates microtasks across deferred promises.
+		jest.useRealTimers();
+		const cdxFetch = jest.fn(async () =>
+			jsonResponse([
+				["original", "timestamp"],
+				["http://example.com/a", "20200101120000"],
+				["http://example.com/b", "20200101130000"],
+				["http://example.com/c", "20200101140000"],
+			]),
+		);
+		const deferreds: Array<{
+			resolve: (v: ResolvedResult) => void;
+			promise: Promise<ResolvedResult>;
+		}> = [];
+		const fetchAtResolvedTime = jest.fn(() => {
+			let resolve!: (v: ResolvedResult) => void;
+			const promise = new Promise<ResolvedResult>((r) => {
+				resolve = r;
+			});
+			deferreds.push({ resolve, promise });
+			return promise;
+		});
+		const directClient: ArchiveDirectClient = {
+			fetchAtRequestedTime: jest.fn(),
+			fetchAtResolvedTime,
+		};
+		startArchiveWorkers(
+			baseOpts({ cdxFetch: cdxFetch as unknown as typeof fetch, directClient }),
+		);
+		const worker = findWorker(QUEUE_CRAWL);
+		const jobPromise = worker.processor(
+			makeCrawlJob("c-seq", { host: "example.com", time: "20200101000000" }),
+		);
+
+		// Allow CDX enumeration + first fetch dispatch to flush.
+		await new Promise((r) => setImmediate(r));
+		expect(fetchAtResolvedTime).toHaveBeenCalledTimes(1);
+
+		deferreds[0].resolve({
+			outcome: "ok",
+			body: Buffer.from("a"),
+			contentType: "text/html",
+		});
+		await new Promise((r) => setImmediate(r));
+		expect(fetchAtResolvedTime).toHaveBeenCalledTimes(2);
+
+		deferreds[1].resolve({
+			outcome: "ok",
+			body: Buffer.from("b"),
+			contentType: "text/html",
+		});
+		await new Promise((r) => setImmediate(r));
+		expect(fetchAtResolvedTime).toHaveBeenCalledTimes(3);
+
+		deferreds[2].resolve({
+			outcome: "ok",
+			body: Buffer.from("c"),
+			contentType: "text/html",
+		});
+		await jobPromise;
+	});
+
+	it("breaks the loop on first 429-style fallback; remaining rows are never fetched", async () => {
+		const cdxFetch = jest.fn(async () =>
+			jsonResponse([
+				["original", "timestamp"],
+				["http://example.com/a", "20200101120000"],
+				["http://example.com/b", "20200101130000"],
+				["http://example.com/c", "20200101140000"],
+				["http://example.com/d", "20200101150000"],
+				["http://example.com/e", "20200101160000"],
+			]),
+		);
+		let call = 0;
+		const fetchAtResolvedTime = jest.fn(async (): Promise<ResolvedResult> => {
+			call++;
+			if (call === 2) return { outcome: "fallback", reason: "http-429" };
+			return { outcome: "ok", body: Buffer.from("x"), contentType: "text/html" };
+		});
+		const directClient: ArchiveDirectClient = {
+			fetchAtRequestedTime: jest.fn(),
+			fetchAtResolvedTime,
+		};
+		startArchiveWorkers(
+			baseOpts({ cdxFetch: cdxFetch as unknown as typeof fetch, directClient }),
+		);
+		const worker = findWorker(QUEUE_CRAWL);
+		await expect(
+			worker.processor(makeCrawlJob("c-break", { host: "example.com", time: "20200101000000" })),
+		).rejects.toThrow("RateLimitError");
+		// Only rows 1 and 2 fetched — rows 3,4,5 skipped because of the break.
+		expect(fetchAtResolvedTime).toHaveBeenCalledTimes(2);
+		expect(worker.rateLimit).toHaveBeenCalledWith(60_000);
+	});
+
+	it("continues past per-row rejections; cache writes reflect only successful fetches", async () => {
+		const cache = makeCache();
+		const cdxFetch = jest.fn(async () =>
+			jsonResponse([
+				["original", "timestamp"],
+				["http://example.com/a", "20200101120000"],
+				["http://example.com/b", "20200101130000"],
+				["http://example.com/c", "20200101140000"],
+				["http://example.com/d", "20200101150000"],
+			]),
+		);
+		let call = 0;
+		const fetchAtResolvedTime = jest.fn(async (): Promise<ResolvedResult> => {
+			call++;
+			if (call === 2) throw new Error("transport error");
+			return { outcome: "ok", body: Buffer.from("x"), contentType: "text/html" };
+		});
+		const directClient: ArchiveDirectClient = {
+			fetchAtRequestedTime: jest.fn(),
+			fetchAtResolvedTime,
+		};
+		startArchiveWorkers(
+			baseOpts({ cache, cdxFetch: cdxFetch as unknown as typeof fetch, directClient }),
+		);
+		const worker = findWorker(QUEUE_CRAWL);
+		await worker.processor(
+			makeCrawlJob("c-fault", { host: "example.com", time: "20200101000000" }),
+		);
+		// All 4 rows attempted (rejection on row 2 must not abort).
+		expect(fetchAtResolvedTime).toHaveBeenCalledTimes(4);
+		// 3 successful fetches → 3 cache writes.
+		expect(cache.writeFile).toHaveBeenCalledTimes(3);
+	});
+
+	it("download_done payload reports filesSeen equal to successful cache writes (not rows.length)", async () => {
+		const cache = makeCache();
+		const cdxFetch = jest.fn(async () =>
+			jsonResponse([
+				["original", "timestamp"],
+				["http://example.com/a", "20200101120000"],
+				["http://example.com/b", "20200101130000"],
+				["http://example.com/c", "20200101140000"],
+				["http://example.com/d", "20200101150000"],
+			]),
+		);
+		let call = 0;
+		const fetchAtResolvedTime = jest.fn(async (): Promise<ResolvedResult> => {
+			call++;
+			if (call === 2) throw new Error("transport error");
+			if (call === 4) return { outcome: "not_found" };
+			return { outcome: "ok", body: Buffer.from("x"), contentType: "text/html" };
+		});
+		const directClient: ArchiveDirectClient = {
+			fetchAtRequestedTime: jest.fn(),
+			fetchAtResolvedTime,
+		};
+		startArchiveWorkers(
+			baseOpts({ cache, cdxFetch: cdxFetch as unknown as typeof fetch, directClient }),
+		);
+		const worker = findWorker(QUEUE_CRAWL);
+		const job = makeCrawlJob("c-done", { host: "example.com", time: "20200101000000" });
+		await worker.processor(job);
+
+		const doneCall = job.updateProgress.mock.calls.find(
+			(c) => (c[0] as { stage: string }).stage === "download_done",
+		);
+		expect(doneCall).toBeDefined();
+		// 4 rows; row 2 throws, row 4 not_found, rows 1+3 ok → filesSeen=2 (NOT rows.length=4).
+		expect(doneCall![0]).toMatchObject({ stage: "download_done", filesSeen: 2 });
+	});
+
 	it("logs a warning (but does not throw) when extendLock rejects", async () => {
-		let resolveDownload: () => void = () => undefined;
-		downloadFilesMock.mockImplementationOnce(
+		let resolveCdx: (r: Response) => void = () => undefined;
+		const cdxFetch = jest.fn(
 			() =>
-				new Promise<void>((res) => {
-					resolveDownload = res;
+				new Promise<Response>((res) => {
+					resolveCdx = res;
 				}),
 		);
 		const extendLockMock = jest.fn().mockRejectedValue(new Error("lock lost"));
 		const logger = makeLogger();
-		startArchiveWorkers(baseOpts({ logger }));
+		startArchiveWorkers(baseOpts({ logger, cdxFetch: cdxFetch as unknown as typeof fetch }));
 		const worker = findWorker(QUEUE_CRAWL);
-		const jobPromise = worker.processor({
-			id: "c-warn",
-			data: { host: "example.com", time: "20200101000000" },
-			token: "tk-warn",
-			extendLock: extendLockMock,
-		});
-		// Flush resolver microtask before advancing timers.
+		const jobPromise = worker.processor(
+			makeCrawlJob("c-warn", { host: "example.com", time: "20200101000000" }, extendLockMock),
+		);
 		await Promise.resolve();
 		await Promise.resolve();
 		jest.advanceTimersByTime(110_000);
-		// Let the rejection microtask flush.
 		await Promise.resolve();
 		await Promise.resolve();
 		expect(logger.warn).toHaveBeenCalledWith(
 			expect.objectContaining({ err: "lock lost" }),
 			expect.stringContaining("extendLock failed"),
 		);
-		resolveDownload();
+		resolveCdx(jsonResponse([]));
 		await jobPromise;
-	});
-});
-
-// --- startDownloadWatcher sentinel filter ------------------------------------
-//
-// `fs.watch` recursive is system-resource dependent (kqueue/inotify) and
-// flakes under jest. We test the watcher logic by injecting a fake `watchFn`
-// that captures the change callback, then driving filesystem events
-// synchronously. The filter under test (.notfound/, .notfound-tentative/
-// prefix drop) is exactly the production code — only the event SOURCE is
-// faked, not the behavior being asserted.
-
-describe("startDownloadWatcher — sentinel-subpath filter", () => {
-	interface FakeWatcher {
-		fire: (eventType: "rename" | "change", filename: string) => void;
-		close: jest.Mock;
-		watchFn: jest.Mock;
-		callbackReady: Promise<void>;
-	}
-
-	function makeFakeWatchFn(): FakeWatcher {
-		let cb: ((eventType: string, filename: string) => void) | null = null;
-		let resolveReady: () => void = () => undefined;
-		const callbackReady = new Promise<void>((r) => {
-			resolveReady = r;
-		});
-		const close = jest.fn();
-		const watchFn = jest.fn(
-			(_dir: string, _opts: object, callback: (et: string, fn: string) => void) => {
-				cb = callback;
-				resolveReady();
-				return { close } as unknown as ReturnType<typeof import("node:fs").watch>;
-			},
-		);
-		return {
-			fire: (eventType, filename) => {
-				if (!cb) throw new Error("watchFn callback not yet registered");
-				cb(eventType, filename);
-			},
-			close,
-			watchFn: watchFn as unknown as jest.Mock,
-			callbackReady,
-		};
-	}
-
-	let tmpRoot: string;
-
-	beforeEach(async () => {
-		const { promises: fsp } = await import("node:fs");
-		const path = await import("node:path");
-		const os = await import("node:os");
-		tmpRoot = await fsp.mkdtemp(path.join(os.tmpdir(), "tm-watcher-"));
-	});
-
-	afterEach(async () => {
-		const { promises: fsp } = await import("node:fs");
-		await fsp.rm(tmpRoot, { recursive: true, force: true });
-	});
-
-	it("drops 'rename' events for .notfound/<hash> sentinel writes", async () => {
-		const onFile = jest.fn();
-		const fake = makeFakeWatchFn();
-		const logger = makeLogger();
-		const stop = startDownloadWatcher(
-			tmpRoot,
-			onFile,
-			logger,
-			fake.watchFn as unknown as typeof import("node:fs").watch,
-		);
-
-		await fake.callbackReady;
-		fake.fire("rename", ".notfound/abc123");
-		fake.fire("rename", ".notfound/def456");
-
-		expect(onFile).not.toHaveBeenCalled();
-
-		stop();
-	});
-
-	it("drops 'rename' events for .notfound-tentative/<hash> sentinel writes", async () => {
-		const onFile = jest.fn();
-		const fake = makeFakeWatchFn();
-		const logger = makeLogger();
-		const stop = startDownloadWatcher(
-			tmpRoot,
-			onFile,
-			logger,
-			fake.watchFn as unknown as typeof import("node:fs").watch,
-		);
-
-		await fake.callbackReady;
-		fake.fire("rename", ".notfound-tentative/abc123");
-		fake.fire("rename", ".notfound-tentative/def456");
-
-		expect(onFile).not.toHaveBeenCalled();
-
-		stop();
-	});
-
-	it("forwards 'rename' events for legitimate files and increments filesSeen", async () => {
-		const onFile = jest.fn();
-		const fake = makeFakeWatchFn();
-		const logger = makeLogger();
-		const stop = startDownloadWatcher(
-			tmpRoot,
-			onFile,
-			logger,
-			fake.watchFn as unknown as typeof import("node:fs").watch,
-		);
-
-		await fake.callbackReady;
-		fake.fire("rename", "pics/sunlogo.gif");
-		fake.fire("rename", "css/main.css");
-
-		expect(onFile).toHaveBeenCalledTimes(2);
-		expect(onFile).toHaveBeenNthCalledWith(1, "pics/sunlogo.gif", 1);
-		expect(onFile).toHaveBeenNthCalledWith(2, "css/main.css", 2);
-
-		stop();
-	});
-
-	it("filesSeen counter is NOT incremented by filtered sentinel events", async () => {
-		const onFile = jest.fn();
-		const fake = makeFakeWatchFn();
-		const logger = makeLogger();
-		const stop = startDownloadWatcher(
-			tmpRoot,
-			onFile,
-			logger,
-			fake.watchFn as unknown as typeof import("node:fs").watch,
-		);
-
-		await fake.callbackReady;
-		// Interleave sentinel between legitimate files — would be off-by-one
-		// (1, 3) instead of (1, 2) if the filter incremented the counter.
-		fake.fire("rename", "pics/sunlogo.gif");
-		fake.fire("rename", ".notfound/sentinel-hash");
-		fake.fire("rename", ".notfound-tentative/sentinel-hash");
-		fake.fire("rename", "css/main.css");
-
-		expect(onFile).toHaveBeenCalledTimes(2);
-		expect(onFile).toHaveBeenNthCalledWith(1, "pics/sunlogo.gif", 1);
-		expect(onFile).toHaveBeenNthCalledWith(2, "css/main.css", 2);
-
-		stop();
-	});
-
-	it("ignores 'change' events (only 'rename' indicates new files)", async () => {
-		const onFile = jest.fn();
-		const fake = makeFakeWatchFn();
-		const logger = makeLogger();
-		const stop = startDownloadWatcher(
-			tmpRoot,
-			onFile,
-			logger,
-			fake.watchFn as unknown as typeof import("node:fs").watch,
-		);
-
-		await fake.callbackReady;
-		fake.fire("change", "pics/sunlogo.gif");
-
-		expect(onFile).not.toHaveBeenCalled();
-
-		stop();
-	});
-
-	it("deduplicates repeated 'rename' events for the same filename", async () => {
-		const onFile = jest.fn();
-		const fake = makeFakeWatchFn();
-		const logger = makeLogger();
-		const stop = startDownloadWatcher(
-			tmpRoot,
-			onFile,
-			logger,
-			fake.watchFn as unknown as typeof import("node:fs").watch,
-		);
-
-		await fake.callbackReady;
-		fake.fire("rename", "pics/sunlogo.gif");
-		fake.fire("rename", "pics/sunlogo.gif");
-		fake.fire("rename", "pics/sunlogo.gif");
-
-		expect(onFile).toHaveBeenCalledTimes(1);
-		expect(onFile).toHaveBeenCalledWith("pics/sunlogo.gif", 1);
-
-		stop();
-	});
-
-	it("calling the returned stop() closes the watcher", async () => {
-		const onFile = jest.fn();
-		const fake = makeFakeWatchFn();
-		const logger = makeLogger();
-		const stop = startDownloadWatcher(
-			tmpRoot,
-			onFile,
-			logger,
-			fake.watchFn as unknown as typeof import("node:fs").watch,
-		);
-
-		await fake.callbackReady;
-		stop();
-
-		expect(fake.close).toHaveBeenCalledTimes(1);
 	});
 });
 
@@ -1194,9 +1122,9 @@ describe("attachQueueLogger", () => {
 			logger,
 		);
 		const nowSpy = jest.spyOn(Date, "now");
-		nowSpy.mockReturnValueOnce(1_000); // active
+		nowSpy.mockReturnValueOnce(1_000);
 		events.handlers.active({ jobId: "j-1" });
-		nowSpy.mockReturnValueOnce(1_750); // completed
+		nowSpy.mockReturnValueOnce(1_750);
 		events.handlers.completed({ jobId: "j-1" });
 		expect(logger.info).toHaveBeenCalledWith(
 			expect.objectContaining({
