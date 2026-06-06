@@ -5,7 +5,8 @@ import type { ArchiveJobClientPort, JobProgressListener } from "../clients/archi
 import { windowAround } from "../lib/archive-time";
 import { cachedCdxFetch } from "../lib/cdx-cache";
 import type { DirectClient } from "../lib/dependencies";
-import { describeFetchError } from "../lib/errors";
+import { describeFetchError, errorHasStatus } from "../lib/errors";
+import { extractCdnEmbeddedUrl } from "../lib/redirect-unwrapper";
 import { rewriteCssUrls, rewriteHtmlUrls, stripWaybackToolbar } from "../lib/url-rewriter";
 import { isHostWhitelisted } from "../lib/url-validator";
 import type { Config } from "../models/config";
@@ -67,6 +68,28 @@ export class ProxyService {
 	) {}
 
 	async fetch(
+		targetUrl: string,
+		time: string,
+		onProgress?: JobProgressListener,
+	): Promise<ProxyResult> {
+		try {
+			return await this.fetchCore(targetUrl, time, onProgress);
+		} catch (e) {
+			if (errorHasStatus(e) && e.status === 404) {
+				const fallback = extractCdnEmbeddedUrl(targetUrl);
+				if (fallback) {
+					this.logger.info(
+						{ targetUrl, fallback, time },
+						"[cdn-fallback] CDN URL not in archive, retrying with embedded origin URL",
+					);
+					return this.fetchCore(fallback, time, onProgress);
+				}
+			}
+			throw e;
+		}
+	}
+
+	private async fetchCore(
 		targetUrl: string,
 		time: string,
 		onProgress?: JobProgressListener,

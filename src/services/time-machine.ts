@@ -17,6 +17,16 @@ export interface UrlValidatorModule {
 	isHostWhitelisted: (url: string, whitelistHosts: string) => boolean;
 }
 
+// Blocks JS-driven top-level navigation (location.href = externalUrl, meta-refresh
+// without user action) while keeping the archived page functional. User-initiated
+// clicks/submits still navigate because of allow-top-navigation-by-user-activation;
+// allow-same-origin preserves cookies/storage; allow-scripts/forms/modals/popups
+// cover the APIs archived pages typically rely on. Only applied to text/html
+// responses — irrelevant for assets, and unreachable when HTML is delivered via
+// SSE/WS to be innerHTML'd into a host page.
+const SANDBOX_CSP =
+	"sandbox allow-scripts allow-same-origin allow-forms allow-modals allow-popups allow-top-navigation-by-user-activation";
+
 export class TimeMachineService {
 	private server!: http.Server;
 	private wss!: WebSocketServer;
@@ -313,6 +323,9 @@ export class TimeMachineService {
 			// Map both MISS variants to "MISS" for client backward-compatibility.
 			res.setHeader("X-Cache", result.cache === "HIT" ? "HIT" : "MISS");
 			if (result.archiveTime) res.setHeader("X-Archive-Time", result.archiveTime);
+			if (result.contentType.startsWith("text/html")) {
+				res.setHeader("Content-Security-Policy", SANDBOX_CSP);
+			}
 			res.end(result.body);
 			this.logRequest(req, 200, start, { targetUrl, time, archiveUrl, cache: result.cache });
 		} catch (e) {

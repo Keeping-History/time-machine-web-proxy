@@ -244,6 +244,55 @@ describe("TimeMachineService HTTP handler — path-based /web/{ts}/{url} input",
 	});
 });
 
+describe("TimeMachineService HTTP handler — sandbox CSP on HTML responses", () => {
+	const EXPECTED_CSP =
+		"sandbox allow-scripts allow-same-origin allow-forms allow-modals allow-popups allow-top-navigation-by-user-activation";
+
+	it("sets a sandbox Content-Security-Policy on text/html responses", async () => {
+		const fetchMock = jest.fn().mockResolvedValue({
+			contentType: "text/html; charset=utf-8",
+			archiveUrl: "http://example.com/page",
+			originalUrl: "http://example.com/page",
+			archiveTime: "20020401000000",
+			body: "<html>ok</html>",
+			cache: "HIT" as const,
+		});
+		const { svc } = makeService(fetchMock);
+		const port = await startAndAwaitListening(svc);
+
+		try {
+			const r = await fetch(`http://127.0.0.1:${port}/web/20020401000000/http://example.com/page`);
+			expect(r.status).toBe(200);
+			expect(r.headers.get("content-security-policy")).toBe(EXPECTED_CSP);
+		} finally {
+			await svc.stop();
+		}
+	});
+
+	it("does not set Content-Security-Policy on non-HTML asset responses", async () => {
+		const fetchMock = jest.fn().mockResolvedValue({
+			contentType: "image/png",
+			archiveUrl: "http://example.com/logo.png",
+			originalUrl: "http://example.com/logo.png",
+			archiveTime: "20020401000000",
+			body: Buffer.from([1, 2, 3]),
+			cache: "HIT" as const,
+		});
+		const { svc } = makeService(fetchMock);
+		const port = await startAndAwaitListening(svc);
+
+		try {
+			const r = await fetch(
+				`http://127.0.0.1:${port}/web/20020401000000im_/http://example.com/logo.png`,
+			);
+			expect(r.status).toBe(200);
+			expect(r.headers.get("content-security-policy")).toBeNull();
+		} finally {
+			await svc.stop();
+		}
+	});
+});
+
 describe("TimeMachineService HTTP handler — SSE (Accept: text/event-stream)", () => {
 	const okResult = {
 		contentType: "text/html",

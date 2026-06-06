@@ -1,4 +1,51 @@
-import { unwrapRedirectUrl } from "../../src/lib/redirect-unwrapper";
+import { extractCdnEmbeddedUrl, unwrapRedirectUrl } from "../../src/lib/redirect-unwrapper";
+
+describe("extractCdnEmbeddedUrl", () => {
+	it("extracts embedded origin URL from an Akamai URL", () => {
+		expect(
+			extractCdnEmbeddedUrl(
+				"http://a284.g.akamai.net/7/284/3299/6d43dd55efa485/www.usrobotics.com/products/images-prod/p-global-xja.gif",
+			),
+		).toBe("http://www.usrobotics.com/products/images-prod/p-global-xja.gif");
+	});
+
+	it("preserves query string from the CDN URL on the result", () => {
+		expect(
+			extractCdnEmbeddedUrl(
+				"http://a284.g.akamai.net/7/284/3299/abcdef/www.example.com/img.gif?v=2",
+			),
+		).toBe("http://www.example.com/img.gif?v=2");
+	});
+
+	it("returns null for a non-CDN URL", () => {
+		expect(extractCdnEmbeddedUrl("http://www.usrobotics.com/products/img.gif")).toBeNull();
+	});
+
+	it("returns null when no hostname-like segment exists in the path", () => {
+		expect(extractCdnEmbeddedUrl("http://a284.g.akamai.net/7/284/3299/6d43dd55efa485")).toBeNull();
+	});
+
+	it("returns null when path segment has a file-extension TLD (not a hostname)", () => {
+		// /only-segment.gif would be misidentified without the extension check
+		expect(extractCdnEmbeddedUrl("http://a284.g.akamai.net/only.gif")).toBeNull();
+	});
+
+	it("handles akamaiedge.net hostname variant", () => {
+		expect(
+			extractCdnEmbeddedUrl("http://foo.akamaiedge.net/1/2/hash/www.example.com/style.css"),
+		).toBe("http://www.example.com/style.css");
+	});
+
+	it("handles edgekey.net hostname variant", () => {
+		expect(
+			extractCdnEmbeddedUrl("http://foo.edgekey.net/1/2/hash/img.example.com/logo.png"),
+		).toBe("http://img.example.com/logo.png");
+	});
+
+	it("returns null for an invalid URL string", () => {
+		expect(extractCdnEmbeddedUrl("not a url")).toBeNull();
+	});
+});
 
 describe("unwrapRedirectUrl", () => {
 	it("returns unchanged URL when no pattern matches", () => {

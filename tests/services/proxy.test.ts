@@ -445,6 +445,65 @@ describe("ProxyService.fetch — Tier 2 direct fetch", () => {
 	});
 });
 
+// --- CDN fallback (404 retry with embedded origin URL) -----------------------
+
+const AKAMAI_URL =
+	"http://a284.g.akamai.net/7/284/3299/6d43dd55efa485/www.usrobotics.com/products/images-prod/p-global-xja.gif";
+const AKAMAI_FALLBACK_URL =
+	"http://www.usrobotics.com/products/images-prod/p-global-xja.gif";
+
+describe("ProxyService.fetch — CDN fallback on 404", () => {
+	it("retries with embedded origin URL when CDN URL returns 404 and fallback hits cache", async () => {
+		const lookup = jest
+			.fn<Promise<CacheHit | null>, [string, string]>()
+			.mockRejectedValueOnce(Object.assign(new Error("Not in archive"), { status: 404 })) // CDN URL → 404
+			.mockResolvedValueOnce(binHit); // fallback URL → HIT
+		const cache = makeCache(lookup);
+		const client = makeClient();
+		mockedReadFile.mockResolvedValue(BIN_BODY);
+		const svc = new ProxyService(cache, client, logger, baseConfig);
+
+		const result = await svc.fetch(AKAMAI_URL, TIME);
+
+		expect(result.cache).toBe("HIT");
+		expect(lookup).toHaveBeenNthCalledWith(1, AKAMAI_URL, TIME);
+		expect(lookup).toHaveBeenNthCalledWith(2, AKAMAI_FALLBACK_URL, TIME);
+	});
+
+	it("propagates 404 when CDN URL 404s and fallback also 404s", async () => {
+		const lookup = jest
+			.fn()
+			.mockRejectedValueOnce(Object.assign(new Error("Not in archive"), { status: 404 })) // CDN → 404
+			.mockRejectedValueOnce(Object.assign(new Error("Not in archive"), { status: 404 })); // fallback → 404
+		const cache = makeCache(lookup);
+		const client = makeClient();
+		const svc = new ProxyService(cache, client, logger, baseConfig);
+
+		await expect(svc.fetch(AKAMAI_URL, TIME)).rejects.toMatchObject({ status: 404 });
+	});
+
+	it("does not retry on 404 when URL is not a CDN URL", async () => {
+		const cache = makeCache(
+			jest.fn().mockRejectedValue(Object.assign(new Error("Not in archive"), { status: 404 })),
+		);
+		const client = makeClient();
+		const svc = new ProxyService(cache, client, logger, baseConfig);
+
+		await expect(svc.fetch(TARGET_HTML_URL, TIME)).rejects.toMatchObject({ status: 404 });
+		// lookup called once for the original URL only — no fallback attempt
+		expect(cache.lookup).toHaveBeenCalledTimes(1);
+	});
+
+	it("does not retry on non-404 errors from CDN URL", async () => {
+		const cache = makeCache(jest.fn().mockRejectedValue(new Error("network failure")));
+		const client = makeClient();
+		const svc = new ProxyService(cache, client, logger, baseConfig);
+
+		await expect(svc.fetch(AKAMAI_URL, TIME)).rejects.toThrow("network failure");
+		expect(cache.lookup).toHaveBeenCalledTimes(1);
+	});
+});
+
 // --- Tier 1: prewarm (fire-and-forget) ----------------------------------------
 
 describe("ProxyService.fetch — Tier 1 prewarm (fire-and-forget)", () => {
