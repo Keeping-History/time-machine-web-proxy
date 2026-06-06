@@ -128,6 +128,34 @@ export const generateShimScript = (
     return _origWriteln(rewriteHtmlString(String(html)));
   };
 
+  // --- location.href / location.assign / location.replace ---
+  // Intercepts JavaScript-driven navigation so redirects like
+  //   location.href = 'http://www.aol.com'
+  //   location.assign('...')
+  //   location.replace('...')
+  // stay inside the proxy instead of escaping to the live web.
+  // window.location = url is sugar for location.href = url in browsers, so
+  // patching Location.prototype.href covers that case as well.
+  var _locHrefDesc = Object.getOwnPropertyDescriptor(Location.prototype, 'href');
+  if (_locHrefDesc && _locHrefDesc.set && _locHrefDesc.configurable) {
+    Object.defineProperty(Location.prototype, 'href', {
+      configurable: true,
+      enumerable: _locHrefDesc.enumerable,
+      get: _locHrefDesc.get,
+      set: function(val) {
+        _locHrefDesc.set.call(this, rewrite(String(val)));
+      }
+    });
+  }
+  var _origLocAssign = Location.prototype.assign;
+  Location.prototype.assign = function(url) {
+    return _origLocAssign.call(this, rewrite(String(url)));
+  };
+  var _origLocReplace = Location.prototype.replace;
+  Location.prototype.replace = function(url) {
+    return _origLocReplace.call(this, rewrite(String(url)));
+  };
+
   // --- MutationObserver: catch dynamically-inserted nodes ---
   var URL_ATTRS = ['src', 'href'];
 

@@ -5,6 +5,10 @@ const REDIRECT_PATTERNS: RegExp[] = [
 	// contains *{actual_url}. The greedy .* finds the last * in the path so
 	// chained redirects (/*a/*http://...) still resolve correctly.
 	/^https?:\/\/(?:srd|rd)\.yahoo\.com\/.*\*(https?:\/\/.+)$/i,
+	// AOL click-tracking: r.aol.com/cgi/redir-complex?url={actual_url}&sid=...
+	// Without this, every redir-complex URL collapses to the same cache key
+	// and serves the first-visited destination for all subsequent visits.
+	/^https?:\/\/r\.aol\.com\/cgi\/redir-complex\?url=(https?:\/\/.+)$/i,
 ];
 
 /**

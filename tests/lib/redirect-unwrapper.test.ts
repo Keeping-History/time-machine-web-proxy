@@ -51,4 +51,42 @@ describe("unwrapRedirectUrl", () => {
 		const url = "http://news.yahoo.com/story/*http://example.com/";
 		expect(unwrapRedirectUrl(url)).toBe(url);
 	});
+
+	it("unwraps AOL r.aol.com/cgi/redir-complex preserving trailing query", () => {
+		expect(
+			unwrapRedirectUrl(
+				"http://r.aol.com/cgi/redir-complex?url=http://www.aol.com/shopping/&sid=nSh",
+			),
+		).toBe("http://www.aol.com/shopping/&sid=nSh");
+	});
+
+	it("unwraps AOL redir-complex with https destination", () => {
+		expect(
+			unwrapRedirectUrl(
+				"http://r.aol.com/cgi/redir-complex?url=https://example.com/path?q=1",
+			),
+		).toBe("https://example.com/path?q=1");
+	});
+
+	it("AOL redir-complex with different sids extract distinct destinations", () => {
+		const a = unwrapRedirectUrl(
+			"http://r.aol.com/cgi/redir-complex?url=http://www.aol.com/news/&sid=abc",
+		);
+		const b = unwrapRedirectUrl(
+			"http://r.aol.com/cgi/redir-complex?url=http://www.aol.com/sports/&sid=def",
+		);
+		expect(a).not.toBe(b);
+		expect(a).toBe("http://www.aol.com/news/&sid=abc");
+		expect(b).toBe("http://www.aol.com/sports/&sid=def");
+	});
+
+	it("does not unwrap AOL redir-complex without http(s) destination", () => {
+		const url = "http://r.aol.com/cgi/redir-complex?url=ftp://files.example.com/";
+		expect(unwrapRedirectUrl(url)).toBe(url);
+	});
+
+	it("does not unwrap unrelated r.aol.com paths", () => {
+		const url = "http://r.aol.com/cgi/other?url=http://example.com/";
+		expect(unwrapRedirectUrl(url)).toBe(url);
+	});
 });
