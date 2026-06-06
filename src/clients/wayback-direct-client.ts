@@ -248,10 +248,11 @@ export class WaybackDirectClient {
 				this.breaker.recordSuccess();
 			}
 			const reason = describeFetchError(e);
-			this.log.debug({ archiveUrl, reason }, "[wayback-direct] fetchAtResolvedTime fetch error");
+			this.log.warn({ archiveUrl, reason }, "[wayback-direct] fetchAtResolvedTime fetch error");
 			return { outcome: "fallback", reason };
 		}
 		this.breaker.recordSuccess();
+		this.log.info({ archiveUrl, status: res.status }, "[wayback-direct] response");
 
 		if (res.status >= 300 && res.status < 400) {
 			this.log.debug(
@@ -326,9 +327,10 @@ export class WaybackDirectClient {
 				this.breaker.recordSuccess();
 			}
 			const reason = describeFetchError(e);
-			this.log.debug({ archiveUrl, reason }, "[wayback-direct] fetchAtRequestedTime fetch error");
+			this.log.warn({ archiveUrl, reason }, "[wayback-direct] fetchAtRequestedTime fetch error");
 			return { outcome: "fallback", reason };
 		}
+		this.log.info({ archiveUrl, status: res.status }, "[wayback-direct] response");
 
 		if (res.status === 404) {
 			return { outcome: "not_found" };

@@ -157,6 +157,39 @@ describe("WaybackDirectClient.fetchAtResolvedTime", () => {
 		const [, opts] = (globalThis.fetch as jest.Mock).mock.calls[0] as [string, RequestInit];
 		expect(opts.signal).toBeDefined();
 	});
+
+	it("logs the archiveUrl and HTTP status at info level on successful response", async () => {
+		globalThis.fetch = jest
+			.fn()
+			.mockResolvedValue(makeFetchResponse({ status: 200, body: "ok" }));
+		const logger = makeLogger();
+		const client = new WaybackDirectClient({ logger, ratePerSecond: 1000, burst: 1000 });
+		await client.fetchAtResolvedTime("http://example.com/", "20200101000000");
+		expect(logger.info).toHaveBeenCalledWith(
+			expect.objectContaining({
+				archiveUrl: expect.stringContaining("20200101000000id_"),
+				status: 200,
+			}),
+			expect.stringContaining("response"),
+		);
+	});
+
+	it("logs network errors at warn level (not debug)", async () => {
+		const networkErr = new Error("ETIMEDOUT");
+		globalThis.fetch = jest.fn().mockRejectedValue(networkErr);
+		const logger = makeLogger();
+		const client = new WaybackDirectClient({ logger, ratePerSecond: 1000, burst: 1000 });
+		await client.fetchAtResolvedTime("http://example.com/", "20200101000000");
+		expect(logger.warn).toHaveBeenCalledWith(
+			expect.objectContaining({ archiveUrl: expect.stringContaining("id_") }),
+			expect.stringContaining("fetch error"),
+		);
+		// Must NOT be debug-only for network errors
+		expect(logger.debug).not.toHaveBeenCalledWith(
+			expect.objectContaining({ archiveUrl: expect.anything() }),
+			expect.stringContaining("fetch error"),
+		);
+	});
 });
 
 // ---------------------------------------------------------------------------
@@ -257,6 +290,38 @@ describe("WaybackDirectClient.fetchAtRequestedTime", () => {
 		await client.fetchAtRequestedTime("http://example.com/", "20200101000000");
 		const [, opts] = (globalThis.fetch as jest.Mock).mock.calls[0] as [string, RequestInit];
 		expect(opts.redirect).toBe("follow");
+	});
+
+	it("logs the archiveUrl and HTTP status at info level on successful response", async () => {
+		globalThis.fetch = jest.fn().mockResolvedValue(
+			makeFetchResponse({ status: 200, url: "https://web.archive.org/web/20200101120000id_/http://example.com/", body: "ok" }),
+		);
+		const logger = makeLogger();
+		const client = new WaybackDirectClient({ logger, ratePerSecond: 1000, burst: 1000 });
+		await client.fetchAtRequestedTime("http://example.com/", "20200101000000");
+		expect(logger.info).toHaveBeenCalledWith(
+			expect.objectContaining({
+				archiveUrl: expect.stringContaining("20200101000000im_"),
+				status: 200,
+			}),
+			expect.stringContaining("response"),
+		);
+	});
+
+	it("logs network errors at warn level (not debug)", async () => {
+		const networkErr = new Error("ETIMEDOUT");
+		globalThis.fetch = jest.fn().mockRejectedValue(networkErr);
+		const logger = makeLogger();
+		const client = new WaybackDirectClient({ logger, ratePerSecond: 1000, burst: 1000 });
+		await client.fetchAtRequestedTime("http://example.com/", "20200101000000");
+		expect(logger.warn).toHaveBeenCalledWith(
+			expect.objectContaining({ archiveUrl: expect.stringContaining("im_") }),
+			expect.stringContaining("fetch error"),
+		);
+		expect(logger.debug).not.toHaveBeenCalledWith(
+			expect.objectContaining({ archiveUrl: expect.anything() }),
+			expect.stringContaining("fetch error"),
+		);
 	});
 });
 
