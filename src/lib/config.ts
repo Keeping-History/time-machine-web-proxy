@@ -93,6 +93,13 @@ export function loadConfig(): Config {
 		workerRateLimitPerSec: Number(process.env.WORKER_RATE_LIMIT_PER_SEC) || 1,
 		downloaderThreadsCount: Number(process.env.DOWNLOADER_THREADS_COUNT) || 3,
 		crawlMaxCdxPages: Number(process.env.CRAWL_MAX_CDX_PAGES) || 50,
+		crawlWindowDays: parseIntInRange(
+			process.env.CRAWL_WINDOW_DAYS,
+			"CRAWL_WINDOW_DAYS",
+			30,
+			1,
+			3650,
+		),
 		outboundProxyUrls: parseOutboundProxyUrls(process.env.OUTBOUND_PROXY_URLS),
 		outboundProxyChooser: parseOutboundProxyChooser(process.env.OUTBOUND_PROXY_CHOOSER),
 		outboundProxyUsername: process.env.OUTBOUND_PROXY_USERNAME ?? "",

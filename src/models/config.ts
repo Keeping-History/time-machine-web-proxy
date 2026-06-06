@@ -21,6 +21,9 @@ export interface Config {
 	workerRateLimitPerSec: number;
 	downloaderThreadsCount: number;
 	crawlMaxCdxPages: number;
+	/** CDX time window around `time` for crawl-mode queries, in days.
+	 *  Env: CRAWL_WINDOW_DAYS (default 30, 1-3650). */
+	crawlWindowDays: number;
 	outboundProxyUrls: string[];
 	outboundProxyChooser: OutboundProxyChooser;
 	outboundProxyUsername: string;
