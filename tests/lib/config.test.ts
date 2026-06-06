@@ -229,6 +229,58 @@ describe("loadConfig", () => {
 		expect(config.crawlMaxCdxPages).toBe(100);
 	});
 
+	it("CDX_CACHE_ENABLED defaults to true when unset or empty", () => {
+		delete process.env.CDX_CACHE_ENABLED;
+		expect(loadConfig().cdxCacheEnabled).toBe(true);
+
+		process.env.CDX_CACHE_ENABLED = "";
+		expect(loadConfig().cdxCacheEnabled).toBe(true);
+	});
+
+	it("CDX_CACHE_ENABLED=false (case-insensitive) disables the cache", () => {
+		process.env.CDX_CACHE_ENABLED = "false";
+		expect(loadConfig().cdxCacheEnabled).toBe(false);
+
+		process.env.CDX_CACHE_ENABLED = "FALSE";
+		expect(loadConfig().cdxCacheEnabled).toBe(false);
+
+		process.env.CDX_CACHE_ENABLED = "False";
+		expect(loadConfig().cdxCacheEnabled).toBe(false);
+	});
+
+	it("CDX_CACHE_ENABLED=true keeps the cache enabled", () => {
+		process.env.CDX_CACHE_ENABLED = "true";
+		expect(loadConfig().cdxCacheEnabled).toBe(true);
+	});
+
+	it("CRAWL_WINDOW_DAYS defaults to 30 when unset", () => {
+		delete process.env.CRAWL_WINDOW_DAYS;
+		expect(loadConfig().crawlWindowDays).toBe(30);
+	});
+
+	it("CRAWL_WINDOW_DAYS=7 parses correctly", () => {
+		process.env.CRAWL_WINDOW_DAYS = "7";
+		expect(loadConfig().crawlWindowDays).toBe(7);
+	});
+
+	it("CRAWL_WINDOW_DAYS=0 is rejected (below min 1)", () => {
+		process.env.CRAWL_WINDOW_DAYS = "0";
+		expect(() => loadConfig()).toThrow(/CRAWL_WINDOW_DAYS/);
+	});
+
+	it("CRAWL_WINDOW_DAYS=3651 is rejected (above max 3650)", () => {
+		process.env.CRAWL_WINDOW_DAYS = "3651";
+		expect(() => loadConfig()).toThrow(/CRAWL_WINDOW_DAYS/);
+	});
+
+	it("CRAWL_WINDOW_DAYS non-integer is rejected", () => {
+		process.env.CRAWL_WINDOW_DAYS = "1.5";
+		expect(() => loadConfig()).toThrow(/CRAWL_WINDOW_DAYS/);
+
+		process.env.CRAWL_WINDOW_DAYS = "abc";
+		expect(() => loadConfig()).toThrow(/CRAWL_WINDOW_DAYS/);
+	});
+
 	it("reads outbound proxy env vars", () => {
 		process.env.OUTBOUND_PROXY_URLS = "http://proxymesh.example.com:31280";
 		process.env.OUTBOUND_PROXY_USERNAME = "user";

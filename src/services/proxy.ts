@@ -2,8 +2,10 @@ import { promises as fs } from "node:fs";
 import type IORedis from "ioredis";
 import type pino from "pino";
 import type { ArchiveJobClientPort, JobProgressListener } from "../clients/archive-job-client";
-import type { DirectClient } from "../lib/dependencies";
 import { dayWindow } from "../lib/archive-time";
+import { cachedCdxFetch } from "../lib/cdx-cache";
+import type { DirectClient } from "../lib/dependencies";
+import { describeFetchError } from "../lib/errors";
 import { rewriteCssUrls, rewriteHtmlUrls, stripWaybackToolbar } from "../lib/url-rewriter";
 import { isHostWhitelisted } from "../lib/url-validator";
 import type { Config } from "../models/config";
@@ -51,7 +53,12 @@ export class ProxyService {
 		private readonly logger: pino.Logger,
 		private readonly config: Pick<
 			Config,
-			"whitelistHosts" | "crawlMaxCdxPages" | "bullmqPrefix" | "domainCrawlEnabled"
+			| "whitelistHosts"
+			| "crawlMaxCdxPages"
+			| "bullmqPrefix"
+			| "domainCrawlEnabled"
+			| "cdxCacheEnabled"
+			| "lockTime"
 		>,
 		private readonly redis: IORedis | null = null,
 		private readonly directClient: DirectClient | null = null,
@@ -121,7 +128,12 @@ export class ProxyService {
 
 		if (isHtml) {
 			const stripped = stripWaybackToolbar(raw.toString("utf-8"));
-			const { html, discoveredAssets } = rewriteHtmlUrls(stripped, targetUrl, time);
+			const { html, discoveredAssets } = rewriteHtmlUrls(
+				stripped,
+				targetUrl,
+				time,
+				this.config.lockTime,
+			);
 			body = html;
 
 			// Tier 1 (prewarm): fire-and-forget prefetch of discovered assets.
@@ -143,9 +155,13 @@ export class ProxyService {
 							}
 						})
 						.catch((err: unknown) => {
-							this.logger.info(
-								{ url: asset.url, ts: asset.embeddedTs, error: err instanceof Error ? err.message : String(err) },
-								"[prewarm] asset prefetch error (ignored)",
+							this.logger.warn(
+								{
+									url: asset.url,
+									ts: asset.embeddedTs,
+									error: err instanceof Error ? err.message : String(err),
+								},
+								"[prewarm] asset prefetch error",
 							);
 						});
 				}
@@ -155,7 +171,7 @@ export class ProxyService {
 				void this.maybeEnqueueDomainCrawl(u.hostname, time);
 			}
 		} else if (isCss) {
-			body = rewriteCssUrls(raw.toString("utf-8"), targetUrl, time);
+			body = rewriteCssUrls(raw.toString("utf-8"), targetUrl, time, this.config.lockTime);
 		}
 
 		return {
@@ -199,6 +215,10 @@ export class ProxyService {
 			}
 
 			const pages = await this.cdxPageCount(host, time);
+			if (pages === 0) {
+				this.logger.debug({ host }, "[crawl-skip] 0 CDX pages in window");
+				return;
+			}
 			if (pages > this.config.crawlMaxCdxPages) {
 				this.logger.warn(
 					{ host, pages, cap: this.config.crawlMaxCdxPages },
@@ -251,6 +271,9 @@ export class ProxyService {
 			);
 		} else {
 			const pages = await this.cdxPageCount(host, time);
+			if (pages === 0) {
+				throw statusError("No CDX captures in window (0 pages)", 422);
+			}
 			if (pages > this.config.crawlMaxCdxPages) {
 				throw statusError(
 					`Crawl too large: ${pages} CDX pages > ${this.config.crawlMaxCdxPages} cap`,
@@ -271,9 +294,21 @@ export class ProxyService {
 		const u =
 			`https://web.archive.org/cdx/search/cdx?url=${encodeURIComponent(`${host}/*`)}` +
 			`&from=${from}&to=${to}&output=json&showNumPages=true`;
+		const isValidPageCount = (body: string): boolean =>
+			Number.isFinite(Number.parseInt(body.trim(), 10));
 		let r: Response;
 		try {
-			r = await fetch(u, { signal: AbortSignal.timeout(CDX_TIMEOUT_MS) });
+			r = await cachedCdxFetch(
+				u,
+				{ signal: AbortSignal.timeout(CDX_TIMEOUT_MS) },
+				{
+					redis: this.redis,
+					logger: this.logger,
+					enabled: this.config.cdxCacheEnabled,
+					bullmqPrefix: this.config.bullmqPrefix,
+					validate: isValidPageCount,
+				},
+			);
 		} catch (e) {
 			// Node's fetch (undici) wraps the real failure in a generic
 			// `TypeError: fetch failed` whose `.cause` holds the actual error
@@ -287,25 +322,13 @@ export class ProxyService {
 		if (!r.ok) throw new Error(`CDX preflight ${r.status}`);
 		const txt = (await r.text()).trim();
 		const n = Number.parseInt(txt, 10);
-		return Number.isFinite(n) ? n : 0;
+		if (!Number.isFinite(n)) {
+			this.logger.warn(
+				{ host, body: txt.slice(0, 80) },
+				"[proxy] CDX page-count parse failed — response was not an integer",
+			);
+			throw new Error(`CDX page count indeterminate: ${txt.slice(0, 80)}`);
+		}
+		return n;
 	}
-}
-
-/**
- * Unwraps a fetch failure into a human-readable string. Handles undici's
- * `TypeError: fetch failed` (which puts the real cause on `.cause`) plus
- * AbortError (timeout) and plain Error fallbacks.
- */
-function describeFetchError(e: unknown): string {
-	if (e instanceof Error && e.name === "TimeoutError") return "timed out";
-	const cause = (e as { cause?: unknown })?.cause;
-	if (cause instanceof Error) {
-		// Common system-error shapes from libc/undici. The `code` is the most
-		// useful single token (ENOTFOUND, ECONNREFUSED, EAI_AGAIN, ECONNRESET);
-		// the message adds the address/port when present.
-		const code = (cause as { code?: string }).code;
-		return code ? `${code} (${cause.message})` : cause.message;
-	}
-	if (e instanceof Error) return e.message;
-	return String(e);
 }

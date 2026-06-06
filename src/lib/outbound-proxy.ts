@@ -1,5 +1,5 @@
 import type pino from "pino";
-import { Dispatcher, ProxyAgent, request, setGlobalDispatcher } from "undici";
+import { Agent, Dispatcher, Pool, ProxyAgent, request, setGlobalDispatcher } from "undici";
 import type { Config, OutboundProxyChooser } from "../models/config";
 
 type ProxyConfig = Pick<
@@ -9,7 +9,22 @@ type ProxyConfig = Pick<
 	| "outboundProxyUsername"
 	| "outboundProxyPassword"
 	| "outboundProxyCooldownMs"
+	| "directFetchPoolConnections"
+	| "directFetchPoolKeepaliveMs"
+	| "directFetchPoolMaxConcurrentStreams"
+	| "directFetchHttp2Enabled"
 >;
+
+const WAYBACK_ORIGIN = "https://web.archive.org";
+
+function buildPoolOpts(cfg: ProxyConfig): Pool.Options {
+	return {
+		connections: cfg.directFetchPoolConnections,
+		keepAliveTimeout: cfg.directFetchPoolKeepaliveMs,
+		allowH2: cfg.directFetchHttp2Enabled,
+		maxConcurrentStreams: cfg.directFetchPoolMaxConcurrentStreams,
+	};
+}
 
 /** URL hit by both the startup probe and the runtime re-probe. Chosen as the
  * real workload target so a successful probe implies the proxy can reach
@@ -53,7 +68,19 @@ export async function installOutboundProxy(
 	cfg: ProxyConfig,
 	logger: pino.Logger,
 ): Promise<RotatingProxyDispatcher | null> {
-	if (cfg.outboundProxyUrls.length === 0) return null;
+	if (cfg.outboundProxyUrls.length === 0) {
+		// Agent (not Pool) so that fetch()'s redirect: "follow" works correctly.
+		// Pool as global dispatcher returns raw 3xx responses without re-dispatching
+		// the follow-up request; Agent creates per-origin pools and handles redirect
+		// routing at the fetch layer.
+		const agent = new Agent(buildPoolOpts(cfg));
+		setGlobalDispatcher(agent);
+		logger.info(
+			{ origin: WAYBACK_ORIGIN, ...buildPoolOpts(cfg) },
+			"[outbound-proxy] no proxy configured; installed direct Agent for web.archive.org",
+		);
+		return null;
+	}
 
 	const hasUser = !!cfg.outboundProxyUsername;
 	const hasPass = !!cfg.outboundProxyPassword;
@@ -65,9 +92,12 @@ export async function installOutboundProxy(
 		buildProxyUri(raw, cfg.outboundProxyUsername, cfg.outboundProxyPassword, hasUser),
 	);
 
+	// allowH2 affects the proxy→origin TLS inside the CONNECT tunnel,
+	// NOT the client→proxy hop (always HTTP/1.1 CONNECT). Per undici v8 docs.
+	const poolOpts = buildPoolOpts(cfg);
 	const built = uris.map((u) => ({
 		host: u.host,
-		agent: new ProxyAgent({ uri: u.value }),
+		agent: new ProxyAgent({ uri: u.value, ...poolOpts }),
 	}));
 
 	const probeResults = await Promise.all(built.map((b) => probeAgent(b.host, b.agent)));

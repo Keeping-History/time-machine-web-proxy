@@ -11,7 +11,11 @@ import type { WaybackDirectClient } from "../../src/clients/wayback-direct-clien
 // ---------------------------------------------------------------------------
 
 /** Deferred promise — lets tests control when an upstream call settles. */
-function deferred<T>(): { promise: Promise<T>; resolve: (v: T) => void; reject: (e: unknown) => void } {
+function deferred<T>(): {
+	promise: Promise<T>;
+	resolve: (v: T) => void;
+	reject: (e: unknown) => void;
+} {
 	let resolve!: (v: T) => void;
 	let reject!: (e: unknown) => void;
 	const promise = new Promise<T>((res, rej) => {
@@ -34,7 +38,12 @@ function makeMockInner(): MockInner {
 }
 
 const OK_RESOLVED = { outcome: "ok" as const, body: Buffer.from("r"), contentType: "text/plain" };
-const OK_REQUESTED = { outcome: "ok" as const, body: Buffer.from("q"), contentType: "text/html", resolvedTime: "20200101000000" };
+const OK_REQUESTED = {
+	outcome: "ok" as const,
+	body: Buffer.from("q"),
+	contentType: "text/html",
+	resolvedTime: "20200101000000",
+};
 
 // ---------------------------------------------------------------------------
 // Dedup: two concurrent same-arg calls invoke inner client once
@@ -103,14 +112,14 @@ describe("DedupingDirectClient failure handling", () => {
 		const mock = makeMockInner();
 		const err = new Error("network error");
 
-		mock.fetchAtResolvedTime
-			.mockRejectedValueOnce(err)
-			.mockResolvedValueOnce(OK_RESOLVED);
+		mock.fetchAtResolvedTime.mockRejectedValueOnce(err).mockResolvedValueOnce(OK_RESOLVED);
 
 		const client = new DedupingDirectClient(mock as unknown as WaybackDirectClient);
 
 		// First call — should reject
-		await expect(client.fetchAtResolvedTime("http://example.com/", "20200101000000")).rejects.toThrow("network error");
+		await expect(
+			client.fetchAtResolvedTime("http://example.com/", "20200101000000"),
+		).rejects.toThrow("network error");
 
 		// Second call — inflight map must be clear so it retries
 		const result = await client.fetchAtResolvedTime("http://example.com/", "20200101000000");
@@ -169,13 +178,21 @@ describe("DedupingDirectClient concurrency cap", () => {
 				// Wrap d.promise so that when the deferred resolves, the decrement
 				// runs in the first .then() — no extra microtask from .finally().
 				return d.promise.then(
-					(v) => { inFlight--; return v; },
-					(e) => { inFlight--; return Promise.reject(e); },
+					(v) => {
+						inFlight--;
+						return v;
+					},
+					(e) => {
+						inFlight--;
+						return Promise.reject(e);
+					},
 				);
 			});
 		});
 
-		const client = new DedupingDirectClient(mock as unknown as WaybackDirectClient, { maxConcurrency: 2 });
+		const client = new DedupingDirectClient(mock as unknown as WaybackDirectClient, {
+			maxConcurrency: 2,
+		});
 
 		const promises = deferreds.map((_, i) =>
 			client.fetchAtResolvedTime(`http://example.com/asset-${i}.png`, "20200101000000"),
@@ -240,7 +257,10 @@ describe("DedupingDirectClient namespace isolation", () => {
 		const client = new DedupingDirectClient(mock as unknown as WaybackDirectClient);
 
 		const pResolved = client.fetchAtResolvedTime("http://example.com/sprite.png", "20200101000000");
-		const pRequested = client.fetchAtRequestedTime("http://example.com/sprite.png", "20200101000000");
+		const pRequested = client.fetchAtRequestedTime(
+			"http://example.com/sprite.png",
+			"20200101000000",
+		);
 
 		// Both should have triggered separate upstream calls
 		expect(mock.fetchAtResolvedTime).toHaveBeenCalledTimes(1);

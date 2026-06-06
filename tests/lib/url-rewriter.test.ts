@@ -1,4 +1,5 @@
 import {
+	type DiscoveredAsset,
 	isAssetUrl,
 	parseWaybackPath,
 	rewriteCssUrls,
@@ -6,7 +7,6 @@ import {
 	sanitizeTimeParam,
 	stripWaybackToolbar,
 	unwrapNestedProxyUrl,
-	type DiscoveredAsset,
 } from "../../src/lib/url-rewriter";
 
 const TARGET = "http://www.apple.com/products/iphone";
@@ -263,7 +263,11 @@ describe("rewriteHtmlUrls — covers all URL-bearing tags", () => {
 	});
 
 	it("rewrites <link href>", () => {
-		const { html: r } = rewriteHtmlUrls(`<link rel="stylesheet" href="/css/main.css">`, TARGET, TIME);
+		const { html: r } = rewriteHtmlUrls(
+			`<link rel="stylesheet" href="/css/main.css">`,
+			TARGET,
+			TIME,
+		);
 		expect(r).toContain(`/web/${TIME}/http://www.apple.com/css/main.css`);
 	});
 
@@ -672,7 +676,7 @@ describe("rewriteCssUrls — discoveredAssets", () => {
 		const css = `body { background: url('/web/${ts}/http://example.com/bg.png'); }`;
 		const collect = new Set<string>();
 		const assets: DiscoveredAsset[] = [];
-		rewriteCssUrls(css, "http://example.com/page", TIME, collect, assets);
+		rewriteCssUrls(css, "http://example.com/page", TIME, false, collect, assets);
 		expect(assets).toContainEqual<DiscoveredAsset>({
 			url: "http://example.com/bg.png",
 			embeddedTs: ts,
@@ -692,8 +696,67 @@ describe("rewriteCssUrls — discoveredAssets", () => {
 		const css = `a { background: url('/web/${ts}/${url}'); } b { background: url('/web/${ts}/${url}'); }`;
 		const collect = new Set<string>();
 		const assets: DiscoveredAsset[] = [];
-		rewriteCssUrls(css, "http://example.com/page", TIME, collect, assets);
+		rewriteCssUrls(css, "http://example.com/page", TIME, false, collect, assets);
 		const matches = assets.filter((a) => a.url === url && a.embeddedTs === ts);
 		expect(matches).toHaveLength(1);
+	});
+});
+
+describe("rewriteHtmlUrls — lockTime", () => {
+	it("strips the timestamp segment from archive-prefixed URLs when lockTime is true", () => {
+		const html = `<a href="/web/20010913100802/http://commerce.www.ibm.com/cgi-bin/ncommerce/AdvantageCode?shoprfnbr=1&cntry=840&lang=en_US&cntrfnbr=1&mmerfnbr=1&q=W201">x</a>`;
+		const { html: r } = rewriteHtmlUrls(html, "http://www.ibm.com", TIME, true);
+		expect(r).toContain(
+			"/web/http://commerce.www.ibm.com/cgi-bin/ncommerce/AdvantageCode?shoprfnbr=1&amp;cntry=840&amp;lang=en_US&amp;cntrfnbr=1&amp;mmerfnbr=1&amp;q=W201",
+		);
+		expect(r).not.toMatch(/\/web\/\d{14}\//);
+	});
+
+	it("strips the timestamp segment from relative URLs when lockTime is true", () => {
+		const html = `<a href="/foo">x</a>`;
+		const { html: r } = rewriteHtmlUrls(html, TARGET, TIME, true);
+		expect(r).toContain("/web/http://www.apple.com/foo");
+		expect(r).not.toContain(`/web/${TIME}/`);
+	});
+
+	it("keeps the timestamp segment when lockTime is false (default)", () => {
+		const html = `<a href="/foo">x</a>`;
+		const { html: r } = rewriteHtmlUrls(html, TARGET, TIME);
+		expect(r).toContain(`/web/${TIME}/http://www.apple.com/foo`);
+	});
+
+	it("still records discovered assets with their embedded TS even when lockTime is true", () => {
+		const html = `<img src="/web/20010913100802/http://www.ibm.com/img.png">`;
+		const { html: r, discoveredAssets } = rewriteHtmlUrls(html, "http://www.ibm.com", TIME, true);
+		expect(r).toContain("/web/http://www.ibm.com/img.png");
+		expect(r).not.toContain("/web/20010913100802/");
+		expect(discoveredAssets).toContainEqual<DiscoveredAsset>({
+			url: "http://www.ibm.com/img.png",
+			embeddedTs: "20010913100802",
+		});
+	});
+
+	it("strips the timestamp from srcset entries when lockTime is true", () => {
+		const html = `<img srcset="/a.png 1x, /b.png 2x">`;
+		const { html: r } = rewriteHtmlUrls(html, TARGET, TIME, true);
+		expect(r).toContain("/web/http://www.apple.com/a.png 1x");
+		expect(r).toContain("/web/http://www.apple.com/b.png 2x");
+		expect(r).not.toContain(`/web/${TIME}/`);
+	});
+});
+
+describe("rewriteCssUrls — lockTime", () => {
+	it("strips the timestamp segment from url() values when lockTime is true", () => {
+		const css = `background: url('/web/20191231235959/http://example.com/img.png')`;
+		const r = rewriteCssUrls(css, "http://example.com/page", TIME, true);
+		expect(r).toContain("url('/web/http://example.com/img.png')");
+		expect(r).not.toContain("/web/20191231235959/");
+	});
+
+	it("strips the timestamp from relative url() values when lockTime is true", () => {
+		const css = `background: url('./img.png')`;
+		const r = rewriteCssUrls(css, "http://example.com/page", TIME, true);
+		expect(r).toContain("url('/web/http://example.com/img.png')");
+		expect(r).not.toContain(`/web/${TIME}/`);
 	});
 });

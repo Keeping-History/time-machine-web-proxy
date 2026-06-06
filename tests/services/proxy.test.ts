@@ -57,6 +57,7 @@ const makeCache = (lookupImpl?: jest.Mock): jest.Mocked<CacheService> =>
 
 const makeClient = (): jest.Mocked<ArchiveJobClientPort> => ({
 	enqueueExactAndWait: jest.fn().mockResolvedValue(undefined),
+	enqueueExact: jest.fn().mockResolvedValue(undefined),
 	enqueueDomainCrawl: jest.fn().mockResolvedValue(undefined),
 });
 
@@ -253,7 +254,7 @@ describe("ProxyService.fetch — Tier 2 direct fetch", () => {
 	it("MISS_DIRECT: directClient ok → writeFile, re-lookup, enqueueExactAndWait NOT called", async () => {
 		const lookup = jest
 			.fn<Promise<CacheHit | null>, [string, string]>()
-			.mockResolvedValueOnce(null)   // initial lookup → MISS
+			.mockResolvedValueOnce(null) // initial lookup → MISS
 			.mockResolvedValueOnce(htmlHit); // re-lookup after writeFile
 		const cache = makeCache(lookup);
 		const client = makeClient();
@@ -280,7 +281,11 @@ describe("ProxyService.fetch — Tier 2 direct fetch", () => {
 		expect(result.cache).toBe("MISS_DIRECT");
 		expect(client.enqueueExactAndWait).not.toHaveBeenCalled();
 		expect(cache.writeFile).toHaveBeenCalledWith(TARGET_HTML_URL, TIME, directBody);
-		expect(cache.writeResolvedTimeSidecar).toHaveBeenCalledWith(TIME, TARGET_HTML_URL, "20200101010000");
+		expect(cache.writeResolvedTimeSidecar).toHaveBeenCalledWith(
+			TIME,
+			TARGET_HTML_URL,
+			"20200101010000",
+		);
 		expect(lookup).toHaveBeenCalledTimes(2);
 	});
 
@@ -388,7 +393,7 @@ describe("ProxyService.fetch — Tier 2 direct fetch", () => {
 	it("Tier 2 fallback → Tier 3 worker invoked, cacheStatus is MISS_WORKER", async () => {
 		const lookup = jest
 			.fn<Promise<CacheHit | null>, [string, string]>()
-			.mockResolvedValueOnce(null)   // initial lookup
+			.mockResolvedValueOnce(null) // initial lookup
 			.mockResolvedValueOnce(htmlHit); // re-lookup after worker
 		const cache = makeCache(lookup);
 		const client = makeClient();
@@ -474,7 +479,9 @@ describe("ProxyService.fetch — Tier 1 prewarm (fire-and-forget)", () => {
 		const client = makeClient();
 		const directClient = makeDirectClient();
 		let prewarmResolve!: () => void;
-		const prewarmBarrier = new Promise<void>((r) => { prewarmResolve = r; });
+		const prewarmBarrier = new Promise<void>((r) => {
+			prewarmResolve = r;
+		});
 		directClient.fetchAtResolvedTime.mockReturnValue(
 			prewarmBarrier.then(() => ({ outcome: "fallback" as const, reason: "test" })),
 		);
@@ -817,6 +824,52 @@ describe("ProxyService.fetch — domain crawl fire-and-forget", () => {
 
 		expect(client.enqueueDomainCrawl).toHaveBeenCalledWith("example.com", TIME);
 	});
+
+	it("skips crawl when CDX page count returns 0 (nothing to crawl)", async () => {
+		const lookup = jest
+			.fn<Promise<CacheHit | null>, [string, string]>()
+			.mockResolvedValueOnce(null)
+			.mockResolvedValueOnce(htmlHit);
+		const cache = makeCache(lookup);
+		const client = makeClient();
+		mockedReadFile.mockResolvedValue(Buffer.from(PLAIN_HTML_BODY));
+		mockedFetch.mockReturnValue(cdxOk(0));
+		const redis = makeRedis("OK");
+		const svc = new ProxyService(
+			cache,
+			client,
+			logger,
+			{ ...baseConfig, whitelistHosts: "example.com" },
+			redis as unknown as import("ioredis").default,
+		);
+		await svc.fetch(TARGET_HTML_URL, TIME);
+		await new Promise((r) => setImmediate(r));
+		expect(client.enqueueDomainCrawl).not.toHaveBeenCalled();
+	});
+
+	it("skips crawl when CDX body is non-integer (indeterminate page count must not enqueue)", async () => {
+		const lookup = jest
+			.fn<Promise<CacheHit | null>, [string, string]>()
+			.mockResolvedValueOnce(null)
+			.mockResolvedValueOnce(htmlHit);
+		const cache = makeCache(lookup);
+		const client = makeClient();
+		mockedReadFile.mockResolvedValue(Buffer.from(PLAIN_HTML_BODY));
+		mockedFetch.mockReturnValue(
+			Promise.resolve({ ok: true, text: () => Promise.resolve("<html>error</html>") }),
+		);
+		const redis = makeRedis("OK");
+		const svc = new ProxyService(
+			cache,
+			client,
+			logger,
+			{ ...baseConfig, whitelistHosts: "example.com" },
+			redis as unknown as import("ioredis").default,
+		);
+		await svc.fetch(TARGET_HTML_URL, TIME);
+		await new Promise((r) => setImmediate(r));
+		expect(client.enqueueDomainCrawl).not.toHaveBeenCalled();
+	});
 });
 
 // --- Explicit (admin-triggered) domain crawl --------------------------------
@@ -985,5 +1038,35 @@ describe("ProxyService.triggerDomainCrawl — explicit admin enqueue", () => {
 
 		expect(client.enqueueDomainCrawl).toHaveBeenCalledWith("example.com", TIME);
 		expect(redis.set).not.toHaveBeenCalled();
+	});
+
+	it("throws {status:422} when CDX page count is 0 (nothing to crawl in window)", async () => {
+		const cache = makeCache();
+		const client = makeClient();
+		mockedFetch.mockReturnValue(cdxOk(0));
+		const svc = new ProxyService(cache, client, logger, {
+			...baseConfig,
+			whitelistHosts: "example.com",
+		});
+		await expect(svc.triggerDomainCrawl("example.com", TIME)).rejects.toMatchObject({
+			status: 422,
+		});
+		expect(client.enqueueDomainCrawl).not.toHaveBeenCalled();
+	});
+
+	it("throws when CDX page-count body is non-integer (indeterminate — safety cap must not be bypassed)", async () => {
+		const cache = makeCache();
+		const client = makeClient();
+		mockedFetch.mockReturnValue(
+			Promise.resolve({ ok: true, text: () => Promise.resolve("<html>error</html>") }),
+		);
+		const svc = new ProxyService(cache, client, logger, {
+			...baseConfig,
+			whitelistHosts: "example.com",
+		});
+		await expect(svc.triggerDomainCrawl("example.com", TIME)).rejects.toThrow(
+			/CDX page count indeterminate/,
+		);
+		expect(client.enqueueDomainCrawl).not.toHaveBeenCalled();
 	});
 });

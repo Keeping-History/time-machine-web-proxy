@@ -1,5 +1,6 @@
-import { logger as defaultLogger } from "../lib/logger";
 import type pino from "pino";
+import { describeFetchError } from "../lib/errors";
+import { logger as defaultLogger } from "../lib/logger";
 
 const TIMESTAMP_RE = /^\d{14}$/;
 const RESOLVED_TIME_RE = /\/web\/(\d{14})id_\//;
@@ -8,6 +9,8 @@ const WAYBACK_BASE = "https://web.archive.org/web";
 const DEFAULT_RATE_PER_SECOND = 20;
 const DEFAULT_BURST = 30;
 const DEFAULT_TIMEOUT_MS = 10_000;
+const DEFAULT_BREAKER_BASE_MS = 5_000;
+const DEFAULT_BREAKER_MAX_MS = 600_000;
 
 export type DirectFetchOutcome = "ok" | "not_found" | "fallback";
 
@@ -26,7 +29,82 @@ export interface WaybackDirectClientConfig {
 	ratePerSecond?: number;
 	burst?: number;
 	timeoutMs?: number;
+	/** Initial cooldown when ECONNREFUSED opens the breaker, ms. Default 5_000. */
+	breakerBaseMs?: number;
+	/** Maximum cooldown after repeated HALF_OPEN probe failures, ms. Default 600_000. */
+	breakerMaxMs?: number;
 	logger?: pino.Logger;
+}
+
+/**
+ * Single-state circuit breaker shared across both fetch methods. Trips only
+ * on ECONNREFUSED — other transport errors (timeouts, ENOTFOUND, etc.) and
+ * HTTP error statuses do not affect breaker state. While OPEN, all calls
+ * short-circuit without touching the network or token bucket.
+ *
+ * State machine:
+ *   CLOSED → OPEN on ECONNREFUSED (cooldown = baseMs).
+ *   OPEN → HALF_OPEN at cooldown expiry; exactly one caller becomes the
+ *     probe, others get "half-open-busy" until the probe resolves.
+ *   HALF_OPEN → CLOSED on probe success (any non-ECONNREFUSED outcome,
+ *     including 5xx/timeout — the upstream answered, that's enough).
+ *   HALF_OPEN → OPEN on probe ECONNREFUSED (cooldown doubles, capped at maxMs).
+ */
+type BreakerVerdict = "proceed" | "open" | "half-open-busy";
+
+class CircuitBreaker {
+	private state: "CLOSED" | "OPEN" | "HALF_OPEN" = "CLOSED";
+	private openedAt = 0;
+	private cooldownMs: number;
+	private readonly baseMs: number;
+	private readonly maxMs: number;
+
+	constructor(baseMs: number, maxMs: number) {
+		this.baseMs = baseMs;
+		this.maxMs = maxMs;
+		this.cooldownMs = baseMs;
+	}
+
+	tryAcquire(): BreakerVerdict {
+		if (this.state === "CLOSED") return "proceed";
+		if (this.state === "HALF_OPEN") return "half-open-busy";
+		// OPEN — check whether the cooldown has expired.
+		if (Date.now() >= this.openedAt + this.cooldownMs) {
+			// Atomic in single-threaded JS: this caller becomes the probe.
+			this.state = "HALF_OPEN";
+			return "proceed";
+		}
+		return "open";
+	}
+
+	recordSuccess(): void {
+		this.state = "CLOSED";
+		this.openedAt = 0;
+		this.cooldownMs = this.baseMs;
+	}
+
+	recordEconnRefused(): void {
+		// From HALF_OPEN: the probe failed, double cooldown (capped).
+		// From CLOSED: first failure, keep cooldown at baseMs.
+		// From OPEN: tryAcquire short-circuits before any fetch, so we never
+		// arrive here from OPEN. Defensive no-op if it ever happens.
+		if (this.state === "HALF_OPEN") {
+			this.cooldownMs = Math.min(this.maxMs, this.cooldownMs * 2);
+		}
+		this.state = "OPEN";
+		this.openedAt = Date.now();
+	}
+}
+
+function isEconnRefused(e: unknown): boolean {
+	const cause = (e as { cause?: unknown })?.cause;
+	if (cause && typeof cause === "object" && "code" in cause) {
+		return (cause as { code: unknown }).code === "ECONNREFUSED";
+	}
+	if (e && typeof e === "object" && "code" in e) {
+		return (e as { code: unknown }).code === "ECONNREFUSED";
+	}
+	return false;
 }
 
 /**
@@ -89,15 +167,17 @@ class TokenBucket {
 /**
  * Direct Wayback Machine fetch client with two modes:
  *
- * - `fetchAtResolvedTime`: fetches `id_` URLs (no redirect follow). 3xx → fallback.
- * - `fetchAtRequestedTime`: fetches `im_` URLs (follow redirects), extracts
- *   resolvedTime from the final response URL.
+ * - `fetchAtResolvedTime`: fetches `id_` URLs for an exact known timestamp.
+ * - `fetchAtRequestedTime`: fetches `id_` URLs for a requested timestamp that
+ *   may not have a capture; Wayback redirects to the nearest snapshot.
+ *   Extracts resolvedTime from the final response URL.
  *
- * Both methods are rate-limited by a shared token bucket.
+ * Both methods use `redirect: "follow"` and share a token bucket + circuit breaker.
  */
 export class WaybackDirectClient {
 	private readonly bucket: TokenBucket;
 	private readonly timeoutMs: number;
+	private readonly breaker: CircuitBreaker;
 	private readonly log: pino.Logger;
 
 	constructor(config: WaybackDirectClientConfig = {}) {
@@ -110,22 +190,32 @@ export class WaybackDirectClient {
 			(process.env.DIRECT_FETCH_TIMEOUT_MS
 				? Number(process.env.DIRECT_FETCH_TIMEOUT_MS)
 				: DEFAULT_TIMEOUT_MS);
+		this.breaker = new CircuitBreaker(
+			config.breakerBaseMs ?? DEFAULT_BREAKER_BASE_MS,
+			config.breakerMaxMs ?? DEFAULT_BREAKER_MAX_MS,
+		);
 		this.log = config.logger ?? defaultLogger;
 	}
 
 	/**
 	 * Fetches the Wayback snapshot at exactly the given timestamp using the
-	 * `id_` modifier (raw content, no Wayback toolbar). Uses `redirect: 'manual'`
-	 * so any 3xx is treated as a fallback rather than followed.
+	 * `id_` modifier (raw content, no Wayback toolbar). Uses `redirect: "follow"`
+	 * so Wayback redirects to the nearest capture are transparently followed.
 	 *
 	 * Returns:
 	 *   - `ok` + body/contentType on 200
 	 *   - `not_found` on 404
-	 *   - `fallback` on any 3xx, other 4xx, 5xx, timeout, or bad timestamp
+	 *   - `fallback` on 4xx/5xx, timeout, redirect-limit exceeded, or bad timestamp
 	 */
 	async fetchAtResolvedTime(url: string, ts: string): Promise<ResolvedResult> {
 		if (!TIMESTAMP_RE.test(ts)) {
 			return { outcome: "fallback", reason: "bad-timestamp" };
+		}
+
+		const verdict = this.breaker.tryAcquire();
+		if (verdict === "open") return { outcome: "fallback", reason: "circuit-open" };
+		if (verdict === "half-open-busy") {
+			return { outcome: "fallback", reason: "circuit-half-open-busy" };
 		}
 
 		const waitMs = this.bucket.tryConsume();
@@ -141,22 +231,29 @@ export class WaybackDirectClient {
 		let res: Response;
 		try {
 			res = await globalThis.fetch(archiveUrl, {
-				redirect: "manual",
+				redirect: "follow",
 				signal: AbortSignal.timeout(this.timeoutMs),
 			});
 		} catch (e) {
-			const reason = e instanceof Error ? e.message : String(e);
-			this.log.debug({ archiveUrl, reason }, "[wayback-direct] fetchAtResolvedTime fetch error");
+			// undici wraps the real failure in a generic `TypeError: fetch failed`
+			// whose `.cause` is the actual SystemError (ENOTFOUND, ECONNRESET,
+			// AbortError on timeout, "no healthy proxy" from the rotator, etc.).
+			// Unwrap so the operator sees the actual cause, not the wrapper.
+			if (isEconnRefused(e)) {
+				this.breaker.recordEconnRefused();
+				this.log.warn(
+					{ archiveUrl },
+					"[wayback-direct] ECONNREFUSED → opening circuit",
+				);
+			} else {
+				this.breaker.recordSuccess();
+			}
+			const reason = describeFetchError(e);
+			this.log.warn({ archiveUrl, reason }, "[wayback-direct] fetchAtResolvedTime fetch error");
 			return { outcome: "fallback", reason };
 		}
-
-		if (res.status >= 300 && res.status < 400) {
-			this.log.debug(
-				{ archiveUrl, status: res.status },
-				"[wayback-direct] fetchAtResolvedTime redirect → fallback",
-			);
-			return { outcome: "fallback", reason: `redirect-${res.status}` };
-		}
+		this.breaker.recordSuccess();
+		this.log.info({ archiveUrl, status: res.status }, "[wayback-direct] response");
 
 		if (res.status === 404) {
 			return { outcome: "not_found" };
@@ -175,9 +272,9 @@ export class WaybackDirectClient {
 	}
 
 	/**
-	 * Fetches the Wayback snapshot using the `im_` modifier which follows
-	 * redirects to the nearest available capture. Extracts the resolved
-	 * timestamp from the final response URL.
+	 * Fetches the Wayback snapshot using the `id_` modifier for a requested
+	 * timestamp that may not have a capture. Wayback redirects to the nearest
+	 * snapshot; the resolved timestamp is extracted from the final response URL.
 	 *
 	 * Returns:
 	 *   - `ok` + body/contentType/resolvedTime on 200
@@ -189,6 +286,12 @@ export class WaybackDirectClient {
 			return { outcome: "fallback", reason: "bad-timestamp" };
 		}
 
+		const verdict = this.breaker.tryAcquire();
+		if (verdict === "open") return { outcome: "fallback", reason: "circuit-open" };
+		if (verdict === "half-open-busy") {
+			return { outcome: "fallback", reason: "circuit-half-open-busy" };
+		}
+
 		const waitMs = this.bucket.tryConsume();
 		if (waitMs > 0) {
 			this.log.debug({ url, ts, waitMs }, "[direct] rate-limited");
@@ -196,7 +299,7 @@ export class WaybackDirectClient {
 			await this.bucket.consume();
 		}
 
-		const archiveUrl = `${WAYBACK_BASE}/${ts}im_/${url}`;
+		const archiveUrl = `${WAYBACK_BASE}/${ts}id_/${url}`;
 		this.log.debug({ archiveUrl, ts }, "[direct] requested-fetch");
 
 		let res: Response;
@@ -206,10 +309,22 @@ export class WaybackDirectClient {
 				signal: AbortSignal.timeout(this.timeoutMs),
 			});
 		} catch (e) {
-			const reason = e instanceof Error ? e.message : String(e);
-			this.log.debug({ archiveUrl, reason }, "[wayback-direct] fetchAtRequestedTime fetch error");
+			// Same unwrap as fetchAtResolvedTime — see comment there for rationale.
+			if (isEconnRefused(e)) {
+				this.breaker.recordEconnRefused();
+				this.log.warn(
+					{ archiveUrl },
+					"[wayback-direct] ECONNREFUSED → opening circuit",
+				);
+			} else {
+				this.breaker.recordSuccess();
+			}
+			const reason = describeFetchError(e);
+			this.log.warn({ archiveUrl, reason }, "[wayback-direct] fetchAtRequestedTime fetch error");
 			return { outcome: "fallback", reason };
 		}
+		this.breaker.recordSuccess();
+		this.log.info({ archiveUrl, status: res.status }, "[wayback-direct] response");
 
 		if (res.status === 404) {
 			return { outcome: "not_found" };

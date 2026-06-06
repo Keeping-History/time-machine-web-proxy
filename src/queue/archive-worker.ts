@@ -1,45 +1,45 @@
-import { type FSWatcher, promises as fsp, watch as fsWatch } from "node:fs";
+import { promises as fs } from "node:fs";
 import { type ConnectionOptions, type Job, type QueueEvents, Worker } from "bullmq";
 import type pino from "pino";
-import { WaybackMachineDownloader } from "wayback-machine-downloader";
-import { dayWindow } from "../lib/archive-time";
-import { installDownloaderLogging, runWithDownloaderLogging } from "../lib/downloader-logger";
-import { normalizeBaseUrlInput } from "../lib/normalize-base-url";
-import { isAssetUrl } from "../lib/url-rewriter";
-import type {
-	JobProgress,
-	JobProgressQueue,
-	JobProgressStage,
-} from "../models/job-progress";
+import type { RequestedResult, ResolvedResult } from "../clients/wayback-direct-client";
+import type { JobProgress, JobProgressQueue, JobProgressStage } from "../models/job-progress";
 import type { CacheService } from "../services/cache";
+import { rewriteHtmlUrls, stripWaybackToolbar } from "../lib/url-rewriter";
 import { assertDomainCrawlJob, assertExactUrlJob, QUEUE_CRAWL, QUEUE_EXACT } from "./jobs";
 
-export type SnapshotResolverFn = (
-	variants: string[],
-	requestedTime: string,
-	allowLaterFallback: boolean,
-) => Promise<string | null>;
+/**
+ * Minimal structural shape of the direct-fetch client the workers need. Kept
+ * local to avoid an import cycle with `lib/dependencies.ts`, which is the
+ * module that constructs the real `DedupingDirectClient` and passes it in.
+ *
+ * `fetchAtRequestedTime` drives the exact worker: Wayback's `id_` endpoint
+ * resolves the nearest snapshot server-side and redirects to it, sidestepping
+ * the CDX endpoint entirely.
+ */
+export interface ArchiveDirectClient {
+	fetchAtRequestedTime(url: string, ts: string): Promise<RequestedResult>;
+	fetchAtResolvedTime(url: string, ts: string): Promise<ResolvedResult>;
+}
 
 export interface StartArchiveWorkersOpts {
 	connection: ConnectionOptions;
 	cache: Pick<
 		CacheService,
 		| "cacheDirForJob"
+		| "writeFile"
+		| "writeContentTypeSidecar"
 		| "writeNotFoundSentinel"
-		| "writeTentativeNotFoundSentinel"
 		| "writeResolvedTimeSidecar"
 		| "lookup"
 	>;
-	resolver: SnapshotResolverFn;
+	directClient: ArchiveDirectClient;
+	/** Fire-and-forget callback to enqueue an archive-exact job for a discovered
+	 *  link. Keeps the crawl worker decoupled from BullMQ internals. */
+	enqueueExactJob: (url: string, time: string) => Promise<void>;
 	logger: pino.Logger;
 	bullmqPrefix: string;
 	workerConcurrency: number;
 	workerRateLimitPerSec: number;
-	downloaderThreadsCount: number;
-	/** Bidirectional resolution flag for DIRECT/top-level URLs. */
-	allowLaterFallbackDirect: boolean;
-	/** Bidirectional resolution flag for ASSET URLs (images, CSS, JS, fonts, media). */
-	allowLaterFallbackAsset: boolean;
 }
 
 export interface ArchiveWorkers {
@@ -47,13 +47,10 @@ export interface ArchiveWorkers {
 	crawl: Worker;
 }
 
-// Lock-extender cadence for the crawl worker. The Worker holds the job lock
-// for `lockDuration` (120s); BullMQ re-queues stalled jobs after that. We
-// extend the lock every 110s so a multi-minute crawl never appears stalled.
 const CRAWL_LOCK_DURATION_MS = 120_000;
-const CRAWL_LOCK_EXTEND_INTERVAL_MS = CRAWL_LOCK_DURATION_MS - 10_000;
-// On a downloader-surfaced 429 we throttle the worker for one minute before
-// requeuing. Matches the Wayback 2026 cooldown documented in the plan.
+// On a 429 from the direct fetch path we throttle the worker for one minute
+// before requeuing. Matches the Wayback cooldown documented in the original
+// downloader plan.
 const RATE_LIMIT_PAUSE_MS = 60_000;
 const RATE_LIMIT_RE = /429|rate.?limit/i;
 
@@ -87,98 +84,47 @@ async function emitProgress(
 }
 
 /**
- * Start `fs.watch` on `directory` (recursive) and invoke `onFile` once per
- * unique filename observed. Returns an async closer.
- *
- * `wayback-machine-downloader@0.5.0` exposes no progress hooks, so this is
- * the only way to surface per-file progress without monkey-patching stdout.
- * Events are de-duplicated by filename so transient `change` events after the
- * initial `rename` don't fire twice. Directory paths slip through occasionally
- * (Linux inotify can't reliably classify), which is acceptable — count is
- * approximate by design.
+ * Convert a direct-fetch failure outcome into a thrown error. Callers wrap
+ * this in `applyRateLimit` so the BullMQ rate-limiter triggers on 429 paths.
  */
-function startDownloadWatcher(
-	directory: string,
-	onFile: (relPath: string, count: number) => void,
-	logger: pino.Logger,
-): () => void {
-	let watcher: FSWatcher | null = null;
-	let closed = false;
-	const seen = new Set<string>();
-	// Fire-and-forget mkdir + watch setup. The processor MUST NOT block on
-	// observability — if the downloader finishes before the watcher is up we
-	// miss per-file events but the job still succeeds. Awaiting mkdir here
-	// also breaks tests that use fake timers, because libuv's mkdir completion
-	// callback is scheduled on the (mocked) event loop.
-	fsp
-		.mkdir(directory, { recursive: true })
-		.then(() => {
-			if (closed) return;
-			watcher = fsWatch(directory, { recursive: true }, (eventType, filename) => {
-				if (!filename) return;
-				const key = filename.toString();
-				if (seen.has(key)) return;
-				// 'rename' fires on creation/deletion; 'change' fires on writes to an
-				// existing inode. New downloads always show up as 'rename' first.
-				if (eventType !== "rename") return;
-				// Concurrent workers writing sentinels into the same host dir would
-				// otherwise surface here as "downloaded files" for this job.
-				if (key.startsWith(".notfound/") || key.startsWith(".notfound-tentative/")) {
-					return;
-				}
-				seen.add(key);
-				onFile(key, seen.size);
-			});
-		})
-		.catch((e: unknown) => {
-			logger.warn(
-				{ directory, err: e instanceof Error ? e.message : String(e) },
-				"[worker] fs.watch setup failed — per-file progress disabled for this job",
-			);
-		});
-	return () => {
-		closed = true;
-		try {
-			watcher?.close();
-		} catch {
-			/* watcher already closed */
+function failOnFallback(result: ResolvedResult, url: string, ts: string): never {
+	const reason = result.reason ?? "unknown";
+	throw new Error(`direct fetch fallback for ${url} @ ${ts}: ${reason}`);
+}
+
+const TIMESTAMP_RE = /^\d{14}$/;
+
+/**
+ * Inspect a thrown error and, if its message contains a 429/rate-limit
+ * signal, drive the BullMQ rate-limit + re-queue dance. Other errors are
+ * re-thrown unchanged so BullMQ's retry policy handles them.
+ */
+async function applyRateLimit<T>(worker: Worker, fn: () => Promise<T>): Promise<T> {
+	try {
+		return await fn();
+	} catch (err: unknown) {
+		const msg = err instanceof Error ? err.message : String(err);
+		if (RATE_LIMIT_RE.test(msg)) {
+			await worker.rateLimit(RATE_LIMIT_PAUSE_MS);
+			throw Worker.RateLimitError();
 		}
-	};
+		throw err;
+	}
 }
 
 export function startArchiveWorkers(opts: StartArchiveWorkersOpts): ArchiveWorkers {
 	const {
 		connection,
 		cache,
-		resolver,
+		directClient,
+		enqueueExactJob,
 		logger,
 		bullmqPrefix,
 		workerConcurrency,
 		workerRateLimitPerSec,
-		downloaderThreadsCount,
-		allowLaterFallbackDirect,
-		allowLaterFallbackAsset,
 	} = opts;
 
 	const limiter = { max: workerRateLimitPerSec, duration: 1000 };
-
-	// Flip the downloader into debug mode and route its console.log output
-	// through pino (+ per-job BullMQ logs visible in bull-board). Idempotent —
-	// safe to call across repeated startArchiveWorkers invocations.
-	installDownloaderLogging();
-
-	const runWithRateLimitGuard = async <T>(worker: Worker, fn: () => Promise<T>): Promise<T> => {
-		try {
-			return await fn();
-		} catch (err: unknown) {
-			const msg = err instanceof Error ? err.message : String(err);
-			if (RATE_LIMIT_RE.test(msg)) {
-				await worker.rateLimit(RATE_LIMIT_PAUSE_MS);
-				throw Worker.RateLimitError();
-			}
-			throw err;
-		}
-	};
 
 	// `let exact!: Worker` lets the processor closure reference the worker
 	// itself for `worker.rateLimit(...)`. Same pattern for crawl below.
@@ -189,7 +135,6 @@ export function startArchiveWorkers(opts: StartArchiveWorkersOpts): ArchiveWorke
 			try {
 				assertExactUrlJob(job.data);
 				const { url, time } = job.data;
-				const base = normalizeBaseUrlInput(url);
 				// Cache directory keys on the URL's hostname verbatim — www.example.com
 				// and example.com are stored as separate entries because they can
 				// legitimately serve different content. Must match CacheService.lookup,
@@ -198,108 +143,69 @@ export function startArchiveWorkers(opts: StartArchiveWorkersOpts): ArchiveWorke
 				const directory = cache.cacheDirForJob(time, hostname);
 
 				await emitProgress(job, QUEUE_EXACT, "picked_up", logger, { url, time });
+				logger.info({ url, time, directory }, "[worker:exact] start");
 
-				// Asset sub-resources (images, CSS, JS, fonts, media) opt into the
-				// bidirectional resolver: an asset capture rarely aligns with the
-				// requested page-level timestamp, and strict at-or-before would
-				// 404 assets that exist a few hours/days later. Direct/top-level
-				// URLs stay on the configured (default strict) policy so the user
-				// sees the page state at the time they asked for.
-				const isAsset = isAssetUrl(url);
-				const allowLaterFallback = isAsset ? allowLaterFallbackAsset : allowLaterFallbackDirect;
-				logger.info(
-					{ url, time, directory, isAsset, allowLaterFallback },
-					"[worker:exact] start",
-				);
-				await emitProgress(job, QUEUE_EXACT, "availability_start", logger, { url, time });
-				const resolved = await resolver(base.variants, time, allowLaterFallback);
-				if (resolved === null) {
-					await emitProgress(job, QUEUE_EXACT, "no_snapshot", logger, { url, time });
-					logger.warn({ url, time }, "[worker:exact] no snapshot at-or-before requested time");
-					await cache.writeNotFoundSentinel(time, url);
-					return;
-				}
-				await emitProgress(job, QUEUE_EXACT, "resolved", logger, { url, time, resolved });
-				logger.info({ url, time, resolved }, "[worker:exact] resolved snapshot");
-
-				await emitProgress(job, QUEUE_EXACT, "download_start", logger, {
-					url,
-					time,
-					resolved,
-				});
-				const stopWatch = startDownloadWatcher(
-					directory,
-					(file, filesSeen) => {
-						void emitProgress(job, QUEUE_EXACT, "download_file", logger, {
+				await emitProgress(job, QUEUE_EXACT, "download_start", logger, { url, time });
+				// Skip CDX entirely. Wayback's `id_` endpoint redirects to the
+				// nearest available capture, so a single round-trip handles both
+				// snapshot resolution and download in one go. CDX is a separate
+				// Wayback service that throttles independently — relying on it
+				// here produced "all CDX queries failed" job failures even when
+				// the `id_` path was healthy.
+				let resolvedTime: string | undefined;
+				let notFound = false;
+				await applyRateLimit(exact, async () => {
+					const result = await directClient.fetchAtRequestedTime(url, time);
+					if (result.outcome === "ok") {
+						if (!result.body) {
+							throw new Error(`direct fetch returned ok with no body for ${url} @ ${time}`);
+						}
+						await cache.writeFile(url, time, result.body);
+						if (result.contentType) {
+							await cache.writeContentTypeSidecar(url, time, result.contentType);
+						}
+						if (result.resolvedTime && TIMESTAMP_RE.test(result.resolvedTime)) {
+							resolvedTime = result.resolvedTime;
+						}
+						await emitProgress(job, QUEUE_EXACT, "download_file", logger, {
 							url,
 							time,
-							resolved,
-							file,
-							filesSeen,
+							resolved: resolvedTime,
+							file: new URL(url).pathname,
+							filesSeen: 1,
 						});
-					},
-					logger,
-				);
-				const downloaderLogger = logger.child({
-					component: "wbm-downloader",
-					queue: QUEUE_EXACT,
-					jobId: job.id,
+						return;
+					}
+					if (result.outcome === "not_found") {
+						await cache.writeNotFoundSentinel(time, url);
+						notFound = true;
+						return;
+					}
+					failOnFallback(result, url, time);
+				});
+
+				if (notFound) {
+					logger.warn({ url, time }, "[worker:exact] no snapshot — wrote not-found sentinel");
+					return;
+				}
+
+				await emitProgress(job, QUEUE_EXACT, "download_done", logger, {
 					url,
 					time,
-					resolved,
+					resolved: resolvedTime,
 				});
-				try {
-					await runWithDownloaderLogging({ logger: downloaderLogger, job }, () =>
-						runWithRateLimitGuard(exact, () =>
-							new WaybackMachineDownloader({
-								base_url: base.canonicalUrl,
-								normalized_base: base,
-								from_timestamp: resolved,
-								to_timestamp: resolved,
-								threads_count: downloaderThreadsCount,
-								rewrite_mode: "as-is",
-								canonical_action: "keep",
-								exact_url: true,
-								download_external_assets: true,
-								directory,
-							}).download_files(),
-						),
-					);
-				} finally {
-					stopWatch();
+				if (resolvedTime) {
+					await cache.writeResolvedTimeSidecar(time, url, resolvedTime);
 				}
-				await emitProgress(job, QUEUE_EXACT, "download_done", logger, { url, time, resolved });
-				await cache.writeResolvedTimeSidecar(time, url, resolved);
-				// Success criterion must match what the proxy reader requires for
-				// THIS specific (url, time) — a host-level "directory has any file"
-				// check used to mask zero-result CDX runs whenever sibling URLs at
-				// the same host had been downloaded previously, marking the job
-				// `completed` while the proxy then 502'd on the re-lookup.
+				// Sanity check that the file the proxy reader will look for
+				// actually landed where we expect.
 				const hit = await cache.lookup(url, time);
 				if (!hit) {
-					throw new Error(
-						`Downloader produced no usable file for ${url} @ ${time} (resolved ${resolved})`,
-					);
+					throw new Error(`Direct fetch produced no usable file for ${url} @ ${time}`);
 				}
 			} catch (e) {
 				const errMsg = e instanceof Error ? e.message : String(e);
 				await emitProgress(job, QUEUE_EXACT, "error", logger, { error: errMsg });
-				// snapshot-resolver throws this specific message when CDX is
-				// transport-unreachable for every variant × retry. Retrying the
-				// job 2 more times burns ~45s before BullMQ gives up and only
-				// helps if CDX recovers in that window. Instead, write a 1-hour
-				// tentative sentinel so the next request fails fast, then
-				// retries after expiry in case CDX is healthy by then.
-				if (errMsg.startsWith("[snapshot-resolver] all CDX queries failed")) {
-					assertExactUrlJob(job.data);
-					const { url, time } = job.data;
-					await cache.writeTentativeNotFoundSentinel(time, url);
-					logger.warn(
-						{ url, time },
-						"[worker:exact] indeterminate CDX state — wrote tentative sentinel, skipping retry",
-					);
-					return;
-				}
 				throw e;
 			}
 		},
@@ -311,84 +217,66 @@ export function startArchiveWorkers(opts: StartArchiveWorkersOpts): ArchiveWorke
 		},
 	);
 
-	let crawl!: Worker;
-	crawl = new Worker(
+	const crawl = new Worker(
 		QUEUE_CRAWL,
 		async (job) => {
 			try {
 				assertDomainCrawlJob(job.data);
 				const { host, time } = job.data;
-				const base = normalizeBaseUrlInput(`https://${host}`);
-				const directory = cache.cacheDirForJob(time, host);
-
 				await emitProgress(job, QUEUE_CRAWL, "picked_up", logger, { host, time });
 
-				logger.info({ host, time, directory }, "[worker:crawl] start");
-
-				const extender = setInterval(() => {
-					// BullMQ guarantees `job.token` is defined inside an active processor;
-					// the type is `string | undefined` because the same Job class is used
-					// for jobs fetched outside the worker context.
-					// biome-ignore lint/style/noNonNullAssertion: token is guaranteed inside processor
-					const token = job.token!;
-					job.extendLock(token, CRAWL_LOCK_DURATION_MS).catch((e: unknown) =>
-						logger.warn(
-							{
-								jobId: job.id,
-								err: e instanceof Error ? e.message : String(e),
-							},
-							"[worker:crawl] extendLock failed",
-						),
-					);
-				}, CRAWL_LOCK_EXTEND_INTERVAL_MS);
-
-				// Crawl downloads everything in a day-wide window rather than a single
-				// resolved timestamp: a domain crawl is expected to span many distinct
-				// captures across siblings, not lock to one snapshot.
-				const { from, to } = dayWindow(time);
-
-				await emitProgress(job, QUEUE_CRAWL, "download_start", logger, { host, time });
-				const stopWatch = startDownloadWatcher(
-					directory,
-					(file, filesSeen) => {
-						void emitProgress(job, QUEUE_CRAWL, "download_file", logger, {
-							host,
-							time,
-							file,
-							filesSeen,
-						});
-					},
-					logger,
-				);
-				const downloaderLogger = logger.child({
-					component: "wbm-downloader",
-					queue: QUEUE_CRAWL,
-					jobId: job.id,
-					host,
-					time,
-				});
-				try {
-					await runWithDownloaderLogging({ logger: downloaderLogger, job }, () =>
-						runWithRateLimitGuard(crawl, () =>
-							new WaybackMachineDownloader({
-								base_url: base.canonicalUrl,
-								normalized_base: base,
-								from_timestamp: from,
-								to_timestamp: to,
-								threads_count: downloaderThreadsCount,
-								rewrite_mode: "as-is",
-								canonical_action: "keep",
-								exact_url: false,
-								download_external_assets: false,
-								directory,
-							}).download_files(),
-						),
-					);
-				} finally {
-					stopWatch();
-					clearInterval(extender);
+				// Root may be http or https depending on when Wayback crawled it.
+				const rootCandidates = [`http://${host}/`, `https://${host}/`];
+				let rootHit: Awaited<ReturnType<typeof opts.cache.lookup>> = null;
+				let rootUrl = rootCandidates[0];
+				for (const candidate of rootCandidates) {
+					rootHit = await opts.cache.lookup(candidate, time);
+					if (rootHit) {
+						rootUrl = candidate;
+						break;
+					}
 				}
-				await emitProgress(job, QUEUE_CRAWL, "download_done", logger, { host, time });
+
+				if (!rootHit) {
+					// Root not cached yet — enqueue it and exit. The next crawl trigger
+					// after the root is served will find it cached and extract links.
+					logger.info({ host, time }, "[worker:crawl] root not cached — enqueuing exact job for root");
+					await enqueueExactJob(rootUrl, time);
+					await emitProgress(job, QUEUE_CRAWL, "download_done", logger, { host, time, filesSeen: 0 });
+					return;
+				}
+
+				await emitProgress(job, QUEUE_CRAWL, "download_start", logger, { host, time, filesSeen: 0 });
+
+				const raw = await fs.readFile(rootHit.absPath);
+				const { discoveredAssets } = rewriteHtmlUrls(
+					stripWaybackToolbar(raw.toString("utf-8")),
+					rootUrl,
+					time,
+					false,
+				);
+
+				const sameHostLinks = discoveredAssets.filter((a) => {
+					try {
+						return new URL(a.url).hostname === host;
+					} catch {
+						return false;
+					}
+				});
+
+				let filesSeen = 0;
+				for (const link of sameHostLinks) {
+					await enqueueExactJob(link.url, link.embeddedTs);
+					filesSeen += 1;
+					await emitProgress(job, QUEUE_CRAWL, "download_file", logger, {
+						host,
+						time,
+						file: new URL(link.url).pathname,
+						filesSeen,
+					});
+				}
+
+				await emitProgress(job, QUEUE_CRAWL, "download_done", logger, { host, time, filesSeen });
 			} catch (e) {
 				await emitProgress(job, QUEUE_CRAWL, "error", logger, {
 					error: e instanceof Error ? e.message : String(e),

@@ -42,9 +42,9 @@ describe("loadConfig() — new env var defaults", () => {
 		});
 	});
 
-	it("DIRECT_FETCH_TIMEOUT_MS defaults to 15000", () => {
+	it("DIRECT_FETCH_TIMEOUT_MS defaults to 30000", () => {
 		withEnv({ DIRECT_FETCH_TIMEOUT_MS: undefined }, () => {
-			expect(loadConfig().directFetchTimeoutMs).toBe(15_000);
+			expect(loadConfig().directFetchTimeoutMs).toBe(30_000);
 		});
 	});
 
@@ -75,6 +75,42 @@ describe("loadConfig() — new env var defaults", () => {
 	it("NOT_FOUND_TTL_DAYS defaults to 30", () => {
 		withEnv({ NOT_FOUND_TTL_DAYS: undefined }, () => {
 			expect(loadConfig().notFoundTtlDays).toBe(30);
+		});
+	});
+
+	it("DIRECT_FETCH_POOL_CONNECTIONS defaults to 5", () => {
+		withEnv({ DIRECT_FETCH_POOL_CONNECTIONS: undefined }, () => {
+			expect(loadConfig().directFetchPoolConnections).toBe(5);
+		});
+	});
+
+	it("DIRECT_FETCH_POOL_KEEPALIVE_MS defaults to 30000", () => {
+		withEnv({ DIRECT_FETCH_POOL_KEEPALIVE_MS: undefined }, () => {
+			expect(loadConfig().directFetchPoolKeepaliveMs).toBe(30_000);
+		});
+	});
+
+	it("DIRECT_FETCH_POOL_MAX_STREAMS defaults to 10", () => {
+		withEnv({ DIRECT_FETCH_POOL_MAX_STREAMS: undefined }, () => {
+			expect(loadConfig().directFetchPoolMaxConcurrentStreams).toBe(10);
+		});
+	});
+
+	it("DIRECT_FETCH_HTTP2_ENABLED defaults to true", () => {
+		withEnv({ DIRECT_FETCH_HTTP2_ENABLED: undefined }, () => {
+			expect(loadConfig().directFetchHttp2Enabled).toBe(true);
+		});
+	});
+
+	it("DIRECT_FETCH_BLOCKED_BASE_MS defaults to 5000", () => {
+		withEnv({ DIRECT_FETCH_BLOCKED_BASE_MS: undefined }, () => {
+			expect(loadConfig().directFetchBlockedBaseMs).toBe(5_000);
+		});
+	});
+
+	it("DIRECT_FETCH_BLOCKED_MAX_MS defaults to 600000", () => {
+		withEnv({ DIRECT_FETCH_BLOCKED_MAX_MS: undefined }, () => {
+			expect(loadConfig().directFetchBlockedMaxMs).toBe(600_000);
 		});
 	});
 });
@@ -169,6 +205,78 @@ describe("loadConfig() — valid values accepted", () => {
 	it("NOT_FOUND_TTL_DAYS=3650 (max boundary) is accepted", () => {
 		withEnv({ NOT_FOUND_TTL_DAYS: "3650" }, () => {
 			expect(loadConfig().notFoundTtlDays).toBe(3650);
+		});
+	});
+
+	it("DIRECT_FETCH_POOL_CONNECTIONS=1 (min boundary) is accepted", () => {
+		withEnv({ DIRECT_FETCH_POOL_CONNECTIONS: "1" }, () => {
+			expect(loadConfig().directFetchPoolConnections).toBe(1);
+		});
+	});
+
+	it("DIRECT_FETCH_POOL_CONNECTIONS=50 (max boundary) is accepted", () => {
+		withEnv({ DIRECT_FETCH_POOL_CONNECTIONS: "50" }, () => {
+			expect(loadConfig().directFetchPoolConnections).toBe(50);
+		});
+	});
+
+	it("DIRECT_FETCH_POOL_KEEPALIVE_MS=1000 (min boundary) is accepted", () => {
+		withEnv({ DIRECT_FETCH_POOL_KEEPALIVE_MS: "1000" }, () => {
+			expect(loadConfig().directFetchPoolKeepaliveMs).toBe(1_000);
+		});
+	});
+
+	it("DIRECT_FETCH_POOL_KEEPALIVE_MS=300000 (max boundary) is accepted", () => {
+		withEnv({ DIRECT_FETCH_POOL_KEEPALIVE_MS: "300000" }, () => {
+			expect(loadConfig().directFetchPoolKeepaliveMs).toBe(300_000);
+		});
+	});
+
+	it("DIRECT_FETCH_POOL_MAX_STREAMS=1 (min boundary) is accepted", () => {
+		withEnv({ DIRECT_FETCH_POOL_MAX_STREAMS: "1" }, () => {
+			expect(loadConfig().directFetchPoolMaxConcurrentStreams).toBe(1);
+		});
+	});
+
+	it("DIRECT_FETCH_POOL_MAX_STREAMS=100 (max boundary) is accepted", () => {
+		withEnv({ DIRECT_FETCH_POOL_MAX_STREAMS: "100" }, () => {
+			expect(loadConfig().directFetchPoolMaxConcurrentStreams).toBe(100);
+		});
+	});
+
+	it("DIRECT_FETCH_HTTP2_ENABLED=false parses to false", () => {
+		withEnv({ DIRECT_FETCH_HTTP2_ENABLED: "false" }, () => {
+			expect(loadConfig().directFetchHttp2Enabled).toBe(false);
+		});
+	});
+
+	it("DIRECT_FETCH_HTTP2_ENABLED=true parses to true", () => {
+		withEnv({ DIRECT_FETCH_HTTP2_ENABLED: "true" }, () => {
+			expect(loadConfig().directFetchHttp2Enabled).toBe(true);
+		});
+	});
+
+	it("DIRECT_FETCH_BLOCKED_BASE_MS=1000 (min boundary) is accepted", () => {
+		withEnv({ DIRECT_FETCH_BLOCKED_BASE_MS: "1000" }, () => {
+			expect(loadConfig().directFetchBlockedBaseMs).toBe(1_000);
+		});
+	});
+
+	it("DIRECT_FETCH_BLOCKED_BASE_MS=300000 (max boundary) is accepted", () => {
+		withEnv({ DIRECT_FETCH_BLOCKED_BASE_MS: "300000" }, () => {
+			expect(loadConfig().directFetchBlockedBaseMs).toBe(300_000);
+		});
+	});
+
+	it("DIRECT_FETCH_BLOCKED_MAX_MS=1000 (min boundary) is accepted", () => {
+		withEnv({ DIRECT_FETCH_BLOCKED_MAX_MS: "1000" }, () => {
+			expect(loadConfig().directFetchBlockedMaxMs).toBe(1_000);
+		});
+	});
+
+	it("DIRECT_FETCH_BLOCKED_MAX_MS=3600000 (max boundary) is accepted", () => {
+		withEnv({ DIRECT_FETCH_BLOCKED_MAX_MS: "3600000" }, () => {
+			expect(loadConfig().directFetchBlockedMaxMs).toBe(3_600_000);
 		});
 	});
 });
@@ -269,6 +377,72 @@ describe("loadConfig() — out-of-range values rejected", () => {
 	it("DIRECT_FETCH_MAX_CONCURRENT=10.5 (float) throws", () => {
 		withEnv({ DIRECT_FETCH_MAX_CONCURRENT: "10.5" }, () => {
 			expect(() => loadConfig()).toThrow(/DIRECT_FETCH_MAX_CONCURRENT/);
+		});
+	});
+
+	it("DIRECT_FETCH_POOL_CONNECTIONS=0 (below min) throws", () => {
+		withEnv({ DIRECT_FETCH_POOL_CONNECTIONS: "0" }, () => {
+			expect(() => loadConfig()).toThrow(/DIRECT_FETCH_POOL_CONNECTIONS/);
+		});
+	});
+
+	it("DIRECT_FETCH_POOL_CONNECTIONS=51 (above max) throws", () => {
+		withEnv({ DIRECT_FETCH_POOL_CONNECTIONS: "51" }, () => {
+			expect(() => loadConfig()).toThrow(/DIRECT_FETCH_POOL_CONNECTIONS/);
+		});
+	});
+
+	it("DIRECT_FETCH_POOL_KEEPALIVE_MS=999 (below min) throws", () => {
+		withEnv({ DIRECT_FETCH_POOL_KEEPALIVE_MS: "999" }, () => {
+			expect(() => loadConfig()).toThrow(/DIRECT_FETCH_POOL_KEEPALIVE_MS/);
+		});
+	});
+
+	it("DIRECT_FETCH_POOL_KEEPALIVE_MS=300001 (above max) throws", () => {
+		withEnv({ DIRECT_FETCH_POOL_KEEPALIVE_MS: "300001" }, () => {
+			expect(() => loadConfig()).toThrow(/DIRECT_FETCH_POOL_KEEPALIVE_MS/);
+		});
+	});
+
+	it("DIRECT_FETCH_POOL_MAX_STREAMS=0 (below min) throws", () => {
+		withEnv({ DIRECT_FETCH_POOL_MAX_STREAMS: "0" }, () => {
+			expect(() => loadConfig()).toThrow(/DIRECT_FETCH_POOL_MAX_STREAMS/);
+		});
+	});
+
+	it("DIRECT_FETCH_POOL_MAX_STREAMS=101 (above max) throws", () => {
+		withEnv({ DIRECT_FETCH_POOL_MAX_STREAMS: "101" }, () => {
+			expect(() => loadConfig()).toThrow(/DIRECT_FETCH_POOL_MAX_STREAMS/);
+		});
+	});
+
+	it("DIRECT_FETCH_HTTP2_ENABLED=yes throws an informative error", () => {
+		withEnv({ DIRECT_FETCH_HTTP2_ENABLED: "yes" }, () => {
+			expect(() => loadConfig()).toThrow(/DIRECT_FETCH_HTTP2_ENABLED/);
+		});
+	});
+
+	it("DIRECT_FETCH_BLOCKED_BASE_MS=999 (below min) throws", () => {
+		withEnv({ DIRECT_FETCH_BLOCKED_BASE_MS: "999" }, () => {
+			expect(() => loadConfig()).toThrow(/DIRECT_FETCH_BLOCKED_BASE_MS/);
+		});
+	});
+
+	it("DIRECT_FETCH_BLOCKED_BASE_MS=300001 (above max) throws", () => {
+		withEnv({ DIRECT_FETCH_BLOCKED_BASE_MS: "300001" }, () => {
+			expect(() => loadConfig()).toThrow(/DIRECT_FETCH_BLOCKED_BASE_MS/);
+		});
+	});
+
+	it("DIRECT_FETCH_BLOCKED_MAX_MS=999 (below min) throws", () => {
+		withEnv({ DIRECT_FETCH_BLOCKED_MAX_MS: "999" }, () => {
+			expect(() => loadConfig()).toThrow(/DIRECT_FETCH_BLOCKED_MAX_MS/);
+		});
+	});
+
+	it("DIRECT_FETCH_BLOCKED_MAX_MS=3600001 (above max) throws", () => {
+		withEnv({ DIRECT_FETCH_BLOCKED_MAX_MS: "3600001" }, () => {
+			expect(() => loadConfig()).toThrow(/DIRECT_FETCH_BLOCKED_MAX_MS/);
 		});
 	});
 });

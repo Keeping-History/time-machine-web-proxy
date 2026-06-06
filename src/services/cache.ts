@@ -33,6 +33,11 @@ export interface CacheHit {
 }
 
 export class CacheService {
+	// Deduplicates concurrent writes to the same destination. When multiple
+	// prewarm tasks race the same (url, ts), only the first write reaches the
+	// fs; subsequent callers share the first promise and skip the extra rename.
+	private readonly writeInflight = new Map<string, Promise<void>>();
+
 	constructor(
 		private readonly config: Pick<Config, "cacheDir" | "cacheEnabled" | "notFoundTtlDays">,
 		private readonly logger: pino.Logger,
@@ -168,10 +173,20 @@ export class CacheService {
 	 */
 	async writeFile(url: string, time: string, data: Buffer): Promise<void> {
 		const dest = this.computeAbsPath(url, time);
-		await fs.mkdir(dirname(dest), { recursive: true });
-		const tmp = `${dest}${TMP_SUFFIX}`;
-		await fs.writeFile(tmp, data);
-		await fs.rename(tmp, dest);
+		const existing = this.writeInflight.get(dest);
+		if (existing) return existing;
+		const p = (async () => {
+			await fs.mkdir(dirname(dest), { recursive: true });
+			const tmp = `${dest}${TMP_SUFFIX}`;
+			await fs.writeFile(tmp, data);
+			await fs.rename(tmp, dest);
+		})();
+		this.writeInflight.set(dest, p);
+		try {
+			return await p;
+		} finally {
+			this.writeInflight.delete(dest);
+		}
 	}
 
 	async writeResolvedTimeSidecar(time: string, url: string, resolvedTime: string): Promise<void> {
@@ -205,16 +220,32 @@ export class CacheService {
 	 *   4. `application/octet-stream` fallback.
 	 */
 	private async resolveContentType(absPath: string, url: string, time: string): Promise<string> {
+		const ext = extname(absPath);
+		const fromExt = ext ? mimeLookup(ext) : false;
+
 		try {
 			const sidecar = this.buildPerUrlSubpath(time, url, CONTENT_TYPE_SUBDIR);
 			const raw = await fs.readFile(sidecar, "utf-8");
 			const trimmed = raw?.trim();
-			if (trimmed) return trimmed;
+			if (trimmed) {
+				// Old servers (and Wayback error responses) return wrong MIME types
+				// for CSS/JS/image URLs (e.g. text/html, text/plain,
+				// application/x-pointplus). Browsers in strict mode refuse to apply
+				// stylesheets or execute scripts with non-matching types. When the
+				// file extension maps to a known MIME type and the sidecar's base
+				// type disagrees, the extension wins. When they agree (e.g. sidecar
+				// is "text/css; charset=utf-8"), the sidecar is used verbatim to
+				// preserve charset and parameter metadata.
+				if (fromExt) {
+					const sidecarBase = trimmed.split(";")[0].trim().toLowerCase();
+					if (sidecarBase !== fromExt) return fromExt;
+				}
+				return trimmed;
+			}
 		} catch {
 			/* no sidecar — fall through */
 		}
-		const ext = extname(absPath);
-		const fromExt = mimeLookup(ext);
+
 		if (fromExt) return fromExt;
 		// Only sniff when there's no extension at all. Files with an unknown
 		// extension (`.unknownext`) are likely custom binaries; sniffing them
@@ -320,7 +351,7 @@ export class CacheService {
 					await fs.rm(v2Root, { recursive: true, force: true });
 					deleted = total;
 				} catch (e) {
-					this.logger.error({ error: e }, "[cache:clear] full clear failed");
+					this.logger.error({ err: e }, "[cache:clear] full clear failed");
 					res.setHeader("Content-Type", "application/json");
 					res.writeHead(500).end(JSON.stringify({ error: "cache clear failed" }));
 					return;
@@ -346,7 +377,7 @@ export class CacheService {
 					}
 				}
 			} catch (e) {
-				this.logger.error({ error: e }, "[cache:clear] walk failed");
+				this.logger.error({ err: e }, "[cache:clear] walk failed");
 				res.setHeader("Content-Type", "application/json");
 				res.writeHead(500).end(JSON.stringify({ error: "cache clear failed" }));
 				return;
@@ -355,7 +386,7 @@ export class CacheService {
 			res.setHeader("Content-Type", "application/json");
 			res.writeHead(200).end(JSON.stringify({ deleted, total }));
 		} catch (e) {
-			this.logger.error({ error: e }, "[cache:clear] failed");
+			this.logger.error({ err: e }, "[cache:clear] failed");
 			res.writeHead(500).end("Internal error");
 		}
 	}

@@ -145,6 +145,54 @@ describe("CacheService.lookup (v2)", () => {
 		expect(result?.contentType).toBe("text/html; charset=utf-8");
 	});
 
+	it.each([
+		["text/html", "https://www.sun.com/template/sunstyle.css", "text/css"],
+		["text/plain", "https://www.sun.com/template/sunstyle.css", "text/css"],
+		["application/x-pointplus", "https://www.sun.com/template/sunstyle.css", "text/css"],
+		["text/html", "https://example.com/app.js", "text/javascript"],
+		["text/html", "https://example.com/logo.png", "image/png"],
+	])(
+		"overrides sidecar '%s' with extension MIME type for %s",
+		async (sidecarType, url, expected) => {
+			(mockFs.access as jest.Mock).mockResolvedValue(undefined);
+			(mockFs.readFile as jest.Mock).mockImplementation((p: string) => {
+				if (p.includes("/.content-types/")) return Promise.resolve(sidecarType);
+				if (p.endsWith(".resolved-time"))
+					return Promise.reject(Object.assign(new Error("ENOENT"), { code: "ENOENT" }));
+				return Promise.resolve(Buffer.from(""));
+			});
+			const result = await makeService().lookup(url, TIME);
+			expect(result?.contentType).toBe(expected);
+		},
+	);
+
+	it("preserves sidecar charset for CSS when sidecar type is correct", async () => {
+		(mockFs.access as jest.Mock).mockResolvedValue(undefined);
+		(mockFs.readFile as jest.Mock).mockImplementation((p: string) => {
+			if (p.includes("/.content-types/")) return Promise.resolve("text/css; charset=utf-8");
+			if (p.endsWith(".resolved-time"))
+				return Promise.reject(Object.assign(new Error("ENOENT"), { code: "ENOENT" }));
+			return Promise.resolve(Buffer.from(""));
+		});
+		const result = await makeService().lookup(
+			"https://www.sun.com/template/sunstyle.css",
+			TIME,
+		);
+		expect(result?.contentType).toBe("text/css; charset=utf-8");
+	});
+
+	it("does not override sidecar when extension is .html and sidecar is text/html", async () => {
+		(mockFs.access as jest.Mock).mockResolvedValue(undefined);
+		(mockFs.readFile as jest.Mock).mockImplementation((p: string) => {
+			if (p.includes("/.content-types/")) return Promise.resolve("text/html; charset=utf-8");
+			if (p.endsWith(".resolved-time"))
+				return Promise.reject(Object.assign(new Error("ENOENT"), { code: "ENOENT" }));
+			return Promise.resolve(Buffer.from(""));
+		});
+		const result = await makeService().lookup("https://example.com/page.html", TIME);
+		expect(result?.contentType).toBe("text/html; charset=utf-8");
+	});
+
 	it("sniffs HTML for extensionless URLs when no sidecar exists (legacy cache)", async () => {
 		// The user-reported bug: http://www.yahoo.com/r/ci has no extension,
 		// mime-types returns false, and pre-fix the response went out as
@@ -463,7 +511,11 @@ describe("CacheService.writeNotFoundSentinel + sentinel-aware lookup", () => {
 		await svc.lookup(URL, TIME);
 
 		expect(logSpy).toHaveBeenCalledWith(
-			expect.objectContaining({ sentinel: expect.any(String), ageMs: expect.any(Number), ttlMs: expect.any(Number) }),
+			expect.objectContaining({
+				sentinel: expect.any(String),
+				ageMs: expect.any(Number),
+				ttlMs: expect.any(Number),
+			}),
 			"[cache] sentinel-expired",
 		);
 	});
@@ -584,9 +636,9 @@ describe("CacheService.computeAbsPath", () => {
 	// Criterion 2: path-traversal payloads reject with HTTP 400
 	it("rejects percent-encoded traversal (%2e%2e/etc/passwd) with status 400", () => {
 		const svc = makeService();
-		expect(() =>
-			svc.computeAbsPath("https://example.com/%2e%2e%2fetc%2fpasswd", TIME),
-		).toThrow(expect.objectContaining({ status: 400 }));
+		expect(() => svc.computeAbsPath("https://example.com/%2e%2e%2fetc%2fpasswd", TIME)).toThrow(
+			expect.objectContaining({ status: 400 }),
+		);
 	});
 
 	it("rejects deeply nested percent-encoded traversal with status 400", () => {
@@ -673,10 +725,7 @@ describe("CacheService.writeFile", () => {
 		await svc.writeFile(url, TIME, Buffer.from("var x=1;"));
 
 		const writtenPath = (mockFs.writeFile as jest.Mock).mock.calls[0][0] as string;
-		const [renameSrc, renameDest] = (mockFs.rename as jest.Mock).mock.calls[0] as [
-			string,
-			string,
-		];
+		const [renameSrc, renameDest] = (mockFs.rename as jest.Mock).mock.calls[0] as [string, string];
 
 		// tmp file path must differ from destination
 		expect(writtenPath).not.toBe(dest);
@@ -709,6 +758,23 @@ describe("CacheService.writeFile", () => {
 		).rejects.toMatchObject({ status: 400 });
 		expect(mockFs.writeFile).not.toHaveBeenCalled();
 		expect(mockFs.rename).not.toHaveBeenCalled();
+	});
+
+	it("concurrent writes to the same dest deduplicate — exactly one tmp write and one rename", async () => {
+		// Reproduces the prewarm race: two concurrent prewarm tasks download the
+		// same asset and both call writeFile. Only one rename must reach the fs;
+		// the second caller piggybacks on the first's in-flight promise.
+		const svc = makeService();
+		const url = "https://example.com/page.html";
+		const data = Buffer.from("content");
+
+		await Promise.all([
+			svc.writeFile(url, TIME, data),
+			svc.writeFile(url, TIME, data),
+		]);
+
+		expect(mockFs.rename).toHaveBeenCalledTimes(1);
+		expect(mockFs.writeFile).toHaveBeenCalledTimes(1);
 	});
 });
 

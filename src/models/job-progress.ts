@@ -1,4 +1,4 @@
-import { QUEUE_CRAWL, QUEUE_EXACT } from "../queue/jobs";
+import type { QUEUE_CRAWL, QUEUE_EXACT } from "../queue/jobs";
 
 export type JobProgressStage =
 	| "picked_up"

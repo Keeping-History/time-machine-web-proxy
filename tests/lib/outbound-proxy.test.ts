@@ -7,6 +7,20 @@ const ProxyAgentMock = jest.fn().mockImplementation((opts: { uri: string }) => (
 	close: jest.fn().mockResolvedValue(undefined),
 	destroy: jest.fn().mockResolvedValue(undefined),
 }));
+const poolInstanceMarker = Symbol("Pool");
+const PoolMock = jest.fn().mockImplementation(() => ({
+	__isPool: poolInstanceMarker,
+	dispatch: jest.fn().mockReturnValue(true),
+	close: jest.fn().mockResolvedValue(undefined),
+	destroy: jest.fn().mockResolvedValue(undefined),
+}));
+const agentInstanceMarker = Symbol("Agent");
+const AgentMock = jest.fn().mockImplementation(() => ({
+	__isAgent: agentInstanceMarker,
+	dispatch: jest.fn().mockReturnValue(true),
+	close: jest.fn().mockResolvedValue(undefined),
+	destroy: jest.fn().mockResolvedValue(undefined),
+}));
 
 // Minimal Dispatcher stub: matches the shape RotatingProxyDispatcher needs from
 // the base class (EventEmitter + the three throwing stubs that subclasses must
@@ -31,7 +45,9 @@ const requestMock: jest.Mock<any, any> = jest.fn();
 jest.mock("undici", () => ({
 	__esModule: true,
 	setGlobalDispatcher: setGlobalDispatcherMock,
+	Agent: AgentMock,
 	ProxyAgent: ProxyAgentMock,
+	Pool: PoolMock,
 	Dispatcher: DispatcherStub,
 	request: requestMock,
 }));
@@ -53,6 +69,10 @@ function makeConfig(overrides: Partial<ProxyConfig> = {}): ProxyConfig {
 		outboundProxyUsername: "",
 		outboundProxyPassword: "",
 		outboundProxyCooldownMs: 60_000,
+		directFetchPoolConnections: 5,
+		directFetchPoolKeepaliveMs: 30_000,
+		directFetchPoolMaxConcurrentStreams: 10,
+		directFetchHttp2Enabled: true,
 		...overrides,
 	};
 }
@@ -81,7 +101,9 @@ function mockRequestImpl(handler: (url: string, opts: any) => any) {
 describe("installOutboundProxy", () => {
 	beforeEach(() => {
 		setGlobalDispatcherMock.mockClear();
+		AgentMock.mockClear();
 		ProxyAgentMock.mockClear();
+		PoolMock.mockClear();
 		requestMock.mockClear();
 		requestMock.mockImplementation(async () => ({
 			statusCode: 200,
@@ -89,13 +111,35 @@ describe("installOutboundProxy", () => {
 		}));
 	});
 
-	it("does not install when outboundProxyUrls is empty (no-op)", async () => {
-		const { logger, infoSpy } = makeLogger();
-		await installOutboundProxy(makeConfig({ outboundProxyUrls: [] }), logger);
-		expect(setGlobalDispatcherMock).not.toHaveBeenCalled();
+	it("installs a direct Agent when outboundProxyUrls is empty", async () => {
+		const { logger } = makeLogger();
+		const result = await installOutboundProxy(makeConfig({ outboundProxyUrls: [] }), logger);
+		expect(AgentMock).toHaveBeenCalledTimes(1);
+		expect(AgentMock).toHaveBeenCalledWith(
+			expect.objectContaining({
+				connections: 5,
+				keepAliveTimeout: 30_000,
+				allowH2: true,
+				maxConcurrentStreams: 10,
+			}),
+		);
+		expect(setGlobalDispatcherMock).toHaveBeenCalledTimes(1);
+		expect(setGlobalDispatcherMock.mock.calls[0][0]).toMatchObject({ __isAgent: agentInstanceMarker });
+		expect(PoolMock).not.toHaveBeenCalled();
 		expect(ProxyAgentMock).not.toHaveBeenCalled();
 		expect(requestMock).not.toHaveBeenCalled();
-		expect(infoSpy).not.toHaveBeenCalled();
+		expect(result).toBeNull();
+	});
+
+	it("passes allowH2: false to Agent when directFetchHttp2Enabled is false", async () => {
+		const { logger } = makeLogger();
+		await installOutboundProxy(
+			makeConfig({ outboundProxyUrls: [], directFetchHttp2Enabled: false }),
+			logger,
+		);
+		expect(AgentMock).toHaveBeenCalledWith(
+			expect.objectContaining({ allowH2: false }),
+		);
 	});
 
 	describe("startup connectivity probe", () => {
@@ -154,15 +198,16 @@ describe("installOutboundProxy", () => {
 			).toBe(2);
 			// The "all probes failed → install anyway" warning fires once.
 			expect(
-				errorSpy.mock.calls.filter((c) =>
-					typeof c[1] === "string" && c[1].startsWith("[outbound-proxy] all startup probes failed"),
+				errorSpy.mock.calls.filter(
+					(c) =>
+						typeof c[1] === "string" &&
+						c[1].startsWith("[outbound-proxy] all startup probes failed"),
 				).length,
 			).toBe(1);
 			// Both agents seeded in cooldown.
 			expect(
-				errorSpy.mock.calls.filter(
-					(c) => c[1] === "[outbound-proxy] proxy taken out of rotation",
-				).length,
+				errorSpy.mock.calls.filter((c) => c[1] === "[outbound-proxy] proxy taken out of rotation")
+					.length,
 			).toBe(2);
 		});
 
@@ -182,8 +227,10 @@ describe("installOutboundProxy", () => {
 			);
 			expect(setGlobalDispatcherMock).toHaveBeenCalledTimes(1);
 			expect(
-				errorSpy.mock.calls.filter((c) =>
-					typeof c[1] === "string" && c[1].startsWith("[outbound-proxy] all startup probes failed"),
+				errorSpy.mock.calls.filter(
+					(c) =>
+						typeof c[1] === "string" &&
+						c[1].startsWith("[outbound-proxy] all startup probes failed"),
 				).length,
 			).toBe(1);
 		});
@@ -303,6 +350,46 @@ describe("installOutboundProxy", () => {
 			);
 			const callArg = ProxyAgentMock.mock.calls[0][0] as { uri: string };
 			expect(callArg.uri).toMatch(/^https:\/\/secure-proxy\.example\.com:8443\/?$/);
+		});
+
+		it("passes pool options (allowH2, connections, keepAliveTimeout, maxConcurrentStreams) to every ProxyAgent", async () => {
+			const { logger } = makeLogger();
+			await installOutboundProxy(
+				makeConfig({
+					outboundProxyUrls: ["http://a.example.com:31280", "http://b.example.com:31280"],
+					directFetchPoolConnections: 7,
+					directFetchPoolKeepaliveMs: 12_000,
+					directFetchPoolMaxConcurrentStreams: 25,
+					directFetchHttp2Enabled: true,
+				}),
+				logger,
+			);
+			expect(ProxyAgentMock).toHaveBeenCalledTimes(2);
+			for (const call of ProxyAgentMock.mock.calls) {
+				expect(call[0]).toEqual(
+					expect.objectContaining({
+						uri: expect.stringMatching(/^http:\/\/[ab]\.example\.com:31280\/?$/),
+						connections: 7,
+						keepAliveTimeout: 12_000,
+						allowH2: true,
+						maxConcurrentStreams: 25,
+					}),
+				);
+			}
+		});
+
+		it("propagates allowH2: false to ProxyAgent when directFetchHttp2Enabled is false", async () => {
+			const { logger } = makeLogger();
+			await installOutboundProxy(
+				makeConfig({
+					outboundProxyUrls: ["http://a.example.com:31280"],
+					directFetchHttp2Enabled: false,
+				}),
+				logger,
+			);
+			expect(ProxyAgentMock).toHaveBeenCalledWith(
+				expect.objectContaining({ allowH2: false }),
+			);
 		});
 
 		it("never includes the password in log call arguments", async () => {
@@ -676,6 +763,10 @@ type _AssertProxyConfigShape =
 		| "outboundProxyUsername"
 		| "outboundProxyPassword"
 		| "outboundProxyCooldownMs"
+		| "directFetchPoolConnections"
+		| "directFetchPoolKeepaliveMs"
+		| "directFetchPoolMaxConcurrentStreams"
+		| "directFetchHttp2Enabled"
 	>
 		? true
 		: never;

@@ -1,4 +1,5 @@
 import { mkdirSync } from "node:fs";
+import { parseDomainRemap } from "./hostname-normalizer";
 import type { Config, OutboundProxyChooser } from "../models/config";
 
 const parseSnapshotWindowDays = (csv: string): number[] => {
@@ -92,6 +93,13 @@ export function loadConfig(): Config {
 		workerRateLimitPerSec: Number(process.env.WORKER_RATE_LIMIT_PER_SEC) || 1,
 		downloaderThreadsCount: Number(process.env.DOWNLOADER_THREADS_COUNT) || 3,
 		crawlMaxCdxPages: Number(process.env.CRAWL_MAX_CDX_PAGES) || 50,
+		crawlWindowDays: parseIntInRange(
+			process.env.CRAWL_WINDOW_DAYS,
+			"CRAWL_WINDOW_DAYS",
+			30,
+			1,
+			3650,
+		),
 		outboundProxyUrls: parseOutboundProxyUrls(process.env.OUTBOUND_PROXY_URLS),
 		outboundProxyChooser: parseOutboundProxyChooser(process.env.OUTBOUND_PROXY_CHOOSER),
 		outboundProxyUsername: process.env.OUTBOUND_PROXY_USERNAME ?? "",
@@ -125,7 +133,7 @@ export function loadConfig(): Config {
 		directFetchTimeoutMs: parseIntInRange(
 			process.env.DIRECT_FETCH_TIMEOUT_MS,
 			"DIRECT_FETCH_TIMEOUT_MS",
-			15_000,
+			30_000,
 			1_000,
 			60_000,
 		),
@@ -143,6 +151,46 @@ export function loadConfig(): Config {
 			1,
 			200,
 		),
+		directFetchPoolConnections: parseIntInRange(
+			process.env.DIRECT_FETCH_POOL_CONNECTIONS,
+			"DIRECT_FETCH_POOL_CONNECTIONS",
+			5,
+			1,
+			50,
+		),
+		directFetchPoolKeepaliveMs: parseIntInRange(
+			process.env.DIRECT_FETCH_POOL_KEEPALIVE_MS,
+			"DIRECT_FETCH_POOL_KEEPALIVE_MS",
+			30_000,
+			1_000,
+			300_000,
+		),
+		directFetchPoolMaxConcurrentStreams: parseIntInRange(
+			process.env.DIRECT_FETCH_POOL_MAX_STREAMS,
+			"DIRECT_FETCH_POOL_MAX_STREAMS",
+			10,
+			1,
+			100,
+		),
+		directFetchHttp2Enabled: parseBool(
+			process.env.DIRECT_FETCH_HTTP2_ENABLED,
+			"DIRECT_FETCH_HTTP2_ENABLED",
+			true,
+		),
+		directFetchBlockedBaseMs: parseIntInRange(
+			process.env.DIRECT_FETCH_BLOCKED_BASE_MS,
+			"DIRECT_FETCH_BLOCKED_BASE_MS",
+			5_000,
+			1_000,
+			300_000,
+		),
+		directFetchBlockedMaxMs: parseIntInRange(
+			process.env.DIRECT_FETCH_BLOCKED_MAX_MS,
+			"DIRECT_FETCH_BLOCKED_MAX_MS",
+			600_000,
+			1_000,
+			3_600_000,
+		),
 
 		// Prewarm knobs
 		prewarmEnabled: parseBool(process.env.PREWARM_ENABLED, "PREWARM_ENABLED", true),
@@ -154,6 +202,9 @@ export function loadConfig(): Config {
 			500,
 		),
 
+		// CDX response cache
+		cdxCacheEnabled: parseBool(process.env.CDX_CACHE_ENABLED, "CDX_CACHE_ENABLED", true),
+
 		// Sentinel TTL
 		notFoundTtlDays: parseIntInRange(
 			process.env.NOT_FOUND_TTL_DAYS,
@@ -162,6 +213,12 @@ export function loadConfig(): Config {
 			1,
 			3650,
 		),
+
+		// URL rewriter — omit timestamp segment from rewritten links
+		lockTime: parseBool(process.env.LOCK_TIME, "LOCK_TIME", false),
+
+		// Hostname normalizer
+		domainRemap: parseDomainRemap(process.env.DOMAIN_REMAP),
 	};
 }
 
