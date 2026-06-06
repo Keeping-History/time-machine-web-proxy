@@ -113,14 +113,18 @@ export class TimeMachineService {
 			await this.proxy.triggerDomainCrawl(host, time, { skipPreflight });
 			res.setHeader("Content-Type", "application/json");
 			res.writeHead(202).end(JSON.stringify({ host, time, preflightSkipped: skipPreflight }));
-			this.logRequest(req, 202, start);
+			this.logRequest(req, 202, start, { host, time, crawl: true });
 		} catch (e) {
 			const status = errorHasStatus(e) ? e.status : 500;
 			const message = e instanceof Error ? e.message : "crawl enqueue failed";
-			if (status >= 500) this.logger.error({ err: e }, "[TimeMachine] crawl enqueue failed");
+			if (status >= 500)
+				this.logger.error(
+					{ err: e, host, time, path: req.url, method: req.method },
+					"[TimeMachine] crawl enqueue failed",
+				);
 			res.setHeader("Content-Type", "application/json");
 			res.writeHead(status).end(JSON.stringify({ error: message }));
-			this.logRequest(req, status, start);
+			this.logRequest(req, status, start, { host, time, crawl: true });
 		}
 	}
 
@@ -167,7 +171,10 @@ export class TimeMachineService {
 					res.writeHead(200).end(JSON.stringify(status));
 					this.logRequest(req, 200, start);
 				} catch (e) {
-					this.logger.error({ err: e }, "[TimeMachine] status probe failed");
+					this.logger.error(
+						{ err: e, path: req.url, method: req.method },
+						"[TimeMachine] status probe failed",
+					);
 					res.setHeader("Content-Type", "application/json");
 					res
 						.writeHead(500)
@@ -281,6 +288,11 @@ export class TimeMachineService {
 			return;
 		}
 
+		// Reconstruct the upstream wayback URL the client will hit. Matches
+		// the format in wayback-direct-client.ts so log search lines up with
+		// outbound requests. Logged as `archiveUrl` on both success and 5xx.
+		const archiveUrl = `https://web.archive.org/web/${time}id_/${targetUrl}`;
+
 		// Negotiate SSE on Accept: text/event-stream. When the client opts in,
 		// progress events are streamed before a final `result`/`error` event
 		// and the connection closes. Otherwise a single buffered response is
@@ -299,7 +311,7 @@ export class TimeMachineService {
 			res.setHeader("X-Cache", result.cache === "HIT" ? "HIT" : "MISS");
 			if (result.archiveTime) res.setHeader("X-Archive-Time", result.archiveTime);
 			res.end(result.body);
-			this.logRequest(req, 200, start);
+			this.logRequest(req, 200, start, { targetUrl, time, archiveUrl, cache: result.cache });
 		} catch (e) {
 			const status = errorHasStatus(e) ? e.status : 500;
 			if (status === 404) {
@@ -310,10 +322,13 @@ export class TimeMachineService {
 				// `err:` (not `error:`) so pino's default Error serializer unwraps
 				// message/stack/cause — otherwise the line ships as `error: {}` and
 				// hides the failure (e.g. an undici `TypeError: fetch failed`).
-				this.logger.error({ err: e }, "[TimeMachine] Upstream request failed");
+				this.logger.error(
+					{ err: e, targetUrl, time, archiveUrl, path: req.url, method: req.method },
+					"[TimeMachine] Upstream request failed",
+				);
 				res.writeHead(500).end("TimeMachine error: upstream request failed");
 			}
-			this.logRequest(req, status, start);
+			this.logRequest(req, status, start, { targetUrl, time, archiveUrl });
 		}
 	}
 
@@ -363,18 +378,28 @@ export class TimeMachineService {
 				cache: result.cache,
 			});
 			res.end();
-			this.logRequest(req, 200, start);
+			this.logRequest(req, 200, start, {
+				targetUrl,
+				time,
+				archiveUrl: `https://web.archive.org/web/${time}id_/${targetUrl}`,
+				cache: result.cache,
+				sse: true,
+			});
 		} catch (e) {
 			const status = errorHasStatus(e) ? e.status : 500;
+			const archiveUrl = `https://web.archive.org/web/${time}id_/${targetUrl}`;
 			if (status >= 500) {
-				this.logger.error({ err: e }, "[TimeMachine SSE] Upstream request failed");
+				this.logger.error(
+					{ err: e, targetUrl, time, archiveUrl, path: req.url, method: req.method },
+					"[TimeMachine SSE] Upstream request failed",
+				);
 			}
 			writeEvent("error", {
 				status,
 				message: e instanceof Error ? e.message : "Upstream request failed",
 			});
 			res.end();
-			this.logRequest(req, status, start);
+			this.logRequest(req, status, start, { targetUrl, time, archiveUrl, sse: true });
 		}
 	}
 
@@ -496,7 +521,16 @@ export class TimeMachineService {
 				.catch((e: unknown) => {
 					const status = errorHasStatus(e) ? e.status : 500;
 					if (status >= 500)
-						this.logger.error({ err: e }, "[TimeMachine WS] Upstream request failed");
+						this.logger.error(
+							{
+								err: e,
+								targetUrl,
+								time,
+								archiveUrl: `https://web.archive.org/web/${time}id_/${targetUrl}`,
+								wsMessageId: msg.id,
+							},
+							"[TimeMachine WS] Upstream request failed",
+						);
 					if (ws.readyState !== ws.OPEN) return;
 					ws.send(
 						JSON.stringify({
@@ -510,12 +544,18 @@ export class TimeMachineService {
 		});
 	}
 
-	private logRequest(req: IncomingMessage, status: number, startMs: number): void {
+	private logRequest(
+		req: IncomingMessage,
+		status: number,
+		startMs: number,
+		extra?: Record<string, unknown>,
+	): void {
 		this.logger.info({
 			method: req.method,
 			path: req.url,
 			status,
 			durationMs: Date.now() - startMs,
+			...extra,
 		});
 	}
 }
