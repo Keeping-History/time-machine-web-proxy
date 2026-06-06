@@ -100,6 +100,13 @@ export function loadConfig(): Config {
 			1,
 			3650,
 		),
+		crawlMaxChunkFanout: parseIntInRange(
+			process.env.CRAWL_MAX_CHUNK_FANOUT,
+			"CRAWL_MAX_CHUNK_FANOUT",
+			1000,
+			1,
+			10_000,
+		),
 		outboundProxyUrls: parseOutboundProxyUrls(process.env.OUTBOUND_PROXY_URLS),
 		outboundProxyChooser: parseOutboundProxyChooser(process.env.OUTBOUND_PROXY_CHOOSER),
 		outboundProxyUsername: process.env.OUTBOUND_PROXY_USERNAME ?? "",

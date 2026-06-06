@@ -42,6 +42,8 @@ const baseConfig = {
 	proxyPrefix: "",
 	whitelistHosts: "*",
 	crawlMaxCdxPages: 50,
+	crawlWindowDays: 30,
+	crawlMaxChunkFanout: 1000,
 	bullmqPrefix: "tm",
 	domainCrawlEnabled: true,
 } as unknown as Config;
@@ -700,7 +702,7 @@ describe("ProxyService.fetch — domain crawl fire-and-forget", () => {
 		expect(mockedFetch).not.toHaveBeenCalled();
 	});
 
-	it("skips crawl when CDX page count exceeds crawlMaxCdxPages", async () => {
+	it("fans-out to chunk crawl when CDX page count exceeds crawlMaxCdxPages (no longer skips)", async () => {
 		const lookup = jest
 			.fn<Promise<CacheHit | null>, [string, string]>()
 			.mockResolvedValueOnce(null)
@@ -714,14 +716,15 @@ describe("ProxyService.fetch — domain crawl fire-and-forget", () => {
 			cache,
 			client,
 			logger,
-			{ ...baseConfig, whitelistHosts: "example.com", crawlMaxCdxPages: 50 },
+			{ ...baseConfig, whitelistHosts: "example.com", crawlMaxCdxPages: 50, crawlMaxChunkFanout: 1000 },
 			redis as unknown as import("ioredis").default,
 		);
 
 		await svc.fetch(TARGET_HTML_URL, TIME);
 		await new Promise((r) => setImmediate(r));
 
-		expect(client.enqueueDomainCrawl).not.toHaveBeenCalled();
+		expect(client.enqueueDomainCrawl).toHaveBeenCalledWith("example.com", TIME);
+		expect(client.enqueueCrawlChunks).toHaveBeenCalledWith("example.com", TIME, 9999, 1000);
 	});
 
 	it("skips crawl when Redis budget is already consumed (SET NX returns null)", async () => {
@@ -775,10 +778,10 @@ describe("ProxyService.fetch — domain crawl fire-and-forget", () => {
 		expect(client.enqueueDomainCrawl).not.toHaveBeenCalled();
 	});
 
-	it("CDX preflight URL widens to the calendar day of the requested time, not the exact second", async () => {
-		// Previously `from=time&to=time` (exact second) — CDX virtually never matched,
-		// so pages was always 0, the cap check always passed, and crawls were enqueued
-		// unconditionally regardless of host size.
+	it("CDX preflight URL uses windowAround(time, crawlWindowDays) — ±N days not just calendar day", async () => {
+		// windowAround("20200101123045", 30) → from=20191202000000, to=20200131235959
+		// The wider window catches captures that exist ±30 days from the target,
+		// avoiding 0-page results on low-traffic domains.
 		const lookup = jest
 			.fn<Promise<CacheHit | null>, [string, string]>()
 			.mockResolvedValueOnce(null)
@@ -792,7 +795,7 @@ describe("ProxyService.fetch — domain crawl fire-and-forget", () => {
 			cache,
 			client,
 			logger,
-			{ ...baseConfig, whitelistHosts: "example.com" },
+			{ ...baseConfig, whitelistHosts: "example.com", crawlWindowDays: 30 },
 			redis as unknown as import("ioredis").default,
 		);
 
@@ -801,8 +804,8 @@ describe("ProxyService.fetch — domain crawl fire-and-forget", () => {
 
 		expect(mockedFetch).toHaveBeenCalledTimes(1);
 		const calledUrl = new URL(mockedFetch.mock.calls[0][0] as string);
-		expect(calledUrl.searchParams.get("from")).toBe("20200101000000");
-		expect(calledUrl.searchParams.get("to")).toBe("20200101235959");
+		expect(calledUrl.searchParams.get("from")).toBe("20191202000000");
+		expect(calledUrl.searchParams.get("to")).toBe("20200131235959");
 		expect(calledUrl.searchParams.get("url")).toBe("example.com/*");
 	});
 
@@ -871,6 +874,31 @@ describe("ProxyService.fetch — domain crawl fire-and-forget", () => {
 		await new Promise((r) => setImmediate(r));
 		expect(client.enqueueDomainCrawl).not.toHaveBeenCalled();
 	});
+
+	it("calls both enqueueDomainCrawl AND enqueueCrawlChunks on cache-miss trigger", async () => {
+		const lookup = jest
+			.fn<Promise<CacheHit | null>, [string, string]>()
+			.mockResolvedValueOnce(null)
+			.mockResolvedValueOnce(htmlHit);
+		const cache = makeCache(lookup);
+		const client = makeClient();
+		mockedReadFile.mockResolvedValue(Buffer.from(PLAIN_HTML_BODY));
+		mockedFetch.mockReturnValue(cdxOk(10));
+		const redis = makeRedis("OK");
+		const svc = new ProxyService(
+			cache,
+			client,
+			logger,
+			{ ...baseConfig, whitelistHosts: "example.com", crawlMaxChunkFanout: 1000 },
+			redis as unknown as import("ioredis").default,
+		);
+
+		await svc.fetch(TARGET_HTML_URL, TIME);
+		await new Promise((r) => setImmediate(r));
+
+		expect(client.enqueueDomainCrawl).toHaveBeenCalledWith("example.com", TIME);
+		expect(client.enqueueCrawlChunks).toHaveBeenCalledWith("example.com", TIME, 10, 1000);
+	});
 });
 
 // --- Explicit (admin-triggered) domain crawl --------------------------------
@@ -879,19 +907,22 @@ describe("ProxyService.triggerDomainCrawl — explicit admin enqueue", () => {
 	const cdxOk = (count = 10) =>
 		Promise.resolve({ ok: true, text: () => Promise.resolve(String(count)) });
 
-	it("enqueues a crawl when whitelist passes and CDX page count is within cap", async () => {
-		// Happy path. Unlike the fire-and-forget side-effect, this MUST surface
-		// the success path to the caller — no swallowed errors.
+	it("enqueues both HTML-follow crawl and CDX chunk crawl when whitelist passes", async () => {
+		// Happy path. Both paths fire: HTML-link-follow (enqueueDomainCrawl) and
+		// CDX chunk fan-out (enqueueCrawlChunks). triggerDomainCrawl now always
+		// fans out regardless of page count vs. cap.
 		const cache = makeCache();
 		const client = makeClient();
 		mockedFetch.mockReturnValue(cdxOk(10));
 		const svc = new ProxyService(cache, client, logger, {
 			...baseConfig,
 			whitelistHosts: "example.com",
+			crawlMaxChunkFanout: 1000,
 		});
 
 		await expect(svc.triggerDomainCrawl("example.com", TIME)).resolves.toBeUndefined();
 		expect(client.enqueueDomainCrawl).toHaveBeenCalledWith("example.com", TIME);
+		expect(client.enqueueCrawlChunks).toHaveBeenCalledWith("example.com", TIME, 10, 1000);
 	});
 
 	it("throws {status:503} when DOMAIN_CRAWL_ENABLED is false (kill switch honored)", async () => {
@@ -924,9 +955,9 @@ describe("ProxyService.triggerDomainCrawl — explicit admin enqueue", () => {
 		expect(client.enqueueDomainCrawl).not.toHaveBeenCalled();
 	});
 
-	it("throws {status:413} when CDX page count exceeds crawlMaxCdxPages", async () => {
-		// Safety net: an admin asking for an oversize crawl gets a clear 413,
-		// not a silent runaway job.
+	it("fans-out to chunk crawl instead of throwing 413 when CDX page count exceeds crawlMaxCdxPages", async () => {
+		// triggerDomainCrawl no longer aborts on oversize domains — it fans out
+		// to both the HTML-link-follow path and the CDX chunk path.
 		const cache = makeCache();
 		const client = makeClient();
 		mockedFetch.mockReturnValue(cdxOk(75));
@@ -934,12 +965,12 @@ describe("ProxyService.triggerDomainCrawl — explicit admin enqueue", () => {
 			...baseConfig,
 			whitelistHosts: "example.com",
 			crawlMaxCdxPages: 50,
+			crawlMaxChunkFanout: 1000,
 		});
 
-		await expect(svc.triggerDomainCrawl("example.com", TIME)).rejects.toMatchObject({
-			status: 413,
-		});
-		expect(client.enqueueDomainCrawl).not.toHaveBeenCalled();
+		await expect(svc.triggerDomainCrawl("example.com", TIME)).resolves.toBeUndefined();
+		expect(client.enqueueDomainCrawl).toHaveBeenCalledWith("example.com", TIME);
+		expect(client.enqueueCrawlChunks).toHaveBeenCalledWith("example.com", TIME, 75, 1000);
 	});
 
 	it("surfaces the underlying network cause when CDX preflight throws (no generic 'fetch failed')", async () => {

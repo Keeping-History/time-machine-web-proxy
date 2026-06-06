@@ -24,6 +24,9 @@ export interface Config {
 	/** CDX time window around `time` for crawl-mode queries, in days.
 	 *  Env: CRAWL_WINDOW_DAYS (default 30, 1-3650). */
 	crawlWindowDays: number;
+	/** Max chunk jobs to fan out from a single crawl trigger.
+	 *  Env: CRAWL_MAX_CHUNK_FANOUT (default 1000, 1-10000). */
+	crawlMaxChunkFanout: number;
 	outboundProxyUrls: string[];
 	outboundProxyChooser: OutboundProxyChooser;
 	outboundProxyUsername: string;

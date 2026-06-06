@@ -281,6 +281,31 @@ describe("loadConfig", () => {
 		expect(() => loadConfig()).toThrow(/CRAWL_WINDOW_DAYS/);
 	});
 
+	it("CRAWL_MAX_CHUNK_FANOUT defaults to 1000 when unset", () => {
+		delete process.env.CRAWL_MAX_CHUNK_FANOUT;
+		expect(loadConfig().crawlMaxChunkFanout).toBe(1000);
+	});
+
+	it("CRAWL_MAX_CHUNK_FANOUT=500 parses correctly", () => {
+		process.env.CRAWL_MAX_CHUNK_FANOUT = "500";
+		expect(loadConfig().crawlMaxChunkFanout).toBe(500);
+	});
+
+	it("CRAWL_MAX_CHUNK_FANOUT=0 is rejected (below min 1)", () => {
+		process.env.CRAWL_MAX_CHUNK_FANOUT = "0";
+		expect(() => loadConfig()).toThrow(/CRAWL_MAX_CHUNK_FANOUT/);
+	});
+
+	it("CRAWL_MAX_CHUNK_FANOUT=10001 is rejected (above max 10000)", () => {
+		process.env.CRAWL_MAX_CHUNK_FANOUT = "10001";
+		expect(() => loadConfig()).toThrow(/CRAWL_MAX_CHUNK_FANOUT/);
+	});
+
+	it("CRAWL_MAX_CHUNK_FANOUT non-integer is rejected", () => {
+		process.env.CRAWL_MAX_CHUNK_FANOUT = "1.5";
+		expect(() => loadConfig()).toThrow(/CRAWL_MAX_CHUNK_FANOUT/);
+	});
+
 	it("reads outbound proxy env vars", () => {
 		process.env.OUTBOUND_PROXY_URLS = "http://proxymesh.example.com:31280";
 		process.env.OUTBOUND_PROXY_USERNAME = "user";

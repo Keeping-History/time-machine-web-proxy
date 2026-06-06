@@ -53,6 +53,7 @@ const config: Config = {
 	cdxCacheEnabled: true,
 	lockTime: false,
 	crawlWindowDays: 30,
+	crawlMaxChunkFanout: 1000,
 	domainRemap: {},
 };
 
