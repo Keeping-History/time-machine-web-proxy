@@ -169,6 +169,20 @@ export function loadConfig(): Config {
 			"DIRECT_FETCH_HTTP2_ENABLED",
 			true,
 		),
+		directFetchBlockedBaseMs: parseIntInRange(
+			process.env.DIRECT_FETCH_BLOCKED_BASE_MS,
+			"DIRECT_FETCH_BLOCKED_BASE_MS",
+			5_000,
+			1_000,
+			300_000,
+		),
+		directFetchBlockedMaxMs: parseIntInRange(
+			process.env.DIRECT_FETCH_BLOCKED_MAX_MS,
+			"DIRECT_FETCH_BLOCKED_MAX_MS",
+			600_000,
+			1_000,
+			3_600_000,
+		),
 
 		// Prewarm knobs
 		prewarmEnabled: parseBool(process.env.PREWARM_ENABLED, "PREWARM_ENABLED", true),

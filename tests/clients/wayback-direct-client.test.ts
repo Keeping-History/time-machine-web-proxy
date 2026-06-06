@@ -330,3 +330,242 @@ describe("WaybackDirectClient token bucket", () => {
 		process.env.DIRECT_FETCH_TIMEOUT_MS = orig;
 	});
 });
+
+// ---------------------------------------------------------------------------
+// ECONNREFUSED circuit breaker
+// ---------------------------------------------------------------------------
+
+function makeEconnRefusedError(): TypeError {
+	const cause = new Error("connect ECONNREFUSED 127.0.0.1:443");
+	(cause as { code?: string }).code = "ECONNREFUSED";
+	const err = new TypeError("fetch failed");
+	(err as { cause?: unknown }).cause = cause;
+	return err;
+}
+
+describe("WaybackDirectClient circuit breaker", () => {
+	let originalFetch: typeof globalThis.fetch;
+
+	beforeEach(() => {
+		originalFetch = globalThis.fetch;
+	});
+
+	afterEach(() => {
+		globalThis.fetch = originalFetch;
+		jest.useRealTimers();
+	});
+
+	it("CLOSED → OPEN on first ECONNREFUSED; subsequent calls short-circuit without fetch", async () => {
+		const fetchMock = jest.fn().mockRejectedValue(makeEconnRefusedError());
+		globalThis.fetch = fetchMock;
+		const client = makeClient({
+			ratePerSecond: 1000,
+			burst: 1000,
+			timeoutMs: 10_000,
+			breakerBaseMs: 5_000,
+			breakerMaxMs: 60_000,
+		});
+
+		const r1 = await client.fetchAtResolvedTime("http://a.com/", "20200101000000");
+		expect(r1.outcome).toBe("fallback");
+		expect(r1.reason).toMatch(/^ECONNREFUSED/);
+		expect(fetchMock).toHaveBeenCalledTimes(1);
+
+		const r2 = await client.fetchAtResolvedTime("http://b.com/", "20200101000000");
+		expect(r2).toEqual({ outcome: "fallback", reason: "circuit-open" });
+		expect(fetchMock).toHaveBeenCalledTimes(1);
+
+		// fetchAtRequestedTime shares the same breaker — also short-circuits.
+		const r3 = await client.fetchAtRequestedTime("http://c.com/", "20200101000000");
+		expect(r3).toEqual({ outcome: "fallback", reason: "circuit-open" });
+		expect(fetchMock).toHaveBeenCalledTimes(1);
+	});
+
+	it("non-ECONNREFUSED fetch errors do NOT trip the breaker", async () => {
+		const fetchMock = jest.fn().mockRejectedValue(new Error("AbortError: timeout"));
+		globalThis.fetch = fetchMock;
+		const client = makeClient({
+			ratePerSecond: 1000,
+			burst: 1000,
+			timeoutMs: 10_000,
+			breakerBaseMs: 5_000,
+			breakerMaxMs: 60_000,
+		});
+
+		await client.fetchAtResolvedTime("u", "20200101000000");
+		await client.fetchAtResolvedTime("u", "20200101000000");
+		await client.fetchAtResolvedTime("u", "20200101000000");
+		// All three calls hit the network — breaker stayed CLOSED.
+		expect(fetchMock).toHaveBeenCalledTimes(3);
+	});
+
+	it("non-ECONNREFUSED HTTP responses (5xx, 404, 200) do NOT trip the breaker", async () => {
+		const fetchMock = jest.fn();
+		fetchMock.mockResolvedValueOnce(makeFetchResponse({ status: 503 }));
+		fetchMock.mockResolvedValueOnce(makeFetchResponse({ status: 404 }));
+		fetchMock.mockResolvedValueOnce(makeFetchResponse({ status: 200, body: "x" }));
+		globalThis.fetch = fetchMock;
+		const client = makeClient({
+			ratePerSecond: 1000,
+			burst: 1000,
+			timeoutMs: 10_000,
+			breakerBaseMs: 5_000,
+			breakerMaxMs: 60_000,
+		});
+
+		await client.fetchAtResolvedTime("u", "20200101000000");
+		await client.fetchAtResolvedTime("u", "20200101000000");
+		await client.fetchAtResolvedTime("u", "20200101000000");
+		expect(fetchMock).toHaveBeenCalledTimes(3);
+	});
+
+	it("HALF_OPEN probe success closes the circuit; subsequent traffic flows normally", async () => {
+		jest.useFakeTimers({ now: 1_000_000 });
+		const fetchMock = jest.fn();
+		fetchMock.mockRejectedValueOnce(makeEconnRefusedError()); // opens
+		fetchMock.mockResolvedValueOnce(makeFetchResponse({ status: 200, body: "probe-ok" })); // probe
+		fetchMock.mockResolvedValueOnce(makeFetchResponse({ status: 200, body: "after-close" }));
+		globalThis.fetch = fetchMock;
+
+		const client = makeClient({
+			ratePerSecond: 1000,
+			burst: 1000,
+			timeoutMs: 10_000,
+			breakerBaseMs: 5_000,
+			breakerMaxMs: 60_000,
+		});
+
+		// Open the breaker.
+		await client.fetchAtResolvedTime("u", "20200101000000");
+		expect(fetchMock).toHaveBeenCalledTimes(1);
+
+		// Before cooldown expires: short-circuited.
+		jest.setSystemTime(1_004_999);
+		const blocked = await client.fetchAtResolvedTime("u", "20200101000000");
+		expect(blocked.reason).toBe("circuit-open");
+		expect(fetchMock).toHaveBeenCalledTimes(1);
+
+		// At cooldown expiry: probe fires and succeeds.
+		jest.setSystemTime(1_005_000);
+		const probe = await client.fetchAtResolvedTime("u", "20200101000000");
+		expect(probe.outcome).toBe("ok");
+		expect(fetchMock).toHaveBeenCalledTimes(2);
+
+		// Breaker now CLOSED — next call flows through.
+		const after = await client.fetchAtResolvedTime("u", "20200101000000");
+		expect(after.outcome).toBe("ok");
+		expect(fetchMock).toHaveBeenCalledTimes(3);
+	});
+
+	it("HALF_OPEN probe ECONNREFUSED doubles cooldown each round, capped at maxMs", async () => {
+		jest.useFakeTimers({ now: 0 });
+		const fetchMock = jest.fn().mockRejectedValue(makeEconnRefusedError());
+		globalThis.fetch = fetchMock;
+		const client = makeClient({
+			ratePerSecond: 1000,
+			burst: 1000,
+			timeoutMs: 10_000,
+			breakerBaseMs: 1_000,
+			breakerMaxMs: 8_000,
+		});
+
+		// t=0: open the breaker, cooldown=1000.
+		await client.fetchAtResolvedTime("u", "20200101000000");
+		expect(fetchMock).toHaveBeenCalledTimes(1);
+
+		// t=999: still in cooldown.
+		jest.setSystemTime(999);
+		await client.fetchAtResolvedTime("u", "20200101000000");
+		expect(fetchMock).toHaveBeenCalledTimes(1);
+
+		// t=1000: probe fires + fails → cooldown doubles to 2000.
+		jest.setSystemTime(1_000);
+		await client.fetchAtResolvedTime("u", "20200101000000");
+		expect(fetchMock).toHaveBeenCalledTimes(2);
+
+		// t=2999: still in cooldown (probe failed at t=1000, expires at t=3000).
+		jest.setSystemTime(2_999);
+		await client.fetchAtResolvedTime("u", "20200101000000");
+		expect(fetchMock).toHaveBeenCalledTimes(2);
+
+		// t=3000: probe #2 fires + fails → cooldown doubles to 4000.
+		jest.setSystemTime(3_000);
+		await client.fetchAtResolvedTime("u", "20200101000000");
+		expect(fetchMock).toHaveBeenCalledTimes(3);
+
+		// t=6999: still cooldown (expires at 7000).
+		jest.setSystemTime(6_999);
+		await client.fetchAtResolvedTime("u", "20200101000000");
+		expect(fetchMock).toHaveBeenCalledTimes(3);
+
+		// t=7000: probe #3 fires + fails → cooldown caps at 8000 (would be 8000 from 4000*2).
+		jest.setSystemTime(7_000);
+		await client.fetchAtResolvedTime("u", "20200101000000");
+		expect(fetchMock).toHaveBeenCalledTimes(4);
+
+		// t=15000: probe #4 fires + fails → cooldown stays at 8000 (cap).
+		jest.setSystemTime(15_000);
+		await client.fetchAtResolvedTime("u", "20200101000000");
+		expect(fetchMock).toHaveBeenCalledTimes(5);
+
+		// t=22999: still in cooldown (expires at 23000).
+		jest.setSystemTime(22_999);
+		await client.fetchAtResolvedTime("u", "20200101000000");
+		expect(fetchMock).toHaveBeenCalledTimes(5);
+
+		// t=23000: another probe — cap held.
+		jest.setSystemTime(23_000);
+		await client.fetchAtResolvedTime("u", "20200101000000");
+		expect(fetchMock).toHaveBeenCalledTimes(6);
+	});
+
+	it("concurrent calls during HALF_OPEN get circuit-half-open-busy fast-fail; only one probe", async () => {
+		jest.useFakeTimers({ now: 0 });
+		let resolveProbe!: (r: Response) => void;
+		const probePromise = new Promise<Response>((r) => {
+			resolveProbe = r;
+		});
+
+		const fetchMock = jest.fn();
+		fetchMock.mockRejectedValueOnce(makeEconnRefusedError()); // opens
+		fetchMock.mockReturnValueOnce(probePromise); // probe (held)
+		globalThis.fetch = fetchMock;
+
+		const client = makeClient({
+			ratePerSecond: 1000,
+			burst: 1000,
+			timeoutMs: 10_000,
+			breakerBaseMs: 1_000,
+			breakerMaxMs: 60_000,
+		});
+
+		// Open breaker.
+		await client.fetchAtResolvedTime("u", "20200101000000");
+		expect(fetchMock).toHaveBeenCalledTimes(1);
+
+		// At cooldown expiry: kick off the probe (in flight, not awaited).
+		jest.setSystemTime(1_000);
+		const probeCall = client.fetchAtResolvedTime("u", "20200101000000");
+		// One microtask flush so the probe's tryAcquire + fetch dispatch settle.
+		await Promise.resolve();
+
+		// Concurrent calls now short-circuit with half-open-busy.
+		const r1 = await client.fetchAtResolvedTime("u", "20200101000000");
+		const r2 = await client.fetchAtRequestedTime("u", "20200101000000");
+		expect(r1).toEqual({ outcome: "fallback", reason: "circuit-half-open-busy" });
+		expect(r2).toEqual({ outcome: "fallback", reason: "circuit-half-open-busy" });
+		// Only the probe touched the network.
+		expect(fetchMock).toHaveBeenCalledTimes(2);
+
+		// Resolve probe successfully → breaker closes.
+		resolveProbe(makeFetchResponse({ status: 200, body: "probe-ok" }));
+		const probeResult = await probeCall;
+		expect(probeResult.outcome).toBe("ok");
+
+		// Subsequent call flows normally.
+		fetchMock.mockResolvedValueOnce(makeFetchResponse({ status: 200, body: "after" }));
+		const after = await client.fetchAtResolvedTime("u", "20200101000000");
+		expect(after.outcome).toBe("ok");
+		expect(fetchMock).toHaveBeenCalledTimes(3);
+	});
+});

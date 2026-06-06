@@ -105,6 +105,8 @@ const baseConfig: Config = {
 	directFetchPoolKeepaliveMs: 30_000,
 	directFetchPoolMaxConcurrentStreams: 10,
 	directFetchHttp2Enabled: true,
+	directFetchBlockedBaseMs: 5_000,
+	directFetchBlockedMaxMs: 600_000,
 	prewarmEnabled: true,
 	prewarmMaxAssetsPerPage: 100,
 	notFoundTtlDays: 30,

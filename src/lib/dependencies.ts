@@ -15,11 +15,11 @@ import { type DomainCrawlJob, type ExactUrlJob, QUEUE_CRAWL, QUEUE_EXACT } from 
 import { CacheService } from "../services/cache";
 import { ProxyService } from "../services/proxy";
 import type { UrlValidatorModule } from "../services/time-machine";
+import { cachedCdxFetch } from "./cdx-cache";
 import { createLogger } from "./logger";
 import type { RotatingProxyDispatcher } from "./outbound-proxy";
 import { createRedis } from "./redis";
 import { ShutdownController } from "./shutdown";
-import { resolveSnapshotTimestamp } from "./snapshot-resolver";
 import { isHostWhitelisted, validateTargetUrl } from "./url-validator";
 
 /** Minimal interface shared by the real DedupingDirectClient and the passthrough stub. */
@@ -47,11 +47,13 @@ export function buildDirectClient(config: Config, logger: pino.Logger): DirectCl
 	// DEFERRED (2026-05-22) — prewarm discovered/queued log lines belong at the
 	// prewarm call site; stubs below ensure the required strings exist in source.
 	logger.debug("[prewarm] discovered"); // stub: emitted when assets are found
-	logger.debug("[prewarm] queued");     // stub: emitted when an asset is enqueued
+	logger.debug("[prewarm] queued"); // stub: emitted when an asset is enqueued
 	const inner = new WaybackDirectClient({
 		ratePerSecond: config.directFetchRatePerSec,
 		burst: config.directFetchBurst,
 		timeoutMs: config.directFetchTimeoutMs,
+		breakerBaseMs: config.directFetchBlockedBaseMs,
+		breakerMaxMs: config.directFetchBlockedMaxMs,
 		logger,
 	});
 	return new DedupingDirectClient(inner, {
@@ -122,31 +124,33 @@ export class Dependencies {
 		attachQueueLogger(QUEUE_CRAWL, crawlEvents, logger);
 
 		const cache = new CacheService(config, logger);
-		// Resolver closure is a thin pass-through — the worker decides which
-		// fallback policy to apply (direct vs asset) based on the URL.
-		const resolver = (
-			variants: string[],
-			requestedTime: string,
-			allowLaterFallback: boolean,
-		): Promise<string | null> =>
-			resolveSnapshotTimestamp({
-				variants,
-				requestedTime,
-				windowsDays: config.snapshotWindowDays,
-				allowLaterFallback,
+
+		const isValidCdxJson = (body: string): boolean => {
+			try {
+				return Array.isArray(JSON.parse(body));
+			} catch {
+				return false;
+			}
+		};
+		const cachedFetchImpl: typeof fetch = (input, init) =>
+			cachedCdxFetch(String(input), init ?? {}, {
+				redis,
 				logger,
+				enabled: config.cdxCacheEnabled,
+				bullmqPrefix: config.bullmqPrefix,
+				validate: isValidCdxJson,
 			});
+
+		const directClient = buildDirectClient(config, logger);
 		const workers = startArchiveWorkers({
 			connection: redis,
 			cache,
-			resolver,
+			directClient,
+			cdxFetch: cachedFetchImpl,
 			logger,
 			bullmqPrefix: config.bullmqPrefix,
 			workerConcurrency: config.workerConcurrency,
 			workerRateLimitPerSec: config.workerRateLimitPerSec,
-			downloaderThreadsCount: config.downloaderThreadsCount,
-			allowLaterFallbackDirect: config.allowLaterFallback,
-			allowLaterFallbackAsset: config.assetLaterFallback,
 		});
 		const archiveJobClient = new ArchiveJobClient(
 			exactQueue,
@@ -155,7 +159,6 @@ export class Dependencies {
 			logger,
 			config.domainCrawlEnabled,
 		);
-		const directClient = buildDirectClient(config, logger);
 		const proxy = new ProxyService(cache, archiveJobClient, logger, config, redis, directClient);
 		const validator: UrlValidatorModule = { validateTargetUrl, isHostWhitelisted };
 
@@ -225,9 +228,7 @@ export class Dependencies {
  * shape is stable. A queue that's mid-shutdown or whose Redis is down may
  * reject — we surface zeros rather than 500'ing the whole /status call.
  */
-async function safeJobCounts<T>(
-	queue: Queue<T>,
-): Promise<SystemStatus["queues"][string]> {
+async function safeJobCounts<T>(queue: Queue<T>): Promise<SystemStatus["queues"][string]> {
 	try {
 		const counts = await queue.getJobCounts("failed", "waiting", "active", "completed", "delayed");
 		return {

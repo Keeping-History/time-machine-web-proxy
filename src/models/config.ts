@@ -62,6 +62,10 @@ export interface Config {
 	directFetchPoolMaxConcurrentStreams: number;
 	/** Advertise h2 in ALPN when negotiating with Wayback. Env: DIRECT_FETCH_HTTP2_ENABLED (default true). */
 	directFetchHttp2Enabled: boolean;
+	/** Initial cooldown after ECONNREFUSED opens the breaker, ms. Env: DIRECT_FETCH_BLOCKED_BASE_MS (default 5000, 1000-300000). */
+	directFetchBlockedBaseMs: number;
+	/** Maximum cooldown after consecutive HALF_OPEN probe failures, ms. Env: DIRECT_FETCH_BLOCKED_MAX_MS (default 600000, 1000-3600000). */
+	directFetchBlockedMaxMs: number;
 
 	// — Prewarm knobs —
 	/** Whether to prewarm asset URLs discovered during crawl. Env: PREWARM_ENABLED (default true). */
