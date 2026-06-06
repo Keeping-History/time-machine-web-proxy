@@ -352,3 +352,49 @@ describe("ArchiveJobClient.enqueueDomainCrawl", () => {
 		expect(crawlQueue.add).not.toHaveBeenCalled();
 	});
 });
+
+// --- enqueueExact ------------------------------------------------------------
+
+describe("ArchiveJobClient.enqueueExact", () => {
+	it("adds an 'exact' job with deterministic jobId", async () => {
+		const { client, exactQueue } = makeClient();
+		await client.enqueueExact(TARGET_URL, TIME);
+		expect(exactQueue.add).toHaveBeenCalledTimes(1);
+		const [name, data, opts] = exactQueue.add.mock.calls[0] as AddArgs;
+		expect(name).toBe("exact");
+		expect(data).toEqual({ url: TARGET_URL, time: TIME });
+		expect(opts.jobId).toBe(expectedExactJobId(TARGET_URL, TIME));
+	});
+
+	it("does NOT call waitUntilFinished — fire-and-forget", async () => {
+		const job = makeFakeJob("e-abc");
+		const exactQueue: FakeQueue = { add: jest.fn().mockResolvedValue(job) };
+		const { client } = makeClient({ exactQueue });
+		await client.enqueueExact(TARGET_URL, TIME);
+		expect(job.waitUntilFinished).not.toHaveBeenCalled();
+	});
+
+	it("uses the same EXACT_JOB_OPTS as enqueueExactAndWait", async () => {
+		const { client, exactQueue } = makeClient();
+		await client.enqueueExact(TARGET_URL, TIME);
+		const [, , opts] = exactQueue.add.mock.calls[0] as AddArgs;
+		expect(opts.attempts).toBe(3);
+		expect(opts.backoff).toEqual({ type: "exponential", delay: 2000 });
+		expect(opts.removeOnComplete).toEqual({ count: 100, age: 3600 });
+		expect(opts.removeOnFail).toBe(1000);
+	});
+
+	it("emits a debug log with jobId, url, time", async () => {
+		const logger = makeLogger();
+		const { client } = makeClient({ logger });
+		await client.enqueueExact(TARGET_URL, TIME);
+		expect(logger.debug).toHaveBeenCalledWith(
+			expect.objectContaining({
+				jobId: expectedExactJobId(TARGET_URL, TIME),
+				url: TARGET_URL,
+				time: TIME,
+			}),
+			expect.stringContaining("crawl fan-out"),
+		);
+	});
+});

@@ -60,6 +60,7 @@ export type JobProgressListener = (progress: JobProgress) => void;
  */
 export interface ArchiveJobClientPort {
 	enqueueExactAndWait(url: string, time: string, onProgress?: JobProgressListener): Promise<void>;
+	enqueueExact(url: string, time: string): Promise<void>;
 	enqueueDomainCrawl(host: string, time: string): Promise<void>;
 }
 
@@ -126,6 +127,12 @@ export class ArchiveJobClient implements ArchiveJobClientPort {
 		} finally {
 			if (onProgress) this.exactEvents.off("progress", progressHandler);
 		}
+	}
+
+	async enqueueExact(url: string, time: string): Promise<void> {
+		const jobId = exactJobId(url, time);
+		await this.exactQueue.add("exact", { url, time }, { ...EXACT_JOB_OPTS, jobId });
+		this.logger.debug({ jobId, url, time }, "[archive-job-client] enqueued exact (crawl fan-out)");
 	}
 
 	async enqueueDomainCrawl(host: string, time: string): Promise<void> {
