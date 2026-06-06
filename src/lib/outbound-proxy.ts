@@ -1,3 +1,4 @@
+import type { IncomingHttpHeaders } from "node:http";
 import type pino from "pino";
 import { Agent, Dispatcher, Pool, ProxyAgent, request, setGlobalDispatcher } from "undici";
 import type { Config, OutboundProxyChooser } from "../models/config";
@@ -370,20 +371,49 @@ export class RotatingProxyDispatcher extends Dispatcher {
 
 	#wrapHandler(entry: ProxyEntry, handler: Dispatcher.DispatchHandler): Dispatcher.DispatchHandler {
 		const self = this;
-		return {
-			...handler,
-			onResponseStart(controller, statusCode, headers, statusMessage) {
-				if (PROXY_ERROR_STATUS.has(statusCode)) {
-					self.#markFailed(entry, `proxy returned ${statusCode}`);
+		// Proxy (not object spread) because undici's fetch builds its handler as
+		// a class instance with methods on the prototype. `{ ...handler }` would
+		// drop them, and undici would reject the wrapped handler with
+		// `UND_ERR_INVALID_ARG (invalid onRequestStart method)`. The Proxy
+		// transparently forwards every method to the inner handler and only
+		// intercepts the two we observe.
+		return new Proxy(handler, {
+			get(target, prop, receiver) {
+				if (prop === "onResponseStart") {
+					return (
+						controller: Dispatcher.DispatchController,
+						statusCode: number,
+						headers: IncomingHttpHeaders,
+						statusMessage?: string,
+					) => {
+						if (PROXY_ERROR_STATUS.has(statusCode)) {
+							self.#markFailed(entry, `proxy returned ${statusCode}`);
+						}
+						const inner = Reflect.get(target, prop, receiver) as
+							| ((
+									c: Dispatcher.DispatchController,
+									s: number,
+									h: IncomingHttpHeaders,
+									m?: string,
+							  ) => void)
+							| undefined;
+						inner?.call(target, controller, statusCode, headers, statusMessage);
+					};
 				}
-				handler.onResponseStart?.(controller, statusCode, headers, statusMessage);
+				if (prop === "onResponseError") {
+					return (controller: Dispatcher.DispatchController, error: Error) => {
+						const reason = error instanceof Error ? error.message : String(error);
+						self.#markFailed(entry, `transport: ${reason}`);
+						const inner = Reflect.get(target, prop, receiver) as
+							| ((c: Dispatcher.DispatchController, e: Error) => void)
+							| undefined;
+						inner?.call(target, controller, error);
+					};
+				}
+				const value = Reflect.get(target, prop, receiver);
+				return typeof value === "function" ? value.bind(target) : value;
 			},
-			onResponseError(controller, error) {
-				const reason = error instanceof Error ? error.message : String(error);
-				self.#markFailed(entry, `transport: ${reason}`);
-				handler.onResponseError?.(controller, error);
-			},
-		};
+		}) as Dispatcher.DispatchHandler;
 	}
 
 	#markFailed(entry: ProxyEntry, reason: string): void {

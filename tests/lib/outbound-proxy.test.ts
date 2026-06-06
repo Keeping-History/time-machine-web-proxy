@@ -560,6 +560,49 @@ describe("RotatingProxyDispatcher", () => {
 			return { built, d, logger };
 		}
 
+		it("forwards prototype methods from the inner handler (regression: undici DispatchHandler is a class instance)", () => {
+			// Regression for the production bug where `{ ...handler }` dropped
+			// undici's prototype-defined methods (onRequestStart, onResponseData,
+			// onResponseEnd), causing undici to reject every dispatch with
+			// "UND_ERR_INVALID_ARG (invalid onRequestStart method)" and take
+			// the proxy permanently out of rotation.
+			const { built, d } = buildRotator(2);
+			const onRequestStart = jest.fn();
+			const onResponseData = jest.fn();
+			const onResponseEnd = jest.fn();
+			class FetchLikeHandler {
+				onRequestStart = onRequestStart;
+				onResponseData = onResponseData;
+				onResponseEnd = onResponseEnd;
+			}
+			// Move methods onto the prototype to mirror undici's real shape.
+			// biome-ignore lint/suspicious/noExplicitAny: prototype-manipulation test
+			(FetchLikeHandler.prototype as any).onRequestStart = onRequestStart;
+			// biome-ignore lint/suspicious/noExplicitAny: prototype-manipulation test
+			(FetchLikeHandler.prototype as any).onResponseData = onResponseData;
+			// biome-ignore lint/suspicious/noExplicitAny: prototype-manipulation test
+			(FetchLikeHandler.prototype as any).onResponseEnd = onResponseEnd;
+			const userHandler = new FetchLikeHandler();
+			// biome-ignore lint/suspicious/noExplicitAny: dispatch opts/handler stubs
+			d.dispatch({} as any, userHandler as any);
+			const wrapped = built[0].agent.dispatch.mock.calls[0][1] as {
+				onRequestStart?: (...args: unknown[]) => void;
+				onResponseData?: (...args: unknown[]) => void;
+				onResponseEnd?: (...args: unknown[]) => void;
+			};
+			// All three prototype methods must be visible through the wrapper —
+			// undici reads them off the handler object before dispatching.
+			expect(typeof wrapped.onRequestStart).toBe("function");
+			expect(typeof wrapped.onResponseData).toBe("function");
+			expect(typeof wrapped.onResponseEnd).toBe("function");
+			wrapped.onRequestStart?.({});
+			wrapped.onResponseData?.({}, Buffer.from("x"));
+			wrapped.onResponseEnd?.({}, {});
+			expect(onRequestStart).toHaveBeenCalledTimes(1);
+			expect(onResponseData).toHaveBeenCalledTimes(1);
+			expect(onResponseEnd).toHaveBeenCalledTimes(1);
+		});
+
 		it("wraps the handler with onResponseError that marks the agent failed", () => {
 			const { built, d } = buildRotator(2);
 			const userHandler = { onResponseError: jest.fn() };
