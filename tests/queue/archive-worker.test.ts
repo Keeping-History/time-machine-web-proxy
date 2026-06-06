@@ -5,8 +5,16 @@
 // CDX snapshot-resolver is no longer involved. The crawl worker reads cached
 // root HTML, extracts same-domain links via rewriteHtmlUrls, and fans out to
 // archive-exact BullMQ jobs — zero CDX calls.
+//
+// The chunk worker fetches one CDX page per job, deduplicates captures to
+// one-per-URL (closest timestamp), and enqueues archive-exact jobs.
 
 // --- Module mocks (hoisted before imports) -----------------------------------
+
+const cachedCdxFetchMock = jest.fn();
+jest.mock("../../src/lib/cdx-cache", () => ({
+	cachedCdxFetch: (...args: unknown[]) => cachedCdxFetchMock(...args),
+}));
 
 jest.mock("node:fs", () => ({
 	promises: {
@@ -70,7 +78,7 @@ import {
 	attachQueueLogger,
 	startArchiveWorkers,
 } from "../../src/queue/archive-worker";
-import { QUEUE_CRAWL, QUEUE_EXACT } from "../../src/queue/jobs";
+import { QUEUE_CRAWL, QUEUE_CRAWL_CHUNK, QUEUE_EXACT } from "../../src/queue/jobs";
 
 // --- Helpers -----------------------------------------------------------------
 
@@ -187,6 +195,9 @@ function baseOpts(
 		bullmqPrefix: "tm",
 		workerConcurrency: 2,
 		workerRateLimitPerSec: 1,
+		redis: null,
+		cdxCacheEnabled: false,
+		crawlWindowDays: 30,
 		...overrides,
 	};
 }
@@ -201,33 +212,37 @@ beforeEach(() => {
 	WorkerMock.mockClear();
 	rateLimitErrorMock.mockClear();
 	workerInstances.length = 0;
+	cachedCdxFetchMock.mockClear();
 });
 
 // --- startArchiveWorkers: returned shape + Worker construction ---------------
 
 describe("startArchiveWorkers", () => {
-	it("returns an object with `exact` and `crawl` Worker instances", () => {
+	it("returns an object with `exact`, `crawl`, and `chunk` Worker instances", () => {
 		const result = startArchiveWorkers(baseOpts());
 		expect(result.exact).toBeDefined();
 		expect(result.crawl).toBeDefined();
+		expect(result.chunk).toBeDefined();
 	});
 
-	it("constructs two Workers, one per queue, in the correct order", () => {
+	it("constructs three Workers, one per queue, in the correct order", () => {
 		startArchiveWorkers(baseOpts());
-		expect(WorkerMock).toHaveBeenCalledTimes(2);
-		expect(workerInstances.map((w) => w.name)).toEqual([QUEUE_EXACT, QUEUE_CRAWL]);
+		expect(WorkerMock).toHaveBeenCalledTimes(3);
+		expect(workerInstances.map((w) => w.name)).toEqual([QUEUE_EXACT, QUEUE_CRAWL, QUEUE_CRAWL_CHUNK]);
 	});
 
-	it("passes the BullMQ prefix to BOTH Workers (critical — default 'bull' breaks dispatch)", () => {
+	it("passes the BullMQ prefix to ALL THREE Workers (critical — default 'bull' breaks dispatch)", () => {
 		startArchiveWorkers(baseOpts({ bullmqPrefix: "tm" }));
 		expect(findWorker(QUEUE_EXACT).opts.prefix).toBe("tm");
 		expect(findWorker(QUEUE_CRAWL).opts.prefix).toBe("tm");
+		expect(findWorker(QUEUE_CRAWL_CHUNK).opts.prefix).toBe("tm");
 	});
 
 	it("threads a non-default prefix through unchanged", () => {
 		startArchiveWorkers(baseOpts({ bullmqPrefix: "custom-ns" }));
 		expect(findWorker(QUEUE_EXACT).opts.prefix).toBe("custom-ns");
 		expect(findWorker(QUEUE_CRAWL).opts.prefix).toBe("custom-ns");
+		expect(findWorker(QUEUE_CRAWL_CHUNK).opts.prefix).toBe("custom-ns");
 	});
 
 	it("exact worker uses configured concurrency, crawl worker is concurrency: 1", () => {
@@ -236,10 +251,11 @@ describe("startArchiveWorkers", () => {
 		expect(findWorker(QUEUE_CRAWL).opts.concurrency).toBe(1);
 	});
 
-	it("applies the rate limiter to BOTH workers with duration: 1000ms", () => {
+	it("applies the rate limiter to ALL THREE workers with duration: 1000ms", () => {
 		startArchiveWorkers(baseOpts({ workerRateLimitPerSec: 1 }));
 		expect(findWorker(QUEUE_EXACT).opts.limiter).toEqual({ max: 1, duration: 1000 });
 		expect(findWorker(QUEUE_CRAWL).opts.limiter).toEqual({ max: 1, duration: 1000 });
+		expect(findWorker(QUEUE_CRAWL_CHUNK).opts.limiter).toEqual({ max: 1, duration: 1000 });
 	});
 
 	it("crawl worker sets lockDuration / stalledInterval / maxStalledCount for long crawls", () => {
@@ -254,6 +270,7 @@ describe("startArchiveWorkers", () => {
 		startArchiveWorkers(baseOpts());
 		expect(findWorker(QUEUE_EXACT).on).toHaveBeenCalledWith("failed", expect.any(Function));
 		expect(findWorker(QUEUE_CRAWL).on).toHaveBeenCalledWith("failed", expect.any(Function));
+		expect(findWorker(QUEUE_CRAWL_CHUNK).on).toHaveBeenCalledWith("failed", expect.any(Function));
 	});
 
 	it("opts includes enqueueExactJob callback and does not include cdxFetch", () => {
@@ -1073,6 +1090,119 @@ describe("attachQueueLogger", () => {
 		expect(logger.warn).toHaveBeenCalledWith(
 			expect.objectContaining({ queue: "archive-crawl", jobId: "j-3", event: "stalled" }),
 			expect.stringContaining("stalled"),
+		);
+	});
+});
+
+// --- Chunk worker processor --------------------------------------------------
+
+describe("chunk worker processor", () => {
+	const CDX_HEADER = [
+		"urlkey", "timestamp", "original", "mimetype", "statuscode", "digest", "length",
+	];
+	// Two rows for the same URL — dedup must pick the one closest to the target time.
+	// Target: 19980101000000. Diff for 130000 < diff for 150000, so /about → 19980101130000.
+	const CDX_DATA_DEDUP = [
+		CDX_HEADER,
+		["com,apple)/", "19980101120000", "http://apple.com/", "text/html", "200", "SHA1:aaa", "1000"],
+		["com,apple)/about", "19980101130000", "http://apple.com/about", "text/html", "200", "SHA1:bbb", "500"],
+		["com,apple)/about", "19980101150000", "http://apple.com/about", "text/html", "200", "SHA1:ccc", "500"],
+	];
+
+	function makeCdxResponse(data: unknown[][]): { ok: boolean; status: number; json: jest.Mock } {
+		return { ok: true, status: 200, json: jest.fn().mockResolvedValue(data) };
+	}
+
+	beforeEach(() => {
+		cachedCdxFetchMock.mockResolvedValue(makeCdxResponse([CDX_HEADER]));
+	});
+
+	it("rejects invalid DomainCrawlChunkJob payloads via the asserter", async () => {
+		startArchiveWorkers(baseOpts());
+		const worker = findWorker(QUEUE_CRAWL_CHUNK);
+		await expect(
+			worker.processor({ id: "bad", data: { host: "", time: "19980101000000", page: 0 }, token: "tk" }),
+		).rejects.toThrow(/Invalid job/);
+	});
+
+	it("calls cachedCdxFetch with URL containing &page=0 and from/to matching windowAround(time, 30)", async () => {
+		const enqueueExactJob = jest.fn().mockResolvedValue(undefined);
+		startArchiveWorkers(baseOpts({ enqueueExactJob }));
+		const worker = findWorker(QUEUE_CRAWL_CHUNK);
+		await worker.processor({ id: "cc-1", data: { host: "apple.com", time: "19980101000000", page: 0 }, token: "tk" });
+		expect(cachedCdxFetchMock).toHaveBeenCalledTimes(1);
+		const [url] = cachedCdxFetchMock.mock.calls[0] as [string, ...unknown[]];
+		expect(url).toContain("apple.com%2F*");
+		expect(url).toContain("from=19971202000000");
+		expect(url).toContain("to=19980131235959");
+		expect(url).toContain("output=json");
+		expect(url).toContain("page=0");
+	});
+
+	it("uses the correct page number for page=3", async () => {
+		startArchiveWorkers(baseOpts());
+		const worker = findWorker(QUEUE_CRAWL_CHUNK);
+		await worker.processor({ id: "cc-3", data: { host: "apple.com", time: "19980101000000", page: 3 }, token: "tk" });
+		const [url] = cachedCdxFetchMock.mock.calls[0] as [string, ...unknown[]];
+		expect(url).toContain("page=3");
+	});
+
+	it("applies per-URL dedup: enqueueExactJob called once per unique URL with closest timestamp", async () => {
+		cachedCdxFetchMock.mockResolvedValue(makeCdxResponse(CDX_DATA_DEDUP));
+		const enqueueExactJob = jest.fn().mockResolvedValue(undefined);
+		startArchiveWorkers(baseOpts({ enqueueExactJob }));
+		const worker = findWorker(QUEUE_CRAWL_CHUNK);
+		await worker.processor({ id: "cc-dedup", data: { host: "apple.com", time: "19980101000000", page: 0 }, token: "tk" });
+		expect(enqueueExactJob).toHaveBeenCalledTimes(2);
+		expect(enqueueExactJob).toHaveBeenCalledWith("http://apple.com/", "19980101120000");
+		// /about has two snapshots — closest to 19980101000000 wins
+		expect(enqueueExactJob).toHaveBeenCalledWith("http://apple.com/about", "19980101130000");
+	});
+
+	it("empty CDX page: enqueueExactJob not called", async () => {
+		const enqueueExactJob = jest.fn().mockResolvedValue(undefined);
+		startArchiveWorkers(baseOpts({ enqueueExactJob }));
+		const worker = findWorker(QUEUE_CRAWL_CHUNK);
+		await worker.processor({ id: "cc-empty", data: { host: "apple.com", time: "19980101000000", page: 0 }, token: "tk" });
+		expect(enqueueExactJob).not.toHaveBeenCalled();
+	});
+
+	it("non-ok CDX response throws an error containing the status code", async () => {
+		cachedCdxFetchMock.mockResolvedValue({ ok: false, status: 503, json: jest.fn() });
+		startArchiveWorkers(baseOpts());
+		const worker = findWorker(QUEUE_CRAWL_CHUNK);
+		await expect(
+			worker.processor({ id: "cc-503", data: { host: "apple.com", time: "19980101000000", page: 0 }, token: "tk" }),
+		).rejects.toThrow(/503/);
+	});
+
+	it("429-class CDX error triggers worker.rateLimit(60000) and re-throws Worker.RateLimitError", async () => {
+		cachedCdxFetchMock.mockRejectedValue(new Error("http-429 rate limit exceeded"));
+		startArchiveWorkers(baseOpts());
+		const worker = findWorker(QUEUE_CRAWL_CHUNK);
+		await expect(
+			worker.processor({ id: "cc-429", data: { host: "apple.com", time: "19980101000000", page: 0 }, token: "tk" }),
+		).rejects.toThrow("RateLimitError");
+		expect(worker.rateLimit).toHaveBeenCalledWith(60_000);
+		expect(rateLimitErrorMock).toHaveBeenCalledTimes(1);
+	});
+
+	it("'failed' event listener on chunk worker logs jobId, attemptsMade, data, err.message", async () => {
+		const logger = makeLogger();
+		startArchiveWorkers(baseOpts({ logger }));
+		const worker = findWorker(QUEUE_CRAWL_CHUNK);
+		const failedHandler = worker.on.mock.calls.find((c) => c[0] === "failed")?.[1] as (
+			job: unknown,
+			err: Error,
+		) => void;
+		expect(failedHandler).toBeDefined();
+		failedHandler(
+			{ id: "cc-fail-1", attemptsMade: 1, data: { host: "apple.com", time: "x", page: 0 } },
+			new Error("chunk boom"),
+		);
+		expect(logger.error).toHaveBeenCalledWith(
+			expect.objectContaining({ jobId: "cc-fail-1", attemptsMade: 1, err: "chunk boom" }),
+			expect.stringContaining("failed"),
 		);
 	});
 });

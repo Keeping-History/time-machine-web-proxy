@@ -4,6 +4,7 @@
 // keys look like `tm:archive-exact:wait`, still namespaced by `tm:`.
 export const QUEUE_EXACT = "archive-exact";
 export const QUEUE_CRAWL = "archive-crawl";
+export const QUEUE_CRAWL_CHUNK = "archive-crawl-chunk";
 
 export interface ExactUrlJob {
 	url: string;
@@ -41,5 +42,27 @@ export function assertDomainCrawlJob(v: unknown): asserts v is DomainCrawlJob {
 	}
 	if (typeof o.time !== "string" || !TIME_RE.test(o.time)) {
 		throw new Error("Invalid job.time");
+	}
+}
+
+export interface DomainCrawlChunkJob {
+	host: string;
+	time: string;
+	page: number;
+}
+
+export function assertDomainCrawlChunkJob(v: unknown): asserts v is DomainCrawlChunkJob {
+	if (!v || typeof v !== "object" || Array.isArray(v)) {
+		throw new Error("Invalid job: not object");
+	}
+	const o = v as Record<string, unknown>;
+	if (typeof o.host !== "string" || o.host.length === 0) {
+		throw new Error("Invalid job.host");
+	}
+	if (typeof o.time !== "string" || !TIME_RE.test(o.time)) {
+		throw new Error("Invalid job.time");
+	}
+	if (typeof o.page !== "number" || !Number.isInteger(o.page) || o.page < 0) {
+		throw new Error("Invalid job.page");
 	}
 }

@@ -2,10 +2,11 @@ import { promises as fs } from "node:fs";
 import type IORedis from "ioredis";
 import type pino from "pino";
 import type { ArchiveJobClientPort, JobProgressListener } from "../clients/archive-job-client";
-import { dayWindow } from "../lib/archive-time";
+import { windowAround } from "../lib/archive-time";
 import { cachedCdxFetch } from "../lib/cdx-cache";
 import type { DirectClient } from "../lib/dependencies";
-import { describeFetchError } from "../lib/errors";
+import { describeFetchError, errorHasStatus } from "../lib/errors";
+import { extractCdnEmbeddedUrl } from "../lib/redirect-unwrapper";
 import { rewriteCssUrls, rewriteHtmlUrls, stripWaybackToolbar } from "../lib/url-rewriter";
 import { isHostWhitelisted } from "../lib/url-validator";
 import type { Config } from "../models/config";
@@ -55,6 +56,8 @@ export class ProxyService {
 			Config,
 			| "whitelistHosts"
 			| "crawlMaxCdxPages"
+			| "crawlWindowDays"
+			| "crawlMaxChunkFanout"
 			| "bullmqPrefix"
 			| "domainCrawlEnabled"
 			| "cdxCacheEnabled"
@@ -65,6 +68,28 @@ export class ProxyService {
 	) {}
 
 	async fetch(
+		targetUrl: string,
+		time: string,
+		onProgress?: JobProgressListener,
+	): Promise<ProxyResult> {
+		try {
+			return await this.fetchCore(targetUrl, time, onProgress);
+		} catch (e) {
+			if (errorHasStatus(e) && e.status === 404) {
+				const fallback = extractCdnEmbeddedUrl(targetUrl);
+				if (fallback) {
+					this.logger.info(
+						{ targetUrl, fallback, time },
+						"[cdn-fallback] CDN URL not in archive, retrying with embedded origin URL",
+					);
+					return this.fetchCore(fallback, time, onProgress);
+				}
+			}
+			throw e;
+		}
+	}
+
+	private async fetchCore(
 		targetUrl: string,
 		time: string,
 		onProgress?: JobProgressListener,
@@ -219,15 +244,14 @@ export class ProxyService {
 				this.logger.debug({ host }, "[crawl-skip] 0 CDX pages in window");
 				return;
 			}
-			if (pages > this.config.crawlMaxCdxPages) {
-				this.logger.warn(
-					{ host, pages, cap: this.config.crawlMaxCdxPages },
-					"[crawl-skip] too large",
-				);
-				return;
-			}
-
+			this.logger.info({ host, time, pages }, "[crawl] fan-out");
 			await this.archiveJobClient.enqueueDomainCrawl(host, time);
+			await this.archiveJobClient.enqueueCrawlChunks(
+				host,
+				time,
+				pages,
+				this.config.crawlMaxChunkFanout,
+			);
 		} catch (e) {
 			this.logger.warn(
 				{ host, error: e instanceof Error ? e.message : String(e) },
@@ -274,23 +298,21 @@ export class ProxyService {
 			if (pages === 0) {
 				throw statusError("No CDX captures in window (0 pages)", 422);
 			}
-			if (pages > this.config.crawlMaxCdxPages) {
-				throw statusError(
-					`Crawl too large: ${pages} CDX pages > ${this.config.crawlMaxCdxPages} cap`,
-					413,
-				);
-			}
 			this.logger.info({ host, time, pages }, "[crawl] explicit enqueue (preflight ok)");
+			await this.archiveJobClient.enqueueDomainCrawl(host, time);
+			await this.archiveJobClient.enqueueCrawlChunks(
+				host,
+				time,
+				pages,
+				this.config.crawlMaxChunkFanout,
+			);
+			return;
 		}
 		await this.archiveJobClient.enqueueDomainCrawl(host, time);
 	}
 
 	private async cdxPageCount(host: string, time: string): Promise<number> {
-		// Widen to the calendar day of `time` so CDX counts captures across the
-		// day instead of the exact second (which virtually never matches and
-		// would always yield 0, defeating the crawl-size cap). Shared helper
-		// keeps this in lockstep with the crawler's from/to window.
-		const { from, to } = dayWindow(time);
+		const { from, to } = windowAround(time, this.config.crawlWindowDays);
 		const u =
 			`https://web.archive.org/cdx/search/cdx?url=${encodeURIComponent(`${host}/*`)}` +
 			`&from=${from}&to=${to}&output=json&showNumPages=true`;
