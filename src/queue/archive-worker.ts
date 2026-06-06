@@ -100,6 +100,21 @@ interface CdxRow {
 }
 
 /**
+ * Apex-first host variant list for CDX enumeration. For www.example.com
+ * returns ["example.com", "www.example.com"]; for example.com returns
+ * ["example.com", "www.example.com"]. Single-label hostnames get no variant.
+ * Always apex-first so the canonical form is tried before the www alias.
+ */
+function hostVariants(host: string): string[] {
+	const h = host.toLowerCase();
+	if (h.startsWith("www.")) {
+		const apex = h.slice(4);
+		return apex.includes(".") ? [apex, h] : [h];
+	}
+	return h.includes(".") ? [h, `www.${h}`] : [h];
+}
+
+/**
  * Enumerate URLs captured for `host` within `[from, to]` via CDX. Returns one
  * row per unique URL (collapsed by `urlkey`) restricted to status 200. Throws
  * on transport/parse failure so BullMQ retries the crawl.
@@ -327,7 +342,14 @@ export function startArchiveWorkers(opts: StartArchiveWorkersOpts): ArchiveWorke
 				const { from, to } = dayWindow(time);
 
 				try {
-					const rows = await enumerateHostUrls(host, from, to, cdxFetch, logger);
+					let rows: CdxRow[] = [];
+					for (const variant of hostVariants(host)) {
+						rows = await enumerateHostUrls(variant, from, to, cdxFetch, logger);
+						if (rows.length > 0) break;
+					}
+					if (rows.length === 0) {
+						throw new Error(`${host} has no captures in [${from}..${to}]`);
+					}
 					await emitProgress(job, QUEUE_CRAWL, "download_start", logger, {
 						host,
 						time,

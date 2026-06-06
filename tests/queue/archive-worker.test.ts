@@ -320,16 +320,14 @@ describe("worker progress emission", () => {
 		});
 	});
 
-	it("crawl processor emits picked_up → download_start → download_done (empty enumeration)", async () => {
+	it("crawl processor emits error stage when all host variants have no CDX captures", async () => {
 		startArchiveWorkers(baseOpts());
 		const worker = findWorker(QUEUE_CRAWL);
 		const job = makeJob("c1", { host: "example.com", time: "20200101000000" });
-		await worker.processor(job);
-		expect(progressStages(job.updateProgress)).toEqual([
-			"picked_up",
-			"download_start",
-			"download_done",
-		]);
+		await expect(worker.processor(job)).rejects.toThrow(/no captures/);
+		const stages = progressStages(job.updateProgress);
+		expect(stages).toContain("picked_up");
+		expect(stages[stages.length - 1]).toBe("error");
 	});
 
 	it("crawl processor emits error stage before re-throwing on CDX failure", async () => {
@@ -723,10 +721,14 @@ describe("crawl worker processor", () => {
 	}
 
 	it("queries CDX with url=host/*, the dayWindow from/to, and statuscode:200/collapse=urlkey filters", async () => {
-		const cdxFetch = jest.fn(async () => jsonResponse([]));
+		// Return one row so the apex variant succeeds (no www fallback needed here).
+		const cdxFetch = jest.fn(async () =>
+			jsonResponse([["original", "timestamp"], ["http://example.com/", "20200101120000"]]),
+		);
 		startArchiveWorkers(baseOpts({ cdxFetch: cdxFetch as unknown as typeof fetch }));
 		const worker = findWorker(QUEUE_CRAWL);
 		await worker.processor(makeCrawlJob("c-q", { host: "example.com", time: "20200101000000" }));
+		// Apex variant returned results so only one CDX call was needed.
 		expect(cdxFetch).toHaveBeenCalledTimes(1);
 		const calledUrl = String((cdxFetch.mock.calls[0] as unknown[])[0]);
 		expect(calledUrl).toContain("url=example.com%2F*");
@@ -834,7 +836,8 @@ describe("crawl worker processor", () => {
 		expect(extendLockMock).toHaveBeenCalledWith("tk-c-lock", 120_000);
 		jest.advanceTimersByTime(110_000);
 		expect(extendLockMock).toHaveBeenCalledTimes(2);
-		resolveCdx(jsonResponse([]));
+		// Resolve with a row so the apex variant succeeds — no www fallback triggered.
+		resolveCdx(jsonResponse([["original", "timestamp"], ["http://example.com/", "20200101000000"]]));
 		await jobPromise;
 		jest.advanceTimersByTime(500_000);
 		expect(extendLockMock).toHaveBeenCalledTimes(2);
@@ -858,12 +861,11 @@ describe("crawl worker processor", () => {
 		const cache = makeCache();
 		startArchiveWorkers(baseOpts({ cache }));
 		const worker = findWorker(QUEUE_CRAWL);
-		await worker.processor(
-			makeCrawlJob("c-no-sentinel", { host: "example.com", time: "20200101000000" }),
-		);
-		// Empty crawl results do not imply "404" — they may just mean the day
-		// window had no captures of any sibling. Sentinels would poison the
-		// negative cache for the host root.
+		// All variants return empty → job throws. Sentinels must still not be
+		// written: "no CDX captures in window" is not the same as "404 not found".
+		await expect(
+			worker.processor(makeCrawlJob("c-no-sentinel", { host: "example.com", time: "20200101000000" })),
+		).rejects.toThrow(/no captures/);
 		expect(cache.writeNotFoundSentinel).not.toHaveBeenCalled();
 	});
 
@@ -1056,6 +1058,42 @@ describe("crawl worker processor", () => {
 		expect(doneCall![0]).toMatchObject({ stage: "download_done", filesSeen: 2 });
 	});
 
+	it("falls back to www variant when apex CDX returns empty (www-only legacy sites)", async () => {
+		// Reproduces the ibm.com / apple.com case: job host is www.example.com,
+		// CDX has zero captures for apex (example.com) but captures for www.
+		const cdxFetch = jest.fn(async (url: string) => {
+			const urlParam = new URLSearchParams(new URL(String(url)).search).get("url") ?? "";
+			if (urlParam.startsWith("www.")) {
+				return jsonResponse([
+					["original", "timestamp"],
+					["http://www.example.com/", "20010912000000"],
+				]);
+			}
+			return jsonResponse([]); // apex has no captures
+		});
+		const directClient = defaultDirectClient();
+		startArchiveWorkers(baseOpts({ cdxFetch: cdxFetch as unknown as typeof fetch, directClient }));
+		const worker = findWorker(QUEUE_CRAWL);
+		await worker.processor(
+			makeCrawlJob("c-www", { host: "www.example.com", time: "20010912000000" }),
+		);
+		expect(directClient.fetchAtResolvedTime).toHaveBeenCalledWith(
+			"http://www.example.com/",
+			"20010912000000",
+		);
+	});
+
+	it("tries all host variants and throws 'no captures' if all are empty", async () => {
+		const cdxFetch = jest.fn(async () => jsonResponse([]));
+		startArchiveWorkers(baseOpts({ cdxFetch: cdxFetch as unknown as typeof fetch }));
+		const worker = findWorker(QUEUE_CRAWL);
+		await expect(
+			worker.processor(makeCrawlJob("c-nocap", { host: "example.com", time: "20200101000000" })),
+		).rejects.toThrow(/no captures/);
+		// Both apex and www variants must be tried before giving up
+		expect(cdxFetch).toHaveBeenCalledTimes(2);
+	});
+
 	it("logs a warning (but does not throw) when extendLock rejects", async () => {
 		let resolveCdx: (r: Response) => void = () => undefined;
 		const cdxFetch = jest.fn(
@@ -1080,7 +1118,8 @@ describe("crawl worker processor", () => {
 			expect.objectContaining({ err: "lock lost" }),
 			expect.stringContaining("extendLock failed"),
 		);
-		resolveCdx(jsonResponse([]));
+		// Resolve with a row so the apex variant succeeds — no www fallback triggered.
+		resolveCdx(jsonResponse([["original", "timestamp"], ["http://example.com/", "20200101000000"]]));
 		await jobPromise;
 	});
 });
