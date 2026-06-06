@@ -1,4 +1,5 @@
 import { type DefaultTreeAdapterTypes, defaultTreeAdapter, parse, serialize } from "parse5";
+import { unwrapRedirectUrl } from "./redirect-unwrapper";
 import { generateShimScript } from "./runtime-shim";
 
 type Node = DefaultTreeAdapterTypes.Node;
@@ -238,7 +239,7 @@ const rewriteOneUrl = (
 	}
 
 	try {
-		const resolved = new URL(trimmed, targetUrl);
+		const resolved = new URL(unwrapRedirectUrl(trimmed), targetUrl);
 		if (resolved.protocol !== "http:" && resolved.protocol !== "https:") return raw;
 		return buildProxyUrl(resolved.toString(), fallbackTime, lockTime);
 	} catch {

@@ -4,6 +4,7 @@ import { type WebSocket, WebSocketServer } from "ws";
 import { errorHasStatus } from "../lib/errors";
 import type { ShutdownController } from "../lib/shutdown";
 import { normalizeHostname } from "../lib/hostname-normalizer";
+import { unwrapRedirectUrl } from "../lib/redirect-unwrapper";
 import { parseWaybackPath, sanitizeTimeParam, unwrapNestedProxyUrl } from "../lib/url-rewriter";
 import type { Config } from "../models/config";
 import type { JobProgress } from "../models/job-progress";
@@ -266,7 +267,7 @@ export class TimeMachineService {
 				time,
 				this.config.proxyBaseHostname,
 			));
-			targetUrl = normalizeHostname(targetUrl, this.config.domainRemap);
+			targetUrl = unwrapRedirectUrl(normalizeHostname(targetUrl, this.config.domainRemap));
 		}
 
 		if (!targetUrl) {
@@ -466,7 +467,7 @@ export class TimeMachineService {
 			let targetUrl: string;
 			try {
 				targetUrl = this.validator.validateTargetUrl(
-					normalizeHostname(unwrappedUrl, this.config.domainRemap),
+					unwrapRedirectUrl(normalizeHostname(unwrappedUrl, this.config.domainRemap)),
 				);
 			} catch (e) {
 				ws.send(
