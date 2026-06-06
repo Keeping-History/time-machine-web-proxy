@@ -81,7 +81,7 @@ export interface DependencyStore {
 	chunkQueue: Queue<DomainCrawlChunkJob>;
 	exactEvents: QueueEvents;
 	crawlEvents: QueueEvents;
-	workers: { exact: Worker; crawl: Worker };
+	workers: { exact: Worker; crawl: Worker; chunk: Worker };
 	cache: CacheService;
 	archiveJobClient: ArchiveJobClient;
 	proxy: ProxyService;
@@ -154,6 +154,9 @@ export class Dependencies {
 			bullmqPrefix: config.bullmqPrefix,
 			workerConcurrency: config.workerConcurrency,
 			workerRateLimitPerSec: config.workerRateLimitPerSec,
+			redis,
+			cdxCacheEnabled: config.cdxCacheEnabled,
+			crawlWindowDays: config.crawlWindowDays,
 		});
 		const proxy = new ProxyService(cache, archiveJobClient, logger, config, redis, directClient);
 		const validator: UrlValidatorModule = { validateTargetUrl, isHostWhitelisted };
@@ -209,7 +212,7 @@ export class Dependencies {
 		const { workers, exactQueue, crawlQueue, chunkQueue, exactEvents, crawlEvents, redis } =
 			this.deps;
 		// 1. Drain workers first so in-flight jobs complete
-		await Promise.all([workers.exact.close(), workers.crawl.close()]);
+		await Promise.all([workers.exact.close(), workers.crawl.close(), workers.chunk.close()]);
 		// 2. Close queues + events together
 		await Promise.all([
 			exactQueue.close(),

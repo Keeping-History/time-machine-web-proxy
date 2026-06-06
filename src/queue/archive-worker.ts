@@ -1,11 +1,22 @@
 import { promises as fs } from "node:fs";
 import { type ConnectionOptions, type Job, type QueueEvents, Worker } from "bullmq";
+import type IORedis from "ioredis";
 import type pino from "pino";
 import type { RequestedResult, ResolvedResult } from "../clients/wayback-direct-client";
+import { cachedCdxFetch } from "../lib/cdx-cache";
+import { windowAround } from "../lib/archive-time";
 import type { JobProgress, JobProgressQueue, JobProgressStage } from "../models/job-progress";
 import type { CacheService } from "../services/cache";
 import { rewriteHtmlUrls, stripWaybackToolbar } from "../lib/url-rewriter";
-import { assertDomainCrawlJob, assertExactUrlJob, QUEUE_CRAWL, QUEUE_EXACT } from "./jobs";
+import {
+	assertDomainCrawlChunkJob,
+	assertDomainCrawlJob,
+	assertExactUrlJob,
+	QUEUE_CRAWL,
+	QUEUE_CRAWL_CHUNK,
+	QUEUE_EXACT,
+} from "./jobs";
+import { parseCdxPage, pickClosestPerUrl } from "./cdx-page";
 
 /**
  * Minimal structural shape of the direct-fetch client the workers need. Kept
@@ -40,11 +51,15 @@ export interface StartArchiveWorkersOpts {
 	bullmqPrefix: string;
 	workerConcurrency: number;
 	workerRateLimitPerSec: number;
+	redis: IORedis | null;
+	cdxCacheEnabled: boolean;
+	crawlWindowDays: number;
 }
 
 export interface ArchiveWorkers {
 	exact: Worker;
 	crawl: Worker;
+	chunk: Worker;
 }
 
 const CRAWL_LOCK_DURATION_MS = 120_000;
@@ -53,6 +68,7 @@ const CRAWL_LOCK_DURATION_MS = 120_000;
 // downloader plan.
 const RATE_LIMIT_PAUSE_MS = 60_000;
 const RATE_LIMIT_RE = /429|rate.?limit/i;
+const CDX_TIMEOUT_MS = 30_000;
 
 async function emitProgress(
 	job: Job,
@@ -122,6 +138,9 @@ export function startArchiveWorkers(opts: StartArchiveWorkersOpts): ArchiveWorke
 		bullmqPrefix,
 		workerConcurrency,
 		workerRateLimitPerSec,
+		redis,
+		cdxCacheEnabled,
+		crawlWindowDays,
 	} = opts;
 
 	const limiter = { max: workerRateLimitPerSec, duration: 1000 };
@@ -295,7 +314,47 @@ export function startArchiveWorkers(opts: StartArchiveWorkersOpts): ArchiveWorke
 		},
 	);
 
-	const attachFailedLogger = (w: Worker, name: "exact" | "crawl"): void => {
+	// Trust boundary: whitelist check is done at the producer (ProxyService.maybeEnqueueDomainCrawl).
+	// The chunk worker does NOT re-check — jobs in this queue are pre-approved.
+	let chunk!: Worker;
+	chunk = new Worker(
+		QUEUE_CRAWL_CHUNK,
+		async (job) => {
+			assertDomainCrawlChunkJob(job.data);
+			const { host, time, page } = job.data;
+			const { from, to } = windowAround(time, crawlWindowDays);
+			const cdxUrl =
+				`https://web.archive.org/cdx/search/cdx?url=${encodeURIComponent(`${host}/*`)}` +
+				`&from=${from}&to=${to}&output=json&page=${page}`;
+
+			const rows = await applyRateLimit(chunk, async () => {
+				const r = await cachedCdxFetch(
+					cdxUrl,
+					{ signal: AbortSignal.timeout(CDX_TIMEOUT_MS) },
+					{ redis, logger, enabled: cdxCacheEnabled, bullmqPrefix, validate: () => true },
+				);
+				if (!r.ok) throw new Error(`CDX fetch ${r.status}`);
+				return parseCdxPage(await r.json());
+			});
+
+			const captures = pickClosestPerUrl(rows, time);
+			for (const { url, timestamp } of captures) {
+				await enqueueExactJob(url, timestamp);
+			}
+			logger.info({ host, time, page, captures: captures.length }, "[worker:crawl-chunk] done");
+		},
+		{
+			connection,
+			concurrency: workerConcurrency,
+			limiter,
+			prefix: bullmqPrefix,
+			lockDuration: CRAWL_LOCK_DURATION_MS,
+			stalledInterval: 30_000,
+			maxStalledCount: 2,
+		},
+	);
+
+	const attachFailedLogger = (w: Worker, name: "exact" | "crawl" | "chunk"): void => {
 		w.on("failed", (job, err) => {
 			logger.error(
 				{
@@ -310,8 +369,9 @@ export function startArchiveWorkers(opts: StartArchiveWorkersOpts): ArchiveWorke
 	};
 	attachFailedLogger(exact, "exact");
 	attachFailedLogger(crawl, "crawl");
+	attachFailedLogger(chunk, "chunk");
 
-	return { exact, crawl };
+	return { exact, crawl, chunk };
 }
 
 /**
