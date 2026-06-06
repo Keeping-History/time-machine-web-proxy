@@ -6,7 +6,8 @@
  * the proxy.
  *
  * The shim reads its configuration from:
- *   <meta name="wayback-context" data-ts="<timestamp>" data-url="<originalUrl>">
+ *   <meta name="wayback-context" data-ts="<timestamp>" data-url="<originalUrl>"
+ *         data-lock-time="<true|false>">
  *
  * Patched APIs:
  *   - window.fetch
@@ -15,11 +16,20 @@
  *     HTMLAnchorElement src/href setters
  *   - document.write / document.writeln
  *   - MutationObserver on document.documentElement (catches dynamic inserts)
+ *
+ * When `lockTime` is true, generated proxy paths omit the timestamp segment
+ * (`/web/<url>`), matching the server-side url-rewriter behaviour so all
+ * navigation falls through to the configured default time.
  */
-export const generateShimScript = (ts: string, originalUrl: string): string => `(function () {
+export const generateShimScript = (
+	ts: string,
+	originalUrl: string,
+	lockTime = false,
+): string => `(function () {
   var meta = document.querySelector('meta[name="wayback-context"]');
   var _ts = (meta && meta.getAttribute('data-ts')) || ${JSON.stringify(ts)};
   var _orig = (meta && meta.getAttribute('data-url')) || ${JSON.stringify(originalUrl)};
+  var _lock = (meta && meta.getAttribute('data-lock-time') === 'true') || ${JSON.stringify(lockTime)};
 
   // Opaque/non-network schemes that must never be rewritten.
   var SKIP_RE = /^(?:data:|blob:|javascript:|mailto:|tel:|sms:|about:|#)/i;
@@ -39,7 +49,7 @@ export const generateShimScript = (ts: string, originalUrl: string): string => `
     // Wayback-wrapped (absolute or protocol-relative): unwrap to the embedded
     // (ts, url) and emit a clean path-form URL the proxy understands.
     var wm = trimmed.match(WAYBACK_ABS_RE);
-    if (wm) return '/web/' + wm[1] + '/' + wm[2];
+    if (wm) return _lock ? '/web/' + wm[2] : '/web/' + wm[1] + '/' + wm[2];
     // Already proxied: idempotent pass-through.
     if (trimmed.indexOf('/web/') === 0) return url;
     // Resolve relative URLs against the original page URL.
@@ -51,7 +61,7 @@ export const generateShimScript = (ts: string, originalUrl: string): string => `
     }
     // Only rewrite http/https.
     if (absolute.indexOf('http://') !== 0 && absolute.indexOf('https://') !== 0) return url;
-    return '/web/' + _ts + 'im_/' + absolute;
+    return _lock ? '/web/' + absolute : '/web/' + _ts + 'im_/' + absolute;
   }
 
   // --- window.fetch ---
@@ -101,7 +111,7 @@ export const generateShimScript = (ts: string, originalUrl: string): string => `
   });
 
   // --- document.write / document.writeln ---
-  var ATTR_RE = /((?:src|href)\s*=\s*)(["'])([^"']+)\\2/gi;
+  var ATTR_RE = /((?:src|href)s*=s*)(["'])([^"']+)\\2/gi;
 
   function rewriteHtmlString(html) {
     return html.replace(ATTR_RE, function (match, prefix, quote, url) {

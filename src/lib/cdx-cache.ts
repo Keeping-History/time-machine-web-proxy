@@ -35,11 +35,12 @@ export async function cachedCdxFetch(
 	deps: CdxCacheDeps,
 ): Promise<Response> {
 	const f = deps.fetchImpl ?? fetch;
-	if (!deps.enabled || deps.redis === null) return f(url, init);
+	const { redis } = deps;
+	if (!deps.enabled || redis === null) return f(url, init);
 
 	const key = `${deps.bullmqPrefix}-cdx:${hashUrl(url)}`;
 
-	const cached = await readCache(deps.redis, key, deps.logger);
+	const cached = await readCache(redis, key, deps.logger);
 	if (cached !== null) {
 		deps.logger.debug({ key, bytes: cached.length }, "[cdx-cache] hit");
 		return new Response(cached, { status: 200 });
@@ -57,7 +58,7 @@ export async function cachedCdxFetch(
 			return new Response(body, { status: 200, headers: res.headers });
 		}
 		const ttl = computeTtlS(url, deps.now?.() ?? Date.now());
-		writeCache(deps.redis!, key, body, ttl, deps.logger);
+		writeCache(redis, key, body, ttl, deps.logger);
 		return new Response(body, { status: 200, headers: res.headers });
 	})();
 
@@ -107,9 +108,9 @@ function writeCache(
 	ttlS: number,
 	logger: pino.Logger,
 ): void {
-	redis.set(key, body, "EX", ttlS).catch((e: unknown) =>
-		logger.warn({ key, err: errMsg(e) }, "[cdx-cache] redis SET failed"),
-	);
+	redis
+		.set(key, body, "EX", ttlS)
+		.catch((e: unknown) => logger.warn({ key, err: errMsg(e) }, "[cdx-cache] redis SET failed"));
 }
 
 const errMsg = (e: unknown): string => (e instanceof Error ? e.message : String(e));

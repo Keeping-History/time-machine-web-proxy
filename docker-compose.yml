@@ -1,3 +1,15 @@
+# Single-command local stack:
+#   docker compose up -d
+# brings up timemachine + redis + bullboard, plus the vendored SigNoz stack
+# under deploy/signoz/, plus the pino-collector that bridges Docker's
+# fluentd log driver into SigNoz's OTLP receiver.
+#
+# First boot of the SigNoz stack takes ~2 minutes (ClickHouse migrations).
+# SigNoz UI: http://localhost:8080. Timemachine: ${TIMEMACHINE_PORT:-8765}.
+
+include:
+  - deploy/signoz/docker/docker-compose.yaml
+
 services:
   timemachine:
     build: .
@@ -19,6 +31,17 @@ services:
       redis:
         condition: service_healthy
     restart: unless-stopped
+    # Ship pino JSON stdout to pino-collector via Docker's fluentd driver.
+    # `fluentd-async` lets the container start before the collector is up;
+    # buffered lines flush once it accepts a connection. (Docker 20.10+
+    # renamed `fluentd-async-connect` to `fluentd-async`.)
+    logging:
+      driver: fluentd
+      options:
+        fluentd-address: localhost:24224
+        fluentd-async: "true"
+        fluentd-sub-second-precision: "true"
+        tag: timemachine
 
   redis:
     image: redis:7-alpine
@@ -44,6 +67,38 @@ services:
       - BULL_PREFIX=tm
     depends_on:
       - redis
+
+  # Parses pino JSON from container stdout and forwards it as OTLP logs to
+  # SigNoz's bundled otel-collector. Named pino-collector to avoid colliding
+  # with SigNoz's own `otel-collector` service from the included compose.
+  pino-collector:
+    image: otel/opentelemetry-collector-contrib:0.112.0
+    command: ["--config=/etc/otel-collector-config.yaml"]
+    volumes:
+      - ./deploy/pino-collector-config.yaml:/etc/otel-collector-config.yaml:ro
+    ports:
+      # Fluent Forward endpoint that Docker's fluentd log driver writes to.
+      # Published on the host so the daemon (incl. Docker Desktop's VM) can
+      # reach it via localhost:24224.
+      - "24224:24224"
+      - "24224:24224/udp"
+    networks:
+      # Default project network for inbound fluentforward + signoz-net for
+      # outbound OTLP to SigNoz's collector.
+      - default
+      - signoz-net
+    environment:
+      SIGNOZ_OTLP_ENDPOINT: ${SIGNOZ_OTLP_ENDPOINT:-otel-collector:4317}
+    # Wait until SigNoz reports healthy before binding the fluentforward
+    # port. Otherwise gRPC's DNS lookup for `otel-collector` (SigNoz's
+    # collector) caches a permanent "no such host" failure and never
+    # recovers without a manual restart. Logs that arrive during the
+    # ~2-minute SigNoz boot window buffer in the Docker daemon's fluentd
+    # async queue (default 8 MB) and flush once this service starts.
+    depends_on:
+      signoz:
+        condition: service_healthy
+    restart: unless-stopped
 
 volumes:
   timemachine-cache:

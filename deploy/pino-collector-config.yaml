@@ -1,0 +1,91 @@
+# OpenTelemetry Collector config for the pino-collector sidecar.
+#
+# Receives this project's container stdout via Docker's `fluentd` log
+# driver, parses the embedded pino JSON, maps level/time/msg to OTel log
+# fields, and exports OTLP to SigNoz's own collector — both stacks share
+# this compose project via `include`, so we reach SigNoz by service name
+# on the signoz-net network.
+#
+# The fluentforward receiver puts each fluentd record's `log` field into
+# log.body (as a string) and stores Docker's container_id / container_name /
+# source / fluentd.tag fields as attributes. The transform/pino processor
+# then parses log.body as JSON, lifts pino's level/time/msg onto OTel log
+# fields, and merges the remaining fields onto log.attributes.
+
+receivers:
+  fluentforward:
+    endpoint: 0.0.0.0:24224
+
+processors:
+  transform/pino:
+    error_mode: ignore
+    log_statements:
+      - context: log
+        statements:
+          - merge_maps(cache, ParseJSON(body), "upsert") where IsString(body) and IsMatch(body, "^\\{")
+          - set(time_unix_nano, Int(cache["time"]) * 1000000) where cache["time"] != nil
+          - set(observed_time_unix_nano, time_unix_nano) where time_unix_nano != nil
+          - set(severity_text, "TRACE") where cache["level"] == 10
+          - set(severity_number, SEVERITY_NUMBER_TRACE) where cache["level"] == 10
+          - set(severity_text, "DEBUG") where cache["level"] == 20
+          - set(severity_number, SEVERITY_NUMBER_DEBUG) where cache["level"] == 20
+          - set(severity_text, "INFO") where cache["level"] == 30
+          - set(severity_number, SEVERITY_NUMBER_INFO) where cache["level"] == 30
+          - set(severity_text, "WARN") where cache["level"] == 40
+          - set(severity_number, SEVERITY_NUMBER_WARN) where cache["level"] == 40
+          - set(severity_text, "ERROR") where cache["level"] == 50
+          - set(severity_number, SEVERITY_NUMBER_ERROR) where cache["level"] == 50
+          - set(severity_text, "FATAL") where cache["level"] == 60
+          - set(severity_number, SEVERITY_NUMBER_FATAL) where cache["level"] == 60
+          - merge_maps(attributes, cache, "upsert") where cache["msg"] != nil
+          - set(body, cache["msg"]) where cache["msg"] != nil
+          - delete_key(attributes, "level")
+          - delete_key(attributes, "time")
+          - delete_key(attributes, "msg")
+          - delete_key(attributes, "pid")
+          - delete_key(attributes, "hostname")
+
+  resource:
+    attributes:
+      - key: service.name
+        value: timemachine
+        action: upsert
+      - key: deployment.environment
+        value: local
+        action: upsert
+
+  batch:
+    timeout: 5s
+    send_batch_size: 512
+
+exporters:
+  otlp/signoz:
+    # SigNoz's bundled otel-collector service, reachable by service name on
+    # the signoz-net network (declared by the vendored compose). Override
+    # via .env if pointing at an external SigNoz install.
+    endpoint: ${env:SIGNOZ_OTLP_ENDPOINT}
+    tls:
+      insecure: true
+    sending_queue:
+      enabled: true
+      # Buffer outbound logs so a SigNoz restart doesn't drop the backlog.
+      num_consumers: 4
+      queue_size: 5000
+    retry_on_failure:
+      enabled: true
+      initial_interval: 5s
+      max_interval: 30s
+
+  # Surfaces parsing errors in `docker compose logs pino-collector`.
+  debug:
+    verbosity: basic
+
+service:
+  pipelines:
+    logs:
+      receivers: [fluentforward]
+      processors: [transform/pino, resource, batch]
+      exporters: [otlp/signoz]
+  telemetry:
+    logs:
+      level: info

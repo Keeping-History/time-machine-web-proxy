@@ -36,9 +36,7 @@ beforeAll(() => {
 });
 
 afterEach(() => {
-	document
-		.querySelectorAll("[data-test-node]")
-		.forEach((el) => el.parentNode?.removeChild(el));
+	document.querySelectorAll("[data-test-node]").forEach((el) => el.parentNode?.removeChild(el));
 });
 
 // ─── rewrite() helper — probed via fetch interception ────────────────────────
@@ -121,9 +119,7 @@ describe("rewrite() — relative URL resolution", () => {
 
 	it("resolves a document-relative URL against the original page URL", () => {
 		// ORIG_URL = http://www.example.com/news/story → same dir is /news/
-		expect(testRewrite("photo.jpg")).toBe(
-			`/web/${TS}im_/http://www.example.com/news/photo.jpg`,
-		);
+		expect(testRewrite("photo.jpg")).toBe(`/web/${TS}im_/http://www.example.com/news/photo.jpg`);
 	});
 
 	it("wraps an absolute http URL", () => {
@@ -170,10 +166,7 @@ describe("XMLHttpRequest.prototype.open patch", () => {
 
 		const realOpen = XMLHttpRequest.prototype.open;
 		// biome-ignore lint/suspicious/noExplicitAny: test spy
-		(XMLHttpRequest.prototype as any).open = function (
-			_method: string,
-			url: string,
-		) {
+		(XMLHttpRequest.prototype as any).open = (_method: string, url: string) => {
 			captured.push(url);
 		};
 		installShim(); // shim now wraps our spy as _origXhrOpen
@@ -255,9 +248,7 @@ describe("document.write / document.writeln rewriting", () => {
 		document.write = realWrite;
 		installShim();
 
-		expect(captured[0]).toContain(
-			`/web/${TS}im_/http://www.example.com/img/banner.gif`,
-		);
+		expect(captured[0]).toContain(`/web/${TS}im_/http://www.example.com/img/banner.gif`);
 	});
 
 	it("document.write rewrites href= attributes in the HTML string", () => {
@@ -274,9 +265,7 @@ describe("document.write / document.writeln rewriting", () => {
 		document.write = realWrite;
 		installShim();
 
-		expect(captured[0]).toContain(
-			`/web/${TS}im_/http://www.example.com/contact`,
-		);
+		expect(captured[0]).toContain(`/web/${TS}im_/http://www.example.com/contact`);
 	});
 
 	it("document.writeln rewrites src= attributes in the HTML string", () => {
@@ -293,9 +282,7 @@ describe("document.write / document.writeln rewriting", () => {
 		document.writeln = realWriteln;
 		installShim();
 
-		expect(captured[0]).toContain(
-			`/web/${TS}im_/http://www.example.com/js/track.js`,
-		);
+		expect(captured[0]).toContain(`/web/${TS}im_/http://www.example.com/js/track.js`);
 	});
 });
 
@@ -363,9 +350,7 @@ describe("rewrite() — wayback-wrapped absolute URL unwrap via window.fetch", (
 		};
 		installShim();
 
-		await window.fetch(
-			`http://web.archive.org/web/${INNER_TS}/http://other.com/asset.js`,
-		);
+		await window.fetch(`http://web.archive.org/web/${INNER_TS}/http://other.com/asset.js`);
 
 		installShim();
 		window.fetch = realFetch;
@@ -383,9 +368,7 @@ describe("rewrite() — wayback-wrapped absolute URL unwrap via window.fetch", (
 		};
 		installShim();
 
-		await window.fetch(
-			`https://web.archive.org/web/${INNER_TS}im_/https://other.com/r1.css`,
-		);
+		await window.fetch(`https://web.archive.org/web/${INNER_TS}im_/https://other.com/r1.css`);
 
 		installShim();
 		window.fetch = realFetch;
@@ -400,10 +383,7 @@ describe("rewrite() — wayback-wrapped URL unwrap via XMLHttpRequest.open", () 
 
 		const realOpen = XMLHttpRequest.prototype.open;
 		// biome-ignore lint/suspicious/noExplicitAny: test spy
-		(XMLHttpRequest.prototype as any).open = function (
-			_method: string,
-			url: string,
-		) {
+		(XMLHttpRequest.prototype as any).open = (_method: string, url: string) => {
 			captured.push(url);
 		};
 		installShim();
@@ -459,9 +439,7 @@ describe("rewrite() — wayback-wrapped URL unwrap via document.write", () => {
 		document.write = realWrite;
 		installShim();
 
-		expect(captured[0]).toContain(
-			`/web/${INNER_TS}/http://cdn.example.com/lib.js`,
-		);
+		expect(captured[0]).toContain(`/web/${INNER_TS}/http://cdn.example.com/lib.js`);
 		// Negative guard: must NOT contain a doubly-wrapped form
 		expect(captured[0]).not.toContain("web.archive.org/web");
 	});
@@ -495,9 +473,7 @@ describe("rewrite() — wayback-wrapped URL unwrap via protocol-relative form", 
 		};
 		installShim();
 
-		await window.fetch(
-			`//web.archive.org/web/${INNER_TS}/http://proto-rel.example.com/x.js`,
-		);
+		await window.fetch(`//web.archive.org/web/${INNER_TS}/http://proto-rel.example.com/x.js`);
 
 		installShim();
 		window.fetch = realFetch;
@@ -518,9 +494,7 @@ describe("rewrite() — wayback-wrapped URL unwrap preserves the embedded timest
 		// Page-level TS is the module-scope TS (20020401120000). INNER_TS differs.
 		installShim();
 
-		await window.fetch(
-			`http://web.archive.org/web/${INNER_TS}/http://other.com/dated.html`,
-		);
+		await window.fetch(`http://web.archive.org/web/${INNER_TS}/http://other.com/dated.html`);
 
 		installShim();
 		window.fetch = realFetch;

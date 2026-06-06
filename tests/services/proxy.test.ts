@@ -57,6 +57,7 @@ const makeCache = (lookupImpl?: jest.Mock): jest.Mocked<CacheService> =>
 
 const makeClient = (): jest.Mocked<ArchiveJobClientPort> => ({
 	enqueueExactAndWait: jest.fn().mockResolvedValue(undefined),
+	enqueueExact: jest.fn().mockResolvedValue(undefined),
 	enqueueDomainCrawl: jest.fn().mockResolvedValue(undefined),
 });
 

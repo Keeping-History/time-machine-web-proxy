@@ -6,12 +6,17 @@ tsconfig.tsbuildinfo
 node_modules
 .turbo
 .DS_Store
-/stories/archive
 /.vscode
 .mdkb
 .pnpm-store
-plans/archive
-reviews/archive
+plans
+reviews
+stories
 .ralph
 ralph-tasks.json
 .turbo
+
+# SigNoz's init-clickhouse container drops a histogram-quantile binary into
+# this dir at first boot — keep the dir under VC, ignore the contents.
+deploy/signoz/common/clickhouse/user_scripts/*
+!deploy/signoz/common/clickhouse/user_scripts/.gitkeep

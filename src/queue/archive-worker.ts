@@ -1,26 +1,20 @@
+import { promises as fs } from "node:fs";
 import { type ConnectionOptions, type Job, type QueueEvents, Worker } from "bullmq";
 import type pino from "pino";
 import type { RequestedResult, ResolvedResult } from "../clients/wayback-direct-client";
-import { dayWindow } from "../lib/archive-time";
 import type { JobProgress, JobProgressQueue, JobProgressStage } from "../models/job-progress";
 import type { CacheService } from "../services/cache";
+import { rewriteHtmlUrls, stripWaybackToolbar } from "../lib/url-rewriter";
 import { assertDomainCrawlJob, assertExactUrlJob, QUEUE_CRAWL, QUEUE_EXACT } from "./jobs";
-
-const CDX_ENDPOINT = "https://web.archive.org/cdx/search/cdx";
-// Matches AVAILABILITY_TIMEOUT_MS / CDX_TIMEOUT_MS elsewhere — Wayback CDX
-// is often slow but not deeply unreachable, so giving each enumeration call
-// 30s avoids spurious TimeoutError on the first attempt.
-const CDX_ENUM_TIMEOUT_MS = 30_000;
 
 /**
  * Minimal structural shape of the direct-fetch client the workers need. Kept
  * local to avoid an import cycle with `lib/dependencies.ts`, which is the
  * module that constructs the real `DedupingDirectClient` and passes it in.
  *
- * `fetchAtRequestedTime` drives the exact worker: Wayback's `im_` endpoint
+ * `fetchAtRequestedTime` drives the exact worker: Wayback's `id_` endpoint
  * resolves the nearest snapshot server-side and redirects to it, sidestepping
- * the CDX endpoint entirely. `fetchAtResolvedTime` is still used by the crawl
- * worker, which already knows the exact timestamp from its CDX enumeration.
+ * the CDX endpoint entirely.
  */
 export interface ArchiveDirectClient {
 	fetchAtRequestedTime(url: string, ts: string): Promise<RequestedResult>;
@@ -39,10 +33,9 @@ export interface StartArchiveWorkersOpts {
 		| "lookup"
 	>;
 	directClient: ArchiveDirectClient;
-	/** Fetch implementation used to enumerate crawl URLs from CDX. Production
-	 *  passes the cached CDX fetch so repeated host crawls share Redis cache
-	 *  entries with snapshot-resolver and the size preflight. */
-	cdxFetch: typeof fetch;
+	/** Fire-and-forget callback to enqueue an archive-exact job for a discovered
+	 *  link. Keeps the crawl worker decoupled from BullMQ internals. */
+	enqueueExactJob: (url: string, time: string) => Promise<void>;
 	logger: pino.Logger;
 	bullmqPrefix: string;
 	workerConcurrency: number;
@@ -54,11 +47,7 @@ export interface ArchiveWorkers {
 	crawl: Worker;
 }
 
-// Lock-extender cadence for the crawl worker. The Worker holds the job lock
-// for `lockDuration` (120s); BullMQ re-queues stalled jobs after that. We
-// extend the lock every 110s so a multi-minute crawl never appears stalled.
 const CRAWL_LOCK_DURATION_MS = 120_000;
-const CRAWL_LOCK_EXTEND_INTERVAL_MS = CRAWL_LOCK_DURATION_MS - 10_000;
 // On a 429 from the direct fetch path we throttle the worker for one minute
 // before requeuing. Matches the Wayback cooldown documented in the original
 // downloader plan.
@@ -92,84 +81,6 @@ async function emitProgress(
 		);
 	}
 	logger.info(payload, `[worker:${queue}] ${stage}`);
-}
-
-interface CdxRow {
-	original: string;
-	timestamp: string;
-}
-
-/**
- * Apex-first host variant list for CDX enumeration. For www.example.com
- * returns ["example.com", "www.example.com"]; for example.com returns
- * ["example.com", "www.example.com"]. Single-label hostnames get no variant.
- * Always apex-first so the canonical form is tried before the www alias.
- */
-function hostVariants(host: string): string[] {
-	const h = host.toLowerCase();
-	if (h.startsWith("www.")) {
-		const apex = h.slice(4);
-		return apex.includes(".") ? [apex, h] : [h];
-	}
-	return h.includes(".") ? [h, `www.${h}`] : [h];
-}
-
-/**
- * Enumerate URLs captured for `host` within `[from, to]` via CDX. Returns one
- * row per unique URL (collapsed by `urlkey`) restricted to status 200. Throws
- * on transport/parse failure so BullMQ retries the crawl.
- */
-async function enumerateHostUrls(
-	host: string,
-	from: string,
-	to: string,
-	cdxFetch: typeof fetch,
-	logger: pino.Logger,
-): Promise<CdxRow[]> {
-	const params = new URLSearchParams();
-	params.set("url", `${host}/*`);
-	params.set("from", from);
-	params.set("to", to);
-	params.set("output", "json");
-	params.set("fl", "original,timestamp");
-	params.set("filter", "statuscode:200");
-	params.set("collapse", "urlkey");
-	const url = `${CDX_ENDPOINT}?${params.toString()}`;
-	const res = await cdxFetch(url, { signal: AbortSignal.timeout(CDX_ENUM_TIMEOUT_MS) });
-	if (!res.ok) {
-		throw new Error(`CDX enumeration ${res.status} for ${host}`);
-	}
-	const text = await res.text();
-	let json: unknown;
-	try {
-		json = JSON.parse(text);
-	} catch {
-		throw new Error(`CDX enumeration returned non-JSON for ${host}: ${text.slice(0, 80)}…`);
-	}
-	if (!Array.isArray(json) || json.length === 0) return [];
-	// First row is the field-name header (["original", "timestamp"]); drop it
-	// so the caller only sees data rows.
-	const rows =
-		Array.isArray(json[0]) && (json[0] as unknown[])[0] === "original" ? json.slice(1) : json;
-	const out: CdxRow[] = [];
-	for (const row of rows) {
-		if (!Array.isArray(row) || row.length < 2) continue;
-		const [original, timestamp] = row;
-		if (typeof original !== "string" || typeof timestamp !== "string") continue;
-		if (!/^\d{14}$/.test(timestamp)) continue;
-		try {
-			// CDX sometimes returns `originals` whose hostname is a subdomain or
-			// uppercase variant of the requested host; restrict to exact-match
-			// so the cache layout (keyed by URL.hostname) stays consistent.
-			const u = new URL(original);
-			if (u.hostname.toLowerCase() !== host.toLowerCase()) continue;
-		} catch {
-			continue;
-		}
-		out.push({ original, timestamp });
-	}
-	logger.debug({ host, from, to, count: out.length }, "[worker:crawl] CDX enumeration complete");
-	return out;
 }
 
 /**
@@ -206,7 +117,7 @@ export function startArchiveWorkers(opts: StartArchiveWorkersOpts): ArchiveWorke
 		connection,
 		cache,
 		directClient,
-		cdxFetch,
+		enqueueExactJob,
 		logger,
 		bullmqPrefix,
 		workerConcurrency,
@@ -306,121 +217,66 @@ export function startArchiveWorkers(opts: StartArchiveWorkersOpts): ArchiveWorke
 		},
 	);
 
-	let crawl!: Worker;
-	crawl = new Worker(
+	const crawl = new Worker(
 		QUEUE_CRAWL,
 		async (job) => {
 			try {
 				assertDomainCrawlJob(job.data);
 				const { host, time } = job.data;
-				const directory = cache.cacheDirForJob(time, host);
-
 				await emitProgress(job, QUEUE_CRAWL, "picked_up", logger, { host, time });
 
-				logger.info({ host, time, directory }, "[worker:crawl] start");
-
-				const extender = setInterval(() => {
-					// BullMQ guarantees `job.token` is defined inside an active processor;
-					// the type is `string | undefined` because the same Job class is used
-					// for jobs fetched outside the worker context.
-					// biome-ignore lint/style/noNonNullAssertion: token is guaranteed inside processor
-					const token = job.token!;
-					job.extendLock(token, CRAWL_LOCK_DURATION_MS).catch((e: unknown) =>
-						logger.warn(
-							{
-								jobId: job.id,
-								err: e instanceof Error ? e.message : String(e),
-							},
-							"[worker:crawl] extendLock failed",
-						),
-					);
-				}, CRAWL_LOCK_EXTEND_INTERVAL_MS);
-
-				// Crawl downloads everything in a day-wide window rather than a single
-				// resolved timestamp: a domain crawl is expected to span many distinct
-				// captures across siblings, not lock to one snapshot.
-				const { from, to } = dayWindow(time);
-
-				try {
-					let rows: CdxRow[] = [];
-					for (const variant of hostVariants(host)) {
-						rows = await enumerateHostUrls(variant, from, to, cdxFetch, logger);
-						if (rows.length > 0) break;
+				// Root may be http or https depending on when Wayback crawled it.
+				const rootCandidates = [`http://${host}/`, `https://${host}/`];
+				let rootHit: Awaited<ReturnType<typeof opts.cache.lookup>> = null;
+				let rootUrl = rootCandidates[0];
+				for (const candidate of rootCandidates) {
+					rootHit = await opts.cache.lookup(candidate, time);
+					if (rootHit) {
+						rootUrl = candidate;
+						break;
 					}
-					if (rows.length === 0) {
-						throw new Error(`${host} has no captures in [${from}..${to}]`);
+				}
+
+				if (!rootHit) {
+					// Root not cached yet — enqueue it and exit. The next crawl trigger
+					// after the root is served will find it cached and extract links.
+					logger.info({ host, time }, "[worker:crawl] root not cached — enqueuing exact job for root");
+					await enqueueExactJob(rootUrl, time);
+					await emitProgress(job, QUEUE_CRAWL, "download_done", logger, { host, time, filesSeen: 0 });
+					return;
+				}
+
+				await emitProgress(job, QUEUE_CRAWL, "download_start", logger, { host, time, filesSeen: 0 });
+
+				const raw = await fs.readFile(rootHit.absPath);
+				const { discoveredAssets } = rewriteHtmlUrls(
+					stripWaybackToolbar(raw.toString("utf-8")),
+					rootUrl,
+					time,
+					false,
+				);
+
+				const sameHostLinks = discoveredAssets.filter((a) => {
+					try {
+						return new URL(a.url).hostname === host;
+					} catch {
+						return false;
 					}
-					await emitProgress(job, QUEUE_CRAWL, "download_start", logger, {
+				});
+
+				let filesSeen = 0;
+				for (const link of sameHostLinks) {
+					await enqueueExactJob(link.url, link.embeddedTs);
+					filesSeen += 1;
+					await emitProgress(job, QUEUE_CRAWL, "download_file", logger, {
 						host,
 						time,
-						filesSeen: 0,
-					});
-
-					let filesSeen = 0;
-					await applyRateLimit(crawl, async () => {
-						let rateLimited = false;
-						for (const row of rows) {
-							let result: ResolvedResult;
-							try {
-								result = await directClient.fetchAtResolvedTime(row.original, row.timestamp);
-							} catch (err) {
-								logger.debug(
-									{
-										host,
-										url: row.original,
-										err: err instanceof Error ? err.message : String(err),
-									},
-									"[worker:crawl] direct fetch error",
-								);
-								continue;
-							}
-							if (
-								result.outcome === "fallback" &&
-								result.reason &&
-								RATE_LIMIT_RE.test(result.reason)
-							) {
-								// Stop hammering Wayback further within this job — remaining
-								// rows would just compound the rate-limit violation.
-								rateLimited = true;
-								break;
-							}
-							if (result.outcome !== "ok" || !result.body) continue;
-							try {
-								await cache.writeFile(row.original, time, result.body);
-								if (result.contentType) {
-									await cache.writeContentTypeSidecar(row.original, time, result.contentType);
-								}
-								filesSeen += 1;
-								await emitProgress(job, QUEUE_CRAWL, "download_file", logger, {
-									host,
-									time,
-									file: new URL(row.original).pathname,
-									filesSeen,
-								});
-							} catch (err) {
-								logger.warn(
-									{
-										host,
-										url: row.original,
-										err: err instanceof Error ? err.message : String(err),
-									},
-									"[worker:crawl] cache write failed",
-								);
-							}
-						}
-						if (rateLimited) {
-							throw new Error("direct fetch returned 429 during crawl");
-						}
-					});
-
-					await emitProgress(job, QUEUE_CRAWL, "download_done", logger, {
-						host,
-						time,
+						file: new URL(link.url).pathname,
 						filesSeen,
 					});
-				} finally {
-					clearInterval(extender);
 				}
+
+				await emitProgress(job, QUEUE_CRAWL, "download_done", logger, { host, time, filesSeen });
 			} catch (e) {
 				await emitProgress(job, QUEUE_CRAWL, "error", logger, {
 					error: e instanceof Error ? e.message : String(e),

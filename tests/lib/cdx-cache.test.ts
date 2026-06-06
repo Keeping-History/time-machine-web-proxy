@@ -33,12 +33,19 @@ describe("cachedCdxFetch", () => {
 		const body = JSON.stringify([["timestamp"], ["20010101000000"]]);
 		const fetchImpl = jest.fn().mockResolvedValue(new Response(body));
 
-		await cachedCdxFetch(cdxUrl("20010101000000"), {}, {
-			redis, logger, enabled: true, bullmqPrefix: "tm",
-			validate: validateJson,
-			fetchImpl: fetchImpl as unknown as typeof fetch,
-			now: () => NOW_MS,
-		});
+		await cachedCdxFetch(
+			cdxUrl("20010101000000"),
+			{},
+			{
+				redis,
+				logger,
+				enabled: true,
+				bullmqPrefix: "tm",
+				validate: validateJson,
+				fetchImpl: fetchImpl as unknown as typeof fetch,
+				now: () => NOW_MS,
+			},
+		);
 
 		expect(fetchImpl).toHaveBeenCalledTimes(1);
 		expect(redis.set).toHaveBeenCalledTimes(1);
@@ -49,11 +56,18 @@ describe("cachedCdxFetch", () => {
 		const redis = mkRedis(() => Promise.resolve(body));
 		const fetchImpl = jest.fn();
 
-		const res = await cachedCdxFetch(cdxUrl("20010101000000"), {}, {
-			redis, logger, enabled: true, bullmqPrefix: "tm",
-			validate: validateJson,
-			fetchImpl: fetchImpl as unknown as typeof fetch,
-		});
+		const res = await cachedCdxFetch(
+			cdxUrl("20010101000000"),
+			{},
+			{
+				redis,
+				logger,
+				enabled: true,
+				bullmqPrefix: "tm",
+				validate: validateJson,
+				fetchImpl: fetchImpl as unknown as typeof fetch,
+			},
+		);
 
 		expect(fetchImpl).not.toHaveBeenCalled();
 		expect(await res.text()).toBe(body);
@@ -63,59 +77,81 @@ describe("cachedCdxFetch", () => {
 		const redis = mkRedis();
 		const fetchImpl = jest.fn().mockResolvedValue(new Response("[]"));
 
-		await cachedCdxFetch(cdxUrl("20260527000000"), {}, {
-			redis, logger, enabled: true, bullmqPrefix: "tm",
-			validate: validateJson,
-			fetchImpl: fetchImpl as unknown as typeof fetch,
-			now: () => NOW_MS,
-		});
-
-		expect(redis.set).toHaveBeenCalledWith(
-			expect.any(String), "[]", "EX", 7 * 24 * 60 * 60,
+		await cachedCdxFetch(
+			cdxUrl("20260527000000"),
+			{},
+			{
+				redis,
+				logger,
+				enabled: true,
+				bullmqPrefix: "tm",
+				validate: validateJson,
+				fetchImpl: fetchImpl as unknown as typeof fetch,
+				now: () => NOW_MS,
+			},
 		);
+
+		expect(redis.set).toHaveBeenCalledWith(expect.any(String), "[]", "EX", 7 * 24 * 60 * 60);
 	});
 
 	it("TTL is 5 minutes when to= is within the last 24h (open-edge window)", async () => {
 		const redis = mkRedis();
 		const fetchImpl = jest.fn().mockResolvedValue(new Response("[]"));
 
-		await cachedCdxFetch(cdxUrl("20260529000000"), {}, {
-			redis, logger, enabled: true, bullmqPrefix: "tm",
-			validate: validateJson,
-			fetchImpl: fetchImpl as unknown as typeof fetch,
-			now: () => NOW_MS,
-		});
-
-		expect(redis.set).toHaveBeenCalledWith(
-			expect.any(String), "[]", "EX", 5 * 60,
+		await cachedCdxFetch(
+			cdxUrl("20260529000000"),
+			{},
+			{
+				redis,
+				logger,
+				enabled: true,
+				bullmqPrefix: "tm",
+				validate: validateJson,
+				fetchImpl: fetchImpl as unknown as typeof fetch,
+				now: () => NOW_MS,
+			},
 		);
+
+		expect(redis.set).toHaveBeenCalledWith(expect.any(String), "[]", "EX", 5 * 60);
 	});
 
 	it("TTL is 5 minutes when to= is absent", async () => {
 		const redis = mkRedis();
 		const fetchImpl = jest.fn().mockResolvedValue(new Response("[]"));
 
-		await cachedCdxFetch(cdxUrl(), {}, {
-			redis, logger, enabled: true, bullmqPrefix: "tm",
-			validate: validateJson,
-			fetchImpl: fetchImpl as unknown as typeof fetch,
-		});
-
-		expect(redis.set).toHaveBeenCalledWith(
-			expect.any(String), "[]", "EX", 5 * 60,
+		await cachedCdxFetch(
+			cdxUrl(),
+			{},
+			{
+				redis,
+				logger,
+				enabled: true,
+				bullmqPrefix: "tm",
+				validate: validateJson,
+				fetchImpl: fetchImpl as unknown as typeof fetch,
+			},
 		);
+
+		expect(redis.set).toHaveBeenCalledWith(expect.any(String), "[]", "EX", 5 * 60);
 	});
 
 	it("non-200 response is NOT cached", async () => {
 		const redis = mkRedis();
 		const fetchImpl = jest.fn().mockResolvedValue(new Response("error", { status: 500 }));
 
-		await cachedCdxFetch(cdxUrl("20010101000000"), {}, {
-			redis, logger, enabled: true, bullmqPrefix: "tm",
-			validate: validateJson,
-			fetchImpl: fetchImpl as unknown as typeof fetch,
-			now: () => NOW_MS,
-		});
+		await cachedCdxFetch(
+			cdxUrl("20010101000000"),
+			{},
+			{
+				redis,
+				logger,
+				enabled: true,
+				bullmqPrefix: "tm",
+				validate: validateJson,
+				fetchImpl: fetchImpl as unknown as typeof fetch,
+				now: () => NOW_MS,
+			},
+		);
 
 		expect(redis.set).not.toHaveBeenCalled();
 	});
@@ -125,12 +161,19 @@ describe("cachedCdxFetch", () => {
 		const badBody = "<html>503 Service Unavailable</html>";
 		const fetchImpl = jest.fn().mockResolvedValue(new Response(badBody));
 
-		const res = await cachedCdxFetch(cdxUrl("20010101000000"), {}, {
-			redis, logger, enabled: true, bullmqPrefix: "tm",
-			validate: validateJson,
-			fetchImpl: fetchImpl as unknown as typeof fetch,
-			now: () => NOW_MS,
-		});
+		const res = await cachedCdxFetch(
+			cdxUrl("20010101000000"),
+			{},
+			{
+				redis,
+				logger,
+				enabled: true,
+				bullmqPrefix: "tm",
+				validate: validateJson,
+				fetchImpl: fetchImpl as unknown as typeof fetch,
+				now: () => NOW_MS,
+			},
+		);
 
 		expect(redis.set).not.toHaveBeenCalled();
 		expect(res.ok).toBe(true);
@@ -141,12 +184,19 @@ describe("cachedCdxFetch", () => {
 		const redis = mkRedis();
 		const fetchImpl = jest.fn().mockResolvedValue(new Response("[]"));
 
-		await cachedCdxFetch(cdxUrl("20010101000000"), {}, {
-			redis, logger, enabled: true, bullmqPrefix: "tm",
-			validate: validateJson,
-			fetchImpl: fetchImpl as unknown as typeof fetch,
-			now: () => NOW_MS,
-		});
+		await cachedCdxFetch(
+			cdxUrl("20010101000000"),
+			{},
+			{
+				redis,
+				logger,
+				enabled: true,
+				bullmqPrefix: "tm",
+				validate: validateJson,
+				fetchImpl: fetchImpl as unknown as typeof fetch,
+				now: () => NOW_MS,
+			},
+		);
 
 		expect(redis.set).toHaveBeenCalledTimes(1);
 		expect((redis.set.mock.calls[0] as unknown[])[1]).toBe("[]");
@@ -155,11 +205,18 @@ describe("cachedCdxFetch", () => {
 	it("redis: null — bypasses cache and delegates directly to fetchImpl", async () => {
 		const fetchImpl = jest.fn().mockResolvedValue(new Response("[]"));
 
-		const res = await cachedCdxFetch(cdxUrl("20010101000000"), {}, {
-			redis: null, logger, enabled: true, bullmqPrefix: "tm",
-			validate: validateJson,
-			fetchImpl: fetchImpl as unknown as typeof fetch,
-		});
+		const res = await cachedCdxFetch(
+			cdxUrl("20010101000000"),
+			{},
+			{
+				redis: null,
+				logger,
+				enabled: true,
+				bullmqPrefix: "tm",
+				validate: validateJson,
+				fetchImpl: fetchImpl as unknown as typeof fetch,
+			},
+		);
 
 		expect(fetchImpl).toHaveBeenCalledTimes(1);
 		expect(res.ok).toBe(true);
@@ -169,11 +226,18 @@ describe("cachedCdxFetch", () => {
 		const redis = mkRedis();
 		const fetchImpl = jest.fn().mockResolvedValue(new Response("[]"));
 
-		await cachedCdxFetch(cdxUrl("20010101000000"), {}, {
-			redis, logger, enabled: false, bullmqPrefix: "tm",
-			validate: validateJson,
-			fetchImpl: fetchImpl as unknown as typeof fetch,
-		});
+		await cachedCdxFetch(
+			cdxUrl("20010101000000"),
+			{},
+			{
+				redis,
+				logger,
+				enabled: false,
+				bullmqPrefix: "tm",
+				validate: validateJson,
+				fetchImpl: fetchImpl as unknown as typeof fetch,
+			},
+		);
 
 		expect(redis.get).not.toHaveBeenCalled();
 		expect(redis.set).not.toHaveBeenCalled();
@@ -185,12 +249,19 @@ describe("cachedCdxFetch", () => {
 		const fetchImpl = jest.fn().mockResolvedValue(new Response("[]"));
 
 		await expect(
-			cachedCdxFetch(cdxUrl("20010101000000"), {}, {
-				redis, logger, enabled: true, bullmqPrefix: "tm",
-				validate: validateJson,
-				fetchImpl: fetchImpl as unknown as typeof fetch,
-				now: () => NOW_MS,
-			}),
+			cachedCdxFetch(
+				cdxUrl("20010101000000"),
+				{},
+				{
+					redis,
+					logger,
+					enabled: true,
+					bullmqPrefix: "tm",
+					validate: validateJson,
+					fetchImpl: fetchImpl as unknown as typeof fetch,
+					now: () => NOW_MS,
+				},
+			),
 		).resolves.toBeDefined();
 		expect(fetchImpl).toHaveBeenCalledTimes(1);
 	});
@@ -202,12 +273,19 @@ describe("cachedCdxFetch", () => {
 		};
 		const fetchImpl = jest.fn().mockResolvedValue(new Response("[]"));
 
-		const res = await cachedCdxFetch(cdxUrl("20010101000000"), {}, {
-			redis, logger, enabled: true, bullmqPrefix: "tm",
-			validate: validateJson,
-			fetchImpl: fetchImpl as unknown as typeof fetch,
-			now: () => NOW_MS,
-		});
+		const res = await cachedCdxFetch(
+			cdxUrl("20010101000000"),
+			{},
+			{
+				redis,
+				logger,
+				enabled: true,
+				bullmqPrefix: "tm",
+				validate: validateJson,
+				fetchImpl: fetchImpl as unknown as typeof fetch,
+				now: () => NOW_MS,
+			},
+		);
 
 		expect(res.ok).toBe(true);
 	});
@@ -215,16 +293,25 @@ describe("cachedCdxFetch", () => {
 	it("single-flight — 10 concurrent identical calls invoke fetchImpl exactly once", async () => {
 		const redis = mkRedis();
 		let resolveBody!: (r: Response) => void;
-		const pending = new Promise<Response>((res) => { resolveBody = res; });
+		const pending = new Promise<Response>((res) => {
+			resolveBody = res;
+		});
 		const fetchImpl = jest.fn().mockReturnValue(pending);
 
 		const calls = Array.from({ length: 10 }, () =>
-			cachedCdxFetch(cdxUrl("20010101000000"), {}, {
-				redis, logger, enabled: true, bullmqPrefix: "tm",
-				validate: validateJson,
-				fetchImpl: fetchImpl as unknown as typeof fetch,
-				now: () => NOW_MS,
-			}),
+			cachedCdxFetch(
+				cdxUrl("20010101000000"),
+				{},
+				{
+					redis,
+					logger,
+					enabled: true,
+					bullmqPrefix: "tm",
+					validate: validateJson,
+					fetchImpl: fetchImpl as unknown as typeof fetch,
+					now: () => NOW_MS,
+				},
+			),
 		);
 
 		resolveBody(new Response("[]"));

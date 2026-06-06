@@ -117,7 +117,7 @@ export class TimeMachineService {
 		} catch (e) {
 			const status = errorHasStatus(e) ? e.status : 500;
 			const message = e instanceof Error ? e.message : "crawl enqueue failed";
-			if (status >= 500) this.logger.error({ error: e }, "[TimeMachine] crawl enqueue failed");
+			if (status >= 500) this.logger.error({ err: e }, "[TimeMachine] crawl enqueue failed");
 			res.setHeader("Content-Type", "application/json");
 			res.writeHead(status).end(JSON.stringify({ error: message }));
 			this.logRequest(req, status, start);
@@ -167,7 +167,7 @@ export class TimeMachineService {
 					res.writeHead(200).end(JSON.stringify(status));
 					this.logRequest(req, 200, start);
 				} catch (e) {
-					this.logger.error({ error: e }, "[TimeMachine] status probe failed");
+					this.logger.error({ err: e }, "[TimeMachine] status probe failed");
 					res.setHeader("Content-Type", "application/json");
 					res
 						.writeHead(500)
@@ -307,7 +307,10 @@ export class TimeMachineService {
 			} else if (status >= 400 && status < 500) {
 				res.writeHead(status).end(`Archive returned ${status}`);
 			} else {
-				this.logger.error({ error: e }, "[TimeMachine] Upstream request failed");
+				// `err:` (not `error:`) so pino's default Error serializer unwraps
+				// message/stack/cause — otherwise the line ships as `error: {}` and
+				// hides the failure (e.g. an undici `TypeError: fetch failed`).
+				this.logger.error({ err: e }, "[TimeMachine] Upstream request failed");
 				res.writeHead(500).end("TimeMachine error: upstream request failed");
 			}
 			this.logRequest(req, status, start);
@@ -364,7 +367,7 @@ export class TimeMachineService {
 		} catch (e) {
 			const status = errorHasStatus(e) ? e.status : 500;
 			if (status >= 500) {
-				this.logger.error({ error: e }, "[TimeMachine SSE] Upstream request failed");
+				this.logger.error({ err: e }, "[TimeMachine SSE] Upstream request failed");
 			}
 			writeEvent("error", {
 				status,
@@ -493,7 +496,7 @@ export class TimeMachineService {
 				.catch((e: unknown) => {
 					const status = errorHasStatus(e) ? e.status : 500;
 					if (status >= 500)
-						this.logger.error({ error: e }, "[TimeMachine WS] Upstream request failed");
+						this.logger.error({ err: e }, "[TimeMachine WS] Upstream request failed");
 					if (ws.readyState !== ws.OPEN) return;
 					ws.send(
 						JSON.stringify({

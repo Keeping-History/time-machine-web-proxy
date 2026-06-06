@@ -15,7 +15,6 @@ import { type DomainCrawlJob, type ExactUrlJob, QUEUE_CRAWL, QUEUE_EXACT } from 
 import { CacheService } from "../services/cache";
 import { ProxyService } from "../services/proxy";
 import type { UrlValidatorModule } from "../services/time-machine";
-import { cachedCdxFetch } from "./cdx-cache";
 import { createLogger } from "./logger";
 import type { RotatingProxyDispatcher } from "./outbound-proxy";
 import { createRedis } from "./redis";
@@ -125,33 +124,7 @@ export class Dependencies {
 
 		const cache = new CacheService(config, logger);
 
-		const isValidCdxJson = (body: string): boolean => {
-			try {
-				return Array.isArray(JSON.parse(body));
-			} catch {
-				return false;
-			}
-		};
-		const cachedFetchImpl: typeof fetch = (input, init) =>
-			cachedCdxFetch(String(input), init ?? {}, {
-				redis,
-				logger,
-				enabled: config.cdxCacheEnabled,
-				bullmqPrefix: config.bullmqPrefix,
-				validate: isValidCdxJson,
-			});
-
 		const directClient = buildDirectClient(config, logger);
-		const workers = startArchiveWorkers({
-			connection: redis,
-			cache,
-			directClient,
-			cdxFetch: cachedFetchImpl,
-			logger,
-			bullmqPrefix: config.bullmqPrefix,
-			workerConcurrency: config.workerConcurrency,
-			workerRateLimitPerSec: config.workerRateLimitPerSec,
-		});
 		const archiveJobClient = new ArchiveJobClient(
 			exactQueue,
 			crawlQueue,
@@ -159,6 +132,16 @@ export class Dependencies {
 			logger,
 			config.domainCrawlEnabled,
 		);
+		const workers = startArchiveWorkers({
+			connection: redis,
+			cache,
+			directClient,
+			enqueueExactJob: (url, time) => archiveJobClient.enqueueExact(url, time),
+			logger,
+			bullmqPrefix: config.bullmqPrefix,
+			workerConcurrency: config.workerConcurrency,
+			workerRateLimitPerSec: config.workerRateLimitPerSec,
+		});
 		const proxy = new ProxyService(cache, archiveJobClient, logger, config, redis, directClient);
 		const validator: UrlValidatorModule = { validateTargetUrl, isHostWhitelisted };
 

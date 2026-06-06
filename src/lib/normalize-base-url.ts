@@ -1,19 +1,9 @@
 /**
- * Inlined copy of `normalizeBaseUrlInput` from
- * `wayback-machine-downloader/lib/utils.js` (verbatim port of v0.5.0 source).
- *
- * Why this file exists: the upstream package's `package.json` `exports` field
- * does not include `./lib/utils.js`. esbuild and strict ESM resolvers refuse
- * to resolve `wayback-machine-downloader/lib/utils.js` and the bundle build
- * fails with `The path "./lib/utils.js" is not exported by package`.
- *
- * We pin to v0.5.0 (see package.json — tarball URL with sha512 integrity), so
- * the source we copied here cannot drift silently. If the package's `exports`
- * is widened in a future release, this file can be deleted and the worker can
- * re-import the symbol from the package.
- *
- * Source: node_modules/wayback-machine-downloader/lib/utils.js (lines 29-86
- * of the 0.5.0 tarball).
+ * Normalize an arbitrary user-supplied base URL into the canonical form and
+ * the set of host/protocol variants the snapshot resolver queries against
+ * CDX. `variants` is the cartesian product of {http, https} × {bareHost,
+ * www.bareHost}, plus the original host if it differed from bareHost. The
+ * resolver hits one CDX query per variant and aggregates the results.
  */
 import { domainToUnicode } from "node:url";
 
