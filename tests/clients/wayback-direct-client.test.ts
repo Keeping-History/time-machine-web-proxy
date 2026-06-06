@@ -234,7 +234,7 @@ describe("WaybackDirectClient.fetchAtRequestedTime", () => {
 		const client = makeClient({ ratePerSecond: 1000, burst: 1000 });
 		await client.fetchAtRequestedTime("http://example.com/", "20200101000000");
 		expect(globalThis.fetch).toHaveBeenCalledWith(
-			"https://web.archive.org/web/20200101000000im_/http://example.com/",
+			"https://web.archive.org/web/20200101000000id_/http://example.com/",
 			expect.objectContaining({ redirect: "follow" }),
 		);
 	});
@@ -304,7 +304,7 @@ describe("WaybackDirectClient.fetchAtRequestedTime", () => {
 		await client.fetchAtRequestedTime("http://example.com/", "20200101000000");
 		expect(logger.info).toHaveBeenCalledWith(
 			expect.objectContaining({
-				archiveUrl: expect.stringContaining("20200101000000im_"),
+				archiveUrl: expect.stringContaining("20200101000000id_"),
 				status: 200,
 			}),
 			expect.stringContaining("response"),
@@ -318,7 +318,7 @@ describe("WaybackDirectClient.fetchAtRequestedTime", () => {
 		const client = new WaybackDirectClient({ logger, ratePerSecond: 1000, burst: 1000 });
 		await client.fetchAtRequestedTime("http://example.com/", "20200101000000");
 		expect(logger.warn).toHaveBeenCalledWith(
-			expect.objectContaining({ archiveUrl: expect.stringContaining("im_") }),
+			expect.objectContaining({ archiveUrl: expect.stringContaining("id_") }),
 			expect.stringContaining("fetch error"),
 		);
 		expect(logger.debug).not.toHaveBeenCalledWith(

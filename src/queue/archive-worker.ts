@@ -235,12 +235,12 @@ export function startArchiveWorkers(opts: StartArchiveWorkersOpts): ArchiveWorke
 				logger.info({ url, time, directory }, "[worker:exact] start");
 
 				await emitProgress(job, QUEUE_EXACT, "download_start", logger, { url, time });
-				// Skip CDX entirely. Wayback's `im_` endpoint redirects to the
+				// Skip CDX entirely. Wayback's `id_` endpoint redirects to the
 				// nearest available capture, so a single round-trip handles both
 				// snapshot resolution and download in one go. CDX is a separate
 				// Wayback service that throttles independently — relying on it
 				// here produced "all CDX queries failed" job failures even when
-				// the `im_` path was healthy.
+				// the `id_` path was healthy.
 				let resolvedTime: string | undefined;
 				let notFound = false;
 				await applyRateLimit(exact, async () => {

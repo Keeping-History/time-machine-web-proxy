@@ -167,11 +167,12 @@ class TokenBucket {
 /**
  * Direct Wayback Machine fetch client with two modes:
  *
- * - `fetchAtResolvedTime`: fetches `id_` URLs (no redirect follow). 3xx → fallback.
- * - `fetchAtRequestedTime`: fetches `im_` URLs (follow redirects), extracts
- *   resolvedTime from the final response URL.
+ * - `fetchAtResolvedTime`: fetches `id_` URLs for an exact known timestamp.
+ * - `fetchAtRequestedTime`: fetches `id_` URLs for a requested timestamp that
+ *   may not have a capture; Wayback redirects to the nearest snapshot.
+ *   Extracts resolvedTime from the final response URL.
  *
- * Both methods are rate-limited by a shared token bucket.
+ * Both methods use `redirect: "follow"` and share a token bucket + circuit breaker.
  */
 export class WaybackDirectClient {
 	private readonly bucket: TokenBucket;
@@ -198,13 +199,13 @@ export class WaybackDirectClient {
 
 	/**
 	 * Fetches the Wayback snapshot at exactly the given timestamp using the
-	 * `id_` modifier (raw content, no Wayback toolbar). Uses `redirect: 'manual'`
-	 * so any 3xx is treated as a fallback rather than followed.
+	 * `id_` modifier (raw content, no Wayback toolbar). Uses `redirect: "follow"`
+	 * so Wayback redirects to the nearest capture are transparently followed.
 	 *
 	 * Returns:
 	 *   - `ok` + body/contentType on 200
 	 *   - `not_found` on 404
-	 *   - `fallback` on any 3xx, other 4xx, 5xx, timeout, or bad timestamp
+	 *   - `fallback` on 4xx/5xx, timeout, redirect-limit exceeded, or bad timestamp
 	 */
 	async fetchAtResolvedTime(url: string, ts: string): Promise<ResolvedResult> {
 		if (!TIMESTAMP_RE.test(ts)) {
@@ -271,9 +272,9 @@ export class WaybackDirectClient {
 	}
 
 	/**
-	 * Fetches the Wayback snapshot using the `im_` modifier which follows
-	 * redirects to the nearest available capture. Extracts the resolved
-	 * timestamp from the final response URL.
+	 * Fetches the Wayback snapshot using the `id_` modifier for a requested
+	 * timestamp that may not have a capture. Wayback redirects to the nearest
+	 * snapshot; the resolved timestamp is extracted from the final response URL.
 	 *
 	 * Returns:
 	 *   - `ok` + body/contentType/resolvedTime on 200
@@ -298,7 +299,7 @@ export class WaybackDirectClient {
 			await this.bucket.consume();
 		}
 
-		const archiveUrl = `${WAYBACK_BASE}/${ts}im_/${url}`;
+		const archiveUrl = `${WAYBACK_BASE}/${ts}id_/${url}`;
 		this.log.debug({ archiveUrl, ts }, "[direct] requested-fetch");
 
 		let res: Response;
