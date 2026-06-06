@@ -59,6 +59,7 @@ const makeClient = (): jest.Mocked<ArchiveJobClientPort> => ({
 	enqueueExactAndWait: jest.fn().mockResolvedValue(undefined),
 	enqueueExact: jest.fn().mockResolvedValue(undefined),
 	enqueueDomainCrawl: jest.fn().mockResolvedValue(undefined),
+	enqueueCrawlChunks: jest.fn().mockResolvedValue(undefined),
 });
 
 const makeRedis = (setReturn: "OK" | null = "OK") =>

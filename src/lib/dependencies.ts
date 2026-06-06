@@ -11,7 +11,14 @@ import {
 import type { Config } from "../models/config";
 import type { SystemStatus } from "../models/status";
 import { attachQueueLogger, startArchiveWorkers } from "../queue/archive-worker";
-import { type DomainCrawlJob, type ExactUrlJob, QUEUE_CRAWL, QUEUE_EXACT } from "../queue/jobs";
+import {
+	type DomainCrawlChunkJob,
+	type DomainCrawlJob,
+	type ExactUrlJob,
+	QUEUE_CRAWL,
+	QUEUE_CRAWL_CHUNK,
+	QUEUE_EXACT,
+} from "../queue/jobs";
 import { CacheService } from "../services/cache";
 import { ProxyService } from "../services/proxy";
 import type { UrlValidatorModule } from "../services/time-machine";
@@ -71,6 +78,7 @@ export interface DependencyStore {
 	redis: IORedis;
 	exactQueue: Queue<ExactUrlJob>;
 	crawlQueue: Queue<DomainCrawlJob>;
+	chunkQueue: Queue<DomainCrawlChunkJob>;
 	exactEvents: QueueEvents;
 	crawlEvents: QueueEvents;
 	workers: { exact: Worker; crawl: Worker };
@@ -111,6 +119,10 @@ export class Dependencies {
 			connection: redis,
 			prefix: config.bullmqPrefix,
 		});
+		const chunkQueue = new Queue<DomainCrawlChunkJob>(QUEUE_CRAWL_CHUNK, {
+			connection: redis,
+			prefix: config.bullmqPrefix,
+		});
 		const exactEvents = new QueueEvents(QUEUE_EXACT, {
 			connection: redis,
 			prefix: config.bullmqPrefix,
@@ -128,6 +140,7 @@ export class Dependencies {
 		const archiveJobClient = new ArchiveJobClient(
 			exactQueue,
 			crawlQueue,
+			chunkQueue,
 			exactEvents,
 			logger,
 			config.domainCrawlEnabled,
@@ -151,6 +164,7 @@ export class Dependencies {
 			redis,
 			exactQueue,
 			crawlQueue,
+			chunkQueue,
 			exactEvents,
 			crawlEvents,
 			workers,
@@ -171,10 +185,11 @@ export class Dependencies {
 	 * an unhealthy queue can't mask the rest of the report.
 	 */
 	async getStatus(): Promise<SystemStatus> {
-		const { redis, exactQueue, crawlQueue } = this.deps;
-		const [exactCounts, crawlCounts] = await Promise.all([
+		const { redis, exactQueue, crawlQueue, chunkQueue } = this.deps;
+		const [exactCounts, crawlCounts, chunkCounts] = await Promise.all([
 			safeJobCounts(exactQueue),
 			safeJobCounts(crawlQueue),
+			safeJobCounts(chunkQueue),
 		]);
 		return {
 			redis: { status: (redis as IORedis & { status?: string }).status ?? "unknown" },
@@ -185,18 +200,21 @@ export class Dependencies {
 			queues: {
 				[QUEUE_EXACT]: exactCounts,
 				[QUEUE_CRAWL]: crawlCounts,
+				[QUEUE_CRAWL_CHUNK]: chunkCounts,
 			},
 		};
 	}
 
 	async close(): Promise<void> {
-		const { workers, exactQueue, crawlQueue, exactEvents, crawlEvents, redis } = this.deps;
+		const { workers, exactQueue, crawlQueue, chunkQueue, exactEvents, crawlEvents, redis } =
+			this.deps;
 		// 1. Drain workers first so in-flight jobs complete
 		await Promise.all([workers.exact.close(), workers.crawl.close()]);
 		// 2. Close queues + events together
 		await Promise.all([
 			exactQueue.close(),
 			crawlQueue.close(),
+			chunkQueue.close(),
 			exactEvents.close(),
 			crawlEvents.close(),
 		]);
