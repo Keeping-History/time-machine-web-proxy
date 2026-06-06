@@ -155,13 +155,13 @@ export class ProxyService {
 							}
 						})
 						.catch((err: unknown) => {
-							this.logger.info(
+							this.logger.warn(
 								{
 									url: asset.url,
 									ts: asset.embeddedTs,
 									error: err instanceof Error ? err.message : String(err),
 								},
-								"[prewarm] asset prefetch error (ignored)",
+								"[prewarm] asset prefetch error",
 							);
 						});
 				}

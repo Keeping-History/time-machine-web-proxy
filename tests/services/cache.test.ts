@@ -711,6 +711,23 @@ describe("CacheService.writeFile", () => {
 		expect(mockFs.writeFile).not.toHaveBeenCalled();
 		expect(mockFs.rename).not.toHaveBeenCalled();
 	});
+
+	it("concurrent writes to the same dest deduplicate — exactly one tmp write and one rename", async () => {
+		// Reproduces the prewarm race: two concurrent prewarm tasks download the
+		// same asset and both call writeFile. Only one rename must reach the fs;
+		// the second caller piggybacks on the first's in-flight promise.
+		const svc = makeService();
+		const url = "https://example.com/page.html";
+		const data = Buffer.from("content");
+
+		await Promise.all([
+			svc.writeFile(url, TIME, data),
+			svc.writeFile(url, TIME, data),
+		]);
+
+		expect(mockFs.rename).toHaveBeenCalledTimes(1);
+		expect(mockFs.writeFile).toHaveBeenCalledTimes(1);
+	});
 });
 
 describe("CacheService.handleCacheClear (v2)", () => {
