@@ -220,16 +220,28 @@ export class CacheService {
 	 *   4. `application/octet-stream` fallback.
 	 */
 	private async resolveContentType(absPath: string, url: string, time: string): Promise<string> {
+		const ext = extname(absPath);
+		const fromExt = ext ? mimeLookup(ext) : false;
+
 		try {
 			const sidecar = this.buildPerUrlSubpath(time, url, CONTENT_TYPE_SUBDIR);
 			const raw = await fs.readFile(sidecar, "utf-8");
 			const trimmed = raw?.trim();
-			if (trimmed) return trimmed;
+			if (trimmed) {
+				// Old servers (and occasional Wayback error responses) return
+				// text/html for CSS/JS/image URLs. Browsers in strict mode reject
+				// stylesheets and scripts served with the wrong MIME type. When the
+				// file extension unambiguously maps to a non-HTML type, prefer it
+				// over a text/html sidecar.
+				if (fromExt && fromExt !== "text/html" && trimmed.startsWith("text/html")) {
+					return fromExt;
+				}
+				return trimmed;
+			}
 		} catch {
 			/* no sidecar — fall through */
 		}
-		const ext = extname(absPath);
-		const fromExt = mimeLookup(ext);
+
 		if (fromExt) return fromExt;
 		// Only sniff when there's no extension at all. Files with an unknown
 		// extension (`.unknownext`) are likely custom binaries; sniffing them

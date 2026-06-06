@@ -145,6 +145,55 @@ describe("CacheService.lookup (v2)", () => {
 		expect(result?.contentType).toBe("text/html; charset=utf-8");
 	});
 
+	it("overrides a text/html sidecar with the extension MIME type for non-HTML assets", async () => {
+		// Old servers (and Wayback error responses) return text/html for CSS/JS/
+		// image URLs. Browsers in strict mode refuse to apply such stylesheets or
+		// execute scripts. When the extension unambiguously maps to a non-HTML
+		// type, the extension wins over the bad sidecar.
+		const makeMock = (url: string, expected: string) => async () => {
+			(mockFs.access as jest.Mock).mockResolvedValue(undefined);
+			(mockFs.readFile as jest.Mock).mockImplementation((p: string) => {
+				if (p.includes("/.content-types/")) return Promise.resolve("text/html");
+				if (p.endsWith(".resolved-time"))
+					return Promise.reject(Object.assign(new Error("ENOENT"), { code: "ENOENT" }));
+				return Promise.resolve(Buffer.from(""));
+			});
+			const result = await makeService().lookup(url, TIME);
+			expect(result?.contentType).toBe(expected);
+		};
+
+		await makeMock("https://www.sun.com/template/sunstyle.css", "text/css")();
+		await makeMock("https://example.com/app.js", "text/javascript")();
+		await makeMock("https://example.com/logo.png", "image/png")();
+	});
+
+	it("preserves sidecar charset for CSS when sidecar type is correct", async () => {
+		(mockFs.access as jest.Mock).mockResolvedValue(undefined);
+		(mockFs.readFile as jest.Mock).mockImplementation((p: string) => {
+			if (p.includes("/.content-types/")) return Promise.resolve("text/css; charset=utf-8");
+			if (p.endsWith(".resolved-time"))
+				return Promise.reject(Object.assign(new Error("ENOENT"), { code: "ENOENT" }));
+			return Promise.resolve(Buffer.from(""));
+		});
+		const result = await makeService().lookup(
+			"https://www.sun.com/template/sunstyle.css",
+			TIME,
+		);
+		expect(result?.contentType).toBe("text/css; charset=utf-8");
+	});
+
+	it("does not override sidecar when extension is .html and sidecar is text/html", async () => {
+		(mockFs.access as jest.Mock).mockResolvedValue(undefined);
+		(mockFs.readFile as jest.Mock).mockImplementation((p: string) => {
+			if (p.includes("/.content-types/")) return Promise.resolve("text/html; charset=utf-8");
+			if (p.endsWith(".resolved-time"))
+				return Promise.reject(Object.assign(new Error("ENOENT"), { code: "ENOENT" }));
+			return Promise.resolve(Buffer.from(""));
+		});
+		const result = await makeService().lookup("https://example.com/page.html", TIME);
+		expect(result?.contentType).toBe("text/html; charset=utf-8");
+	});
+
 	it("sniffs HTML for extensionless URLs when no sidecar exists (legacy cache)", async () => {
 		// The user-reported bug: http://www.yahoo.com/r/ci has no extension,
 		// mime-types returns false, and pre-fix the response went out as
