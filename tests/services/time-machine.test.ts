@@ -52,6 +52,7 @@ const config: Config = {
 	notFoundTtlDays: 30,
 	cdxCacheEnabled: true,
 	lockTime: false,
+	domainRemap: {},
 };
 
 type ProxyMock = jest.Mocked<Pick<ProxyService, "fetch" | "triggerDomainCrawl">>;

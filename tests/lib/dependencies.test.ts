@@ -112,6 +112,7 @@ const baseConfig: Config = {
 	notFoundTtlDays: 30,
 	cdxCacheEnabled: true,
 	lockTime: false,
+	domainRemap: {},
 };
 
 describe("Dependencies (TASK-010)", () => {

@@ -1,4 +1,5 @@
 import { mkdirSync } from "node:fs";
+import { parseDomainRemap } from "./hostname-normalizer";
 import type { Config, OutboundProxyChooser } from "../models/config";
 
 const parseSnapshotWindowDays = (csv: string): number[] => {
@@ -208,6 +209,9 @@ export function loadConfig(): Config {
 
 		// URL rewriter — omit timestamp segment from rewritten links
 		lockTime: parseBool(process.env.LOCK_TIME, "LOCK_TIME", false),
+
+		// Hostname normalizer
+		domainRemap: parseDomainRemap(process.env.DOMAIN_REMAP),
 	};
 }
 

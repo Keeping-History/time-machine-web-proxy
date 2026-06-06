@@ -89,6 +89,13 @@ export interface Config {
 	 *  than `/web/{ts}/{url}`, so navigation always falls back to the
 	 *  configured default time. Env: LOCK_TIME (default false). */
 	lockTime: boolean;
+
+	// — Hostname normalizer —
+	/** Explicit hostname rewrites applied before the Wayback Machine lookup.
+	 *  Env: DOMAIN_REMAP (comma-separated `from=to` pairs, e.g.
+	 *  `www.msnbc.com.edgesuite.net=www.msnbc.com`). Takes precedence over
+	 *  CDN suffix stripping. */
+	domainRemap: Record<string, string>;
 }
 
 export type OutboundProxyChooser = "sequential" | "random";
