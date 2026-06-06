@@ -112,6 +112,7 @@ const baseConfig: Config = {
 	notFoundTtlDays: 30,
 	cdxCacheEnabled: true,
 	lockTime: false,
+	crawlWindowDays: 30,
 	domainRemap: {},
 };
 

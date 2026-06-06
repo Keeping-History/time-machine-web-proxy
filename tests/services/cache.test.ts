@@ -145,27 +145,26 @@ describe("CacheService.lookup (v2)", () => {
 		expect(result?.contentType).toBe("text/html; charset=utf-8");
 	});
 
-	it("overrides a text/html sidecar with the extension MIME type for non-HTML assets", async () => {
-		// Old servers (and Wayback error responses) return text/html for CSS/JS/
-		// image URLs. Browsers in strict mode refuse to apply such stylesheets or
-		// execute scripts. When the extension unambiguously maps to a non-HTML
-		// type, the extension wins over the bad sidecar.
-		const makeMock = (url: string, expected: string) => async () => {
+	it.each([
+		["text/html", "https://www.sun.com/template/sunstyle.css", "text/css"],
+		["text/plain", "https://www.sun.com/template/sunstyle.css", "text/css"],
+		["application/x-pointplus", "https://www.sun.com/template/sunstyle.css", "text/css"],
+		["text/html", "https://example.com/app.js", "text/javascript"],
+		["text/html", "https://example.com/logo.png", "image/png"],
+	])(
+		"overrides sidecar '%s' with extension MIME type for %s",
+		async (sidecarType, url, expected) => {
 			(mockFs.access as jest.Mock).mockResolvedValue(undefined);
 			(mockFs.readFile as jest.Mock).mockImplementation((p: string) => {
-				if (p.includes("/.content-types/")) return Promise.resolve("text/html");
+				if (p.includes("/.content-types/")) return Promise.resolve(sidecarType);
 				if (p.endsWith(".resolved-time"))
 					return Promise.reject(Object.assign(new Error("ENOENT"), { code: "ENOENT" }));
 				return Promise.resolve(Buffer.from(""));
 			});
 			const result = await makeService().lookup(url, TIME);
 			expect(result?.contentType).toBe(expected);
-		};
-
-		await makeMock("https://www.sun.com/template/sunstyle.css", "text/css")();
-		await makeMock("https://example.com/app.js", "text/javascript")();
-		await makeMock("https://example.com/logo.png", "image/png")();
-	});
+		},
+	);
 
 	it("preserves sidecar charset for CSS when sidecar type is correct", async () => {
 		(mockFs.access as jest.Mock).mockResolvedValue(undefined);

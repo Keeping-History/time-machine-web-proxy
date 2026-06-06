@@ -228,13 +228,17 @@ export class CacheService {
 			const raw = await fs.readFile(sidecar, "utf-8");
 			const trimmed = raw?.trim();
 			if (trimmed) {
-				// Old servers (and occasional Wayback error responses) return
-				// text/html for CSS/JS/image URLs. Browsers in strict mode reject
-				// stylesheets and scripts served with the wrong MIME type. When the
-				// file extension unambiguously maps to a non-HTML type, prefer it
-				// over a text/html sidecar.
-				if (fromExt && fromExt !== "text/html" && trimmed.startsWith("text/html")) {
-					return fromExt;
+				// Old servers (and Wayback error responses) return wrong MIME types
+				// for CSS/JS/image URLs (e.g. text/html, text/plain,
+				// application/x-pointplus). Browsers in strict mode refuse to apply
+				// stylesheets or execute scripts with non-matching types. When the
+				// file extension maps to a known MIME type and the sidecar's base
+				// type disagrees, the extension wins. When they agree (e.g. sidecar
+				// is "text/css; charset=utf-8"), the sidecar is used verbatim to
+				// preserve charset and parameter metadata.
+				if (fromExt) {
+					const sidecarBase = trimmed.split(";")[0].trim().toLowerCase();
+					if (sidecarBase !== fromExt) return fromExt;
 				}
 				return trimmed;
 			}
