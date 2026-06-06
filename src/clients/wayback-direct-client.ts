@@ -230,7 +230,7 @@ export class WaybackDirectClient {
 		let res: Response;
 		try {
 			res = await globalThis.fetch(archiveUrl, {
-				redirect: "manual",
+				redirect: "follow",
 				signal: AbortSignal.timeout(this.timeoutMs),
 			});
 		} catch (e) {
@@ -253,14 +253,6 @@ export class WaybackDirectClient {
 		}
 		this.breaker.recordSuccess();
 		this.log.info({ archiveUrl, status: res.status }, "[wayback-direct] response");
-
-		if (res.status >= 300 && res.status < 400) {
-			this.log.debug(
-				{ archiveUrl, status: res.status },
-				"[wayback-direct] fetchAtResolvedTime redirect → fallback",
-			);
-			return { outcome: "fallback", reason: `redirect-${res.status}` };
-		}
 
 		if (res.status === 404) {
 			return { outcome: "not_found" };

@@ -89,7 +89,7 @@ describe("WaybackDirectClient.fetchAtResolvedTime", () => {
 		await client.fetchAtResolvedTime("http://example.com/page", "20200615120000");
 		expect(globalThis.fetch).toHaveBeenCalledWith(
 			"https://web.archive.org/web/20200615120000id_/http://example.com/page",
-			expect.objectContaining({ redirect: "manual" }),
+			expect.objectContaining({ redirect: "follow" }),
 		);
 	});
 
@@ -100,13 +100,16 @@ describe("WaybackDirectClient.fetchAtResolvedTime", () => {
 		expect(result.outcome).toBe("not_found");
 	});
 
-	it("returns fallback on 3xx (redirect: manual)", async () => {
+	it("returns fallback with http-3xx reason when redirect chain exhausted (edge case)", async () => {
+		// With redirect: 'follow', fetch follows 3xx internally. This test covers
+		// the edge case where a 3xx status somehow reaches the handler (e.g. max
+		// redirects exceeded and fetch returns a status rather than throwing).
 		for (const status of [301, 302, 307, 308]) {
 			globalThis.fetch = jest.fn().mockResolvedValue(makeFetchResponse({ status }));
 			const client = makeClient({ ratePerSecond: 1000, burst: 1000 });
 			const result = await client.fetchAtResolvedTime("http://example.com/", "20200101000000");
 			expect(result.outcome).toBe("fallback");
-			expect(result.reason).toMatch(/^redirect-/);
+			expect(result.reason).toBe(`http-${status}`);
 		}
 	});
 
@@ -142,12 +145,12 @@ describe("WaybackDirectClient.fetchAtResolvedTime", () => {
 		expect(globalThis.fetch).not.toHaveBeenCalled();
 	});
 
-	it("uses redirect: 'manual' in the fetch call", async () => {
+	it("uses redirect: 'follow' so 3xx responses from Wayback are transparently followed", async () => {
 		globalThis.fetch = jest.fn().mockResolvedValue(makeFetchResponse({ status: 200, body: "" }));
 		const client = makeClient({ ratePerSecond: 1000, burst: 1000 });
 		await client.fetchAtResolvedTime("http://example.com/", "20200101000000");
 		const [, opts] = (globalThis.fetch as jest.Mock).mock.calls[0] as [string, RequestInit];
-		expect(opts.redirect).toBe("manual");
+		expect(opts.redirect).toBe("follow");
 	});
 
 	it("passes AbortSignal.timeout to fetch (respects timeoutMs)", async () => {
