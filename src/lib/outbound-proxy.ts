@@ -1,5 +1,5 @@
 import type pino from "pino";
-import { Dispatcher, Pool, ProxyAgent, request, setGlobalDispatcher } from "undici";
+import { Agent, Dispatcher, Pool, ProxyAgent, request, setGlobalDispatcher } from "undici";
 import type { Config, OutboundProxyChooser } from "../models/config";
 
 type ProxyConfig = Pick<
@@ -15,8 +15,6 @@ type ProxyConfig = Pick<
 	| "directFetchHttp2Enabled"
 >;
 
-// Pool only handles one origin. Any future fetch() to a non-web.archive.org
-// host will throw InvalidArgumentError — intentional boundary defence.
 const WAYBACK_ORIGIN = "https://web.archive.org";
 
 function buildPoolOpts(cfg: ProxyConfig): Pool.Options {
@@ -71,11 +69,15 @@ export async function installOutboundProxy(
 	logger: pino.Logger,
 ): Promise<RotatingProxyDispatcher | null> {
 	if (cfg.outboundProxyUrls.length === 0) {
-		const pool = new Pool(WAYBACK_ORIGIN, buildPoolOpts(cfg));
-		setGlobalDispatcher(pool);
+		// Agent (not Pool) so that fetch()'s redirect: "follow" works correctly.
+		// Pool as global dispatcher returns raw 3xx responses without re-dispatching
+		// the follow-up request; Agent creates per-origin pools and handles redirect
+		// routing at the fetch layer.
+		const agent = new Agent(buildPoolOpts(cfg));
+		setGlobalDispatcher(agent);
 		logger.info(
 			{ origin: WAYBACK_ORIGIN, ...buildPoolOpts(cfg) },
-			"[outbound-proxy] no proxy configured; installed direct Pool for web.archive.org",
+			"[outbound-proxy] no proxy configured; installed direct Agent for web.archive.org",
 		);
 		return null;
 	}

@@ -323,6 +323,7 @@ export class WaybackDirectClient {
 			this.log.warn({ archiveUrl, reason }, "[wayback-direct] fetchAtRequestedTime fetch error");
 			return { outcome: "fallback", reason };
 		}
+		this.breaker.recordSuccess();
 		this.log.info({ archiveUrl, status: res.status }, "[wayback-direct] response");
 
 		if (res.status === 404) {

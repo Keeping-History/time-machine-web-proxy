@@ -14,6 +14,13 @@ const PoolMock = jest.fn().mockImplementation(() => ({
 	close: jest.fn().mockResolvedValue(undefined),
 	destroy: jest.fn().mockResolvedValue(undefined),
 }));
+const agentInstanceMarker = Symbol("Agent");
+const AgentMock = jest.fn().mockImplementation(() => ({
+	__isAgent: agentInstanceMarker,
+	dispatch: jest.fn().mockReturnValue(true),
+	close: jest.fn().mockResolvedValue(undefined),
+	destroy: jest.fn().mockResolvedValue(undefined),
+}));
 
 // Minimal Dispatcher stub: matches the shape RotatingProxyDispatcher needs from
 // the base class (EventEmitter + the three throwing stubs that subclasses must
@@ -38,6 +45,7 @@ const requestMock: jest.Mock<any, any> = jest.fn();
 jest.mock("undici", () => ({
 	__esModule: true,
 	setGlobalDispatcher: setGlobalDispatcherMock,
+	Agent: AgentMock,
 	ProxyAgent: ProxyAgentMock,
 	Pool: PoolMock,
 	Dispatcher: DispatcherStub,
@@ -93,6 +101,7 @@ function mockRequestImpl(handler: (url: string, opts: any) => any) {
 describe("installOutboundProxy", () => {
 	beforeEach(() => {
 		setGlobalDispatcherMock.mockClear();
+		AgentMock.mockClear();
 		ProxyAgentMock.mockClear();
 		PoolMock.mockClear();
 		requestMock.mockClear();
@@ -102,12 +111,11 @@ describe("installOutboundProxy", () => {
 		}));
 	});
 
-	it("installs a direct Pool for web.archive.org when outboundProxyUrls is empty", async () => {
+	it("installs a direct Agent when outboundProxyUrls is empty", async () => {
 		const { logger } = makeLogger();
 		const result = await installOutboundProxy(makeConfig({ outboundProxyUrls: [] }), logger);
-		expect(PoolMock).toHaveBeenCalledTimes(1);
-		expect(PoolMock).toHaveBeenCalledWith(
-			"https://web.archive.org",
+		expect(AgentMock).toHaveBeenCalledTimes(1);
+		expect(AgentMock).toHaveBeenCalledWith(
 			expect.objectContaining({
 				connections: 5,
 				keepAliveTimeout: 30_000,
@@ -116,20 +124,20 @@ describe("installOutboundProxy", () => {
 			}),
 		);
 		expect(setGlobalDispatcherMock).toHaveBeenCalledTimes(1);
-		expect(setGlobalDispatcherMock.mock.calls[0][0]).toMatchObject({ __isPool: poolInstanceMarker });
+		expect(setGlobalDispatcherMock.mock.calls[0][0]).toMatchObject({ __isAgent: agentInstanceMarker });
+		expect(PoolMock).not.toHaveBeenCalled();
 		expect(ProxyAgentMock).not.toHaveBeenCalled();
 		expect(requestMock).not.toHaveBeenCalled();
 		expect(result).toBeNull();
 	});
 
-	it("passes allowH2: false to Pool when directFetchHttp2Enabled is false", async () => {
+	it("passes allowH2: false to Agent when directFetchHttp2Enabled is false", async () => {
 		const { logger } = makeLogger();
 		await installOutboundProxy(
 			makeConfig({ outboundProxyUrls: [], directFetchHttp2Enabled: false }),
 			logger,
 		);
-		expect(PoolMock).toHaveBeenCalledWith(
-			"https://web.archive.org",
+		expect(AgentMock).toHaveBeenCalledWith(
 			expect.objectContaining({ allowH2: false }),
 		);
 	});
