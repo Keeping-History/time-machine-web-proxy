@@ -205,8 +205,10 @@ export const parseWaybackPath = (
 	return m ? { time: m[1] ?? null, url: m[2] } : null;
 };
 
-const buildProxyUrl = (originalUrl: string, time: string, lockTime: boolean): string =>
-	lockTime ? `/web/${originalUrl}` : `/web/${time}/${originalUrl}`;
+const buildProxyUrl = (originalUrl: string, time: string, lockTime: boolean, proxyBase = ""): string => {
+	const path = lockTime ? `/web/${originalUrl}` : `/web/${time}/${originalUrl}`;
+	return proxyBase ? `${proxyBase}${path}` : path;
+};
 
 const rewriteOneUrl = (
 	raw: string,
@@ -215,6 +217,7 @@ const rewriteOneUrl = (
 	lockTime: boolean,
 	collect?: Set<string>,
 	assets?: DiscoveredAsset[],
+	proxyBase = "",
 ): string => {
 	if (!raw) return raw;
 	const trimmed = raw.trim();
@@ -241,7 +244,7 @@ const rewriteOneUrl = (
 				assets.push(asset);
 			}
 		}
-		return buildProxyUrl(originalUrl, ts, lockTime);
+		return buildProxyUrl(originalUrl, ts, lockTime, proxyBase);
 	}
 
 	try {
@@ -249,7 +252,7 @@ const rewriteOneUrl = (
 		const cdnUnwrapped = extractCdnEmbeddedUrl(unwrapped) ?? unwrapped;
 		const resolved = new URL(cdnUnwrapped, targetUrl);
 		if (resolved.protocol !== "http:" && resolved.protocol !== "https:") return raw;
-		return buildProxyUrl(resolved.toString(), fallbackTime, lockTime);
+		return buildProxyUrl(resolved.toString(), fallbackTime, lockTime, proxyBase);
 	} catch {
 		return raw;
 	}
@@ -262,6 +265,7 @@ const rewriteSrcsetValue = (
 	lockTime: boolean,
 	collect?: Set<string>,
 	assets?: DiscoveredAsset[],
+	proxyBase = "",
 ): string =>
 	srcset
 		.split(",")
@@ -270,7 +274,7 @@ const rewriteSrcsetValue = (
 			if (!trimmed) return "";
 			const match = trimmed.match(/^(\S+)(\s+.+)?$/);
 			if (!match) return trimmed;
-			return `${rewriteOneUrl(match[1], targetUrl, time, lockTime, collect, assets)}${match[2] ?? ""}`;
+			return `${rewriteOneUrl(match[1], targetUrl, time, lockTime, collect, assets, proxyBase)}${match[2] ?? ""}`;
 		})
 		.filter(Boolean)
 		.join(", ");
@@ -282,9 +286,10 @@ export const rewriteCssUrls = (
 	lockTime = false,
 	collect?: Set<string>,
 	assets?: DiscoveredAsset[],
+	proxyBase = "",
 ): string =>
 	css.replace(RE_CSS_URL, (_, before, url, after) => {
-		const rewritten = rewriteOneUrl(url, targetUrl, time, lockTime, collect, assets);
+		const rewritten = rewriteOneUrl(url, targetUrl, time, lockTime, collect, assets, proxyBase);
 		return `${before}${rewritten}${after}`;
 	});
 
@@ -295,6 +300,7 @@ const rewriteMetaRefresh = (
 	lockTime: boolean,
 	collect?: Set<string>,
 	assets?: DiscoveredAsset[],
+	proxyBase = "",
 ): string => {
 	const m = content.match(META_REFRESH_RE);
 	if (!m) return content;
@@ -305,7 +311,7 @@ const rewriteMetaRefresh = (
 		quote = url[0];
 		url = url.slice(1, -1);
 	}
-	return `${prefix}${quote}${rewriteOneUrl(url, targetUrl, time, lockTime, collect, assets)}${quote}`;
+	return `${prefix}${quote}${rewriteOneUrl(url, targetUrl, time, lockTime, collect, assets, proxyBase)}${quote}`;
 };
 
 const isElement = (node: Node): node is Element =>
@@ -366,6 +372,7 @@ const visit = (
 	lockTime: boolean,
 	collect: Set<string>,
 	assets: DiscoveredAsset[],
+	proxyBase = "",
 ): void => {
 	if (isElement(node)) {
 		const tag = node.tagName.toLowerCase();
@@ -374,24 +381,24 @@ const visit = (
 		for (const attr of node.attrs) {
 			if (urlAttrs?.includes(attr.name)) {
 				attr.value = SRCSET_ATTRS.has(attr.name)
-					? rewriteSrcsetValue(attr.value, targetUrl, time, lockTime, collect, assets)
-					: rewriteOneUrl(attr.value, targetUrl, time, lockTime, collect, assets);
+					? rewriteSrcsetValue(attr.value, targetUrl, time, lockTime, collect, assets, proxyBase)
+					: rewriteOneUrl(attr.value, targetUrl, time, lockTime, collect, assets, proxyBase);
 			} else if (metaRefresh && attr.name === "content") {
-				attr.value = rewriteMetaRefresh(attr.value, targetUrl, time, lockTime, collect, assets);
+				attr.value = rewriteMetaRefresh(attr.value, targetUrl, time, lockTime, collect, assets, proxyBase);
 			} else if (attr.name === "style") {
-				attr.value = rewriteCssUrls(attr.value, targetUrl, time, lockTime, collect, assets);
+				attr.value = rewriteCssUrls(attr.value, targetUrl, time, lockTime, collect, assets, proxyBase);
 			}
 		}
 		if (tag === "style") {
 			for (const child of node.childNodes) {
 				if (isTextNode(child)) {
-					child.value = rewriteCssUrls(child.value, targetUrl, time, lockTime, collect, assets);
+					child.value = rewriteCssUrls(child.value, targetUrl, time, lockTime, collect, assets, proxyBase);
 				}
 			}
 		}
 	}
 	if (hasChildNodes(node)) {
-		for (const child of node.childNodes) visit(child, targetUrl, time, lockTime, collect, assets);
+		for (const child of node.childNodes) visit(child, targetUrl, time, lockTime, collect, assets, proxyBase);
 	}
 };
 
@@ -463,13 +470,14 @@ export const rewriteHtmlUrls = (
 	targetUrl: string,
 	time: string,
 	lockTime = false,
+	proxyBase = "",
 ): RewriteHtmlResult => {
 	const collect = new Set<string>();
 	const assets: DiscoveredAsset[] = [];
 	const doc = parse(html);
 	// <base href> handling first so its effective base is used during visit().
 	const effectiveBase = consumeBaseTag(doc, targetUrl);
-	visit(doc, effectiveBase, time, lockTime, collect, assets);
+	visit(doc, effectiveBase, time, lockTime, collect, assets, proxyBase);
 	injectShim(doc, targetUrl, time, lockTime);
 	return { html: serialize(doc), discoveredAssets: assets };
 };

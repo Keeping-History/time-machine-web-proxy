@@ -62,6 +62,7 @@ export class ProxyService {
 			| "domainCrawlEnabled"
 			| "cdxCacheEnabled"
 			| "lockTime"
+			| "proxyBase"
 		>,
 		private readonly redis: IORedis | null = null,
 		private readonly directClient: DirectClient | null = null,
@@ -158,6 +159,7 @@ export class ProxyService {
 				targetUrl,
 				time,
 				this.config.lockTime,
+				this.config.proxyBase,
 			);
 			body = html;
 
@@ -196,7 +198,7 @@ export class ProxyService {
 				void this.maybeEnqueueDomainCrawl(u.hostname, time);
 			}
 		} else if (isCss) {
-			body = rewriteCssUrls(raw.toString("utf-8"), targetUrl, time, this.config.lockTime);
+			body = rewriteCssUrls(raw.toString("utf-8"), targetUrl, time, this.config.lockTime, undefined, undefined, this.config.proxyBase);
 		}
 
 		return {

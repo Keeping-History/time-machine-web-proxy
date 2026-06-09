@@ -113,10 +113,9 @@ describe("ProxyService.fetch — cache HIT", () => {
 		expect(result.contentType).toBe("text/html");
 		expect(client.enqueueExactAndWait).not.toHaveBeenCalled();
 		expect(client.enqueueDomainCrawl).not.toHaveBeenCalled();
-		// rewriteHtmlUrls emits /web/<ts>/<originalUrl> — the proxy host must
-		// NOT appear in rewritten attribute values (output is path-based).
-		expect(String(result.body)).toContain("/web/20200101000000/http://example.com/x");
-		expect(String(result.body)).not.toMatch(/href="https?:\/\/[^/]/);
+		// rewriteHtmlUrls emits absolute proxy URLs so embedded cross-origin pages
+		// resolve assets against timemachine's origin, not the embedding host.
+		expect(String(result.body)).toContain("http://localhost:8080/web/20200101000000/http://example.com/x");
 	});
 
 	it("returns CSS with rewriteCssUrls applied; no job enqueued", async () => {
@@ -130,7 +129,7 @@ describe("ProxyService.fetch — cache HIT", () => {
 		expect(result.cache).toBe("HIT");
 		expect(result.contentType).toBe("text/css");
 		expect(client.enqueueExactAndWait).not.toHaveBeenCalled();
-		expect(String(result.body)).toContain("/web/20200101000000/http://example.com/bg.png");
+		expect(String(result.body)).toContain("http://localhost:8080/web/20200101000000/http://example.com/bg.png");
 	});
 
 	it("surfaces hit.archiveTime via result.archiveTime when sidecar exists", async () => {
@@ -192,8 +191,7 @@ describe("ProxyService.fetch — cache MISS (no directClient → MISS_WORKER)", 
 		expect(result.cache).toBe("MISS_WORKER");
 		expect(client.enqueueExactAndWait).toHaveBeenCalledWith(TARGET_HTML_URL, TIME);
 		expect(lookup).toHaveBeenCalledTimes(2);
-		expect(String(result.body)).toContain("/web/20200101000000/http://example.com/x");
-		expect(String(result.body)).not.toMatch(/href="https?:\/\/[^/]/);
+		expect(String(result.body)).toContain("http://localhost:8080/web/20200101000000/http://example.com/x");
 	});
 
 	it("throws Error{status:502} when cache is still empty after job completes", async () => {
