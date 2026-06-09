@@ -315,7 +315,7 @@ export class ProxyService {
 		const { from, to } = windowAround(time, this.config.crawlWindowDays);
 		const u =
 			`https://web.archive.org/cdx/search/cdx?url=${encodeURIComponent(`${host}/*`)}` +
-			`&from=${from}&to=${to}&output=json&showNumPages=true`;
+			`&from=${from}&to=${to}&showNumPages=true`;
 		const isValidPageCount = (body: string): boolean =>
 			Number.isFinite(Number.parseInt(body.trim(), 10));
 		let r: Response;

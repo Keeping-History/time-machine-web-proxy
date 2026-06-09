@@ -20,3 +20,7 @@ ralph-tasks.json
 # this dir at first boot — keep the dir under VC, ignore the contents.
 deploy/signoz/common/clickhouse/user_scripts/*
 !deploy/signoz/common/clickhouse/user_scripts/.gitkeep
+
+
+#Ignore vscode AI rules
+.github/instructions/codacy.instructions.md
