@@ -164,4 +164,36 @@ describe("unwrapRedirectUrl", () => {
 		const url = "http://dynamic.aol.com/cgi/other?http://example.com/";
 		expect(unwrapRedirectUrl(url)).toBe(url);
 	});
+
+	it("unwraps Excite r.excite.com/r/ redirect with semicolon-delimited destination", () => {
+		expect(
+			unwrapRedirectUrl(
+				"http://r.excite.com/r/co=d_nb_nb-xnt_attack;http://news.excite.com/news/ap/us/terrorism-attacks",
+			),
+		).toBe("http://news.excite.com/news/ap/us/terrorism-attacks");
+	});
+
+	it("unwraps Excite r.excite.com/r/ redirect with https destination", () => {
+		expect(
+			unwrapRedirectUrl("http://r.excite.com/r/co=some_param;https://www.excite.com/page"),
+		).toBe("https://www.excite.com/page");
+	});
+
+	it("preserves path and query on Excite destination URL", () => {
+		expect(
+			unwrapRedirectUrl(
+				"http://r.excite.com/r/co=tracking;http://news.excite.com/a/b?x=1&y=2",
+			),
+		).toBe("http://news.excite.com/a/b?x=1&y=2");
+	});
+
+	it("does not unwrap Excite redirect without http(s) destination", () => {
+		const url = "http://r.excite.com/r/co=param;ftp://files.example.com/";
+		expect(unwrapRedirectUrl(url)).toBe(url);
+	});
+
+	it("does not unwrap unrelated r.excite.com paths", () => {
+		const url = "http://r.excite.com/other/path;http://example.com/";
+		expect(unwrapRedirectUrl(url)).toBe(url);
+	});
 });

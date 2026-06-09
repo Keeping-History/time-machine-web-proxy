@@ -57,6 +57,9 @@ const REDIRECT_PATTERNS: RegExp[] = [
 	// destination URL sits directly in the query string with no key=, so
 	// match it raw after the `?`.
 	/^https?:\/\/dynamic\.aol\.com\/cgi\/redir\?(https?:\/\/.+)$/i,
+	// Excite click-tracking: r.excite.com/r/{params};{actual_url}. The
+	// destination URL follows a semicolon within the path segment.
+	/^https?:\/\/r\.excite\.com\/r\/[^;]*;(https?:\/\/.+)$/i,
 ];
 
 /**
