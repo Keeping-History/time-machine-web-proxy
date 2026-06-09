@@ -1076,6 +1076,7 @@ describe("ProxyService.triggerDomainCrawl — explicit admin enqueue", () => {
 
 		expect(mockedFetch).not.toHaveBeenCalled();
 		expect(client.enqueueDomainCrawl).toHaveBeenCalledWith("example.com", TIME);
+		expect(client.enqueueCrawlChunks).toHaveBeenCalledWith("example.com", TIME, 1000, 1000);
 	});
 
 	it("skipPreflight:true still enforces the whitelist (security boundary, not a rate-limit)", async () => {

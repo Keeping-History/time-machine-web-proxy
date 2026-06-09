@@ -295,6 +295,13 @@ export class ProxyService {
 				{ host, time },
 				"[crawl] preflight SKIPPED by admin — runaway-crawl guard disabled for this request",
 			);
+			await this.archiveJobClient.enqueueDomainCrawl(host, time);
+			await this.archiveJobClient.enqueueCrawlChunks(
+				host,
+				time,
+				this.config.crawlMaxChunkFanout,
+				this.config.crawlMaxChunkFanout,
+			);
 		} else {
 			const pages = await this.cdxPageCount(host, time);
 			if (pages === 0) {
@@ -308,9 +315,7 @@ export class ProxyService {
 				pages,
 				this.config.crawlMaxChunkFanout,
 			);
-			return;
 		}
-		await this.archiveJobClient.enqueueDomainCrawl(host, time);
 	}
 
 	private async cdxPageCount(host: string, time: string): Promise<number> {
