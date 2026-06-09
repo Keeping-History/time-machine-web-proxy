@@ -136,4 +136,32 @@ describe("unwrapRedirectUrl", () => {
 		const url = "http://r.aol.com/cgi/other?url=http://example.com/";
 		expect(unwrapRedirectUrl(url)).toBe(url);
 	});
+
+	it("unwraps AOL dynamic.aol.com/cgi/redir with embedded http URL", () => {
+		expect(unwrapRedirectUrl("http://dynamic.aol.com/cgi/redir?http://my.aol.com/")).toBe(
+			"http://my.aol.com/",
+		);
+	});
+
+	it("unwraps AOL dynamic.aol.com/cgi/redir with embedded https URL", () => {
+		expect(unwrapRedirectUrl("http://dynamic.aol.com/cgi/redir?https://example.com/path")).toBe(
+			"https://example.com/path",
+		);
+	});
+
+	it("preserves path and query on dynamic.aol.com destination URL", () => {
+		expect(
+			unwrapRedirectUrl("http://dynamic.aol.com/cgi/redir?http://www.example.com/a/b?x=1&y=2"),
+		).toBe("http://www.example.com/a/b?x=1&y=2");
+	});
+
+	it("does not unwrap dynamic.aol.com without http(s) destination", () => {
+		const url = "http://dynamic.aol.com/cgi/redir?ftp://files.example.com/";
+		expect(unwrapRedirectUrl(url)).toBe(url);
+	});
+
+	it("does not unwrap unrelated dynamic.aol.com paths", () => {
+		const url = "http://dynamic.aol.com/cgi/other?http://example.com/";
+		expect(unwrapRedirectUrl(url)).toBe(url);
+	});
 });
