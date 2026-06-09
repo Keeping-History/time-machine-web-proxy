@@ -1,0 +1,44 @@
+name: Build and publish image
+
+# Replaces the old Cloud Build / Cloud Run pipeline. Builds the Docker image on
+# a GitHub-hosted runner (free for this public repo) and pushes it to GHCR.
+# Deployment is handled separately: Argo CD Image Updater watches GHCR and rolls
+# the new image out via the Keeping-History/infra GitOps repo. This workflow
+# therefore needs no cluster credentials and touches no manifests.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write   # push to GHCR via the built-in GITHUB_TOKEN
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Build always; push only on non-PR events (fork PRs can't push).
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: |
+            ghcr.io/${{ github.repository }}:${{ github.sha }}
+            ghcr.io/${{ github.repository }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
