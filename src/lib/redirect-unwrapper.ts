@@ -53,6 +53,10 @@ const REDIRECT_PATTERNS: RegExp[] = [
 	// Without this, every redir-complex URL collapses to the same cache key
 	// and serves the first-visited destination for all subsequent visits.
 	/^https?:\/\/r\.aol\.com\/cgi\/redir-complex\?url=(https?:\/\/.+)$/i,
+	// AOL dynamic redirector: dynamic.aol.com/cgi/redir?{actual_url}. The
+	// destination URL sits directly in the query string with no key=, so
+	// match it raw after the `?`.
+	/^https?:\/\/dynamic\.aol\.com\/cgi\/redir\?(https?:\/\/.+)$/i,
 ];
 
 /**

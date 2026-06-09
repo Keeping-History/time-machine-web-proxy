@@ -1,5 +1,5 @@
 import { type DefaultTreeAdapterTypes, defaultTreeAdapter, parse, serialize } from "parse5";
-import { unwrapRedirectUrl } from "./redirect-unwrapper";
+import { extractCdnEmbeddedUrl, unwrapRedirectUrl } from "./redirect-unwrapper";
 import { generateShimScript } from "./runtime-shim";
 
 type Node = DefaultTreeAdapterTypes.Node;
@@ -222,7 +222,13 @@ const rewriteOneUrl = (
 
 	const archive = trimmed.match(RE_ARCHIVE_URL);
 	if (archive) {
-		const [, ts, originalUrl] = archive;
+		const [, ts, rawOriginal] = archive;
+		// Akamai-style CDN URLs embed the origin in their path
+		// (`a388.g.akamai.net/f/.../www.cnn.com/img.gif`). Unwrap here so the
+		// emitted proxy URL — and the prewarm asset record — point at the origin
+		// the browser actually wants, not the CDN address that's unlikely to be
+		// archived under that exact form.
+		const originalUrl = extractCdnEmbeddedUrl(rawOriginal) ?? rawOriginal;
 		// Only record when the embedded timestamp is a valid 14-digit string.
 		// Prewarm discovery still uses the embedded ts even when lockTime drops
 		// it from the emitted URL — the source-of-truth capture time is needed
@@ -239,7 +245,9 @@ const rewriteOneUrl = (
 	}
 
 	try {
-		const resolved = new URL(unwrapRedirectUrl(trimmed), targetUrl);
+		const unwrapped = unwrapRedirectUrl(trimmed);
+		const cdnUnwrapped = extractCdnEmbeddedUrl(unwrapped) ?? unwrapped;
+		const resolved = new URL(cdnUnwrapped, targetUrl);
 		if (resolved.protocol !== "http:" && resolved.protocol !== "https:") return raw;
 		return buildProxyUrl(resolved.toString(), fallbackTime, lockTime);
 	} catch {

@@ -371,6 +371,61 @@ describe("rewriteHtmlUrls — schemes left alone", () => {
 	});
 });
 
+describe("rewriteHtmlUrls — CDN URLs with embedded origin", () => {
+	it("unwraps an Akamai URL on <img src> and points the proxy URL at the origin", () => {
+		const html = `<img src="http://a388.g.akamai.net/f/388/21/1d/www.cnn.com/images/newmain/top.main.special.report.gif">`;
+		const { html: r } = rewriteHtmlUrls(html, TARGET, TIME);
+		expect(r).toContain(
+			`/web/${TIME}/http://www.cnn.com/images/newmain/top.main.special.report.gif`,
+		);
+		expect(r).not.toContain("a388.g.akamai.net");
+	});
+
+	it("unwraps an Akamai URL inside a wayback-prefixed wrapper and preserves the wrapper's TS", () => {
+		const ts = "20011201213912";
+		const html = `<img src="https://web.archive.org/web/${ts}im_/http://a388.g.akamai.net/f/388/21/1d/www.cnn.com/images/newmain/top.main.special.report.gif">`;
+		const { html: r, discoveredAssets } = rewriteHtmlUrls(html, TARGET, TIME);
+		expect(r).toContain(
+			`/web/${ts}/http://www.cnn.com/images/newmain/top.main.special.report.gif`,
+		);
+		expect(r).not.toContain("a388.g.akamai.net");
+		expect(discoveredAssets).toContainEqual<DiscoveredAsset>({
+			url: "http://www.cnn.com/images/newmain/top.main.special.report.gif",
+			embeddedTs: ts,
+		});
+	});
+
+	it("unwraps Akamai URLs inside srcset entries", () => {
+		const html = `<img srcset="http://a388.g.akamai.net/f/388/21/1d/www.cnn.com/a.png 1x, http://a388.g.akamai.net/f/388/21/1d/www.cnn.com/b.png 2x">`;
+		const { html: r } = rewriteHtmlUrls(html, TARGET, TIME);
+		expect(r).toContain(`/web/${TIME}/http://www.cnn.com/a.png`);
+		expect(r).toContain(`/web/${TIME}/http://www.cnn.com/b.png`);
+		expect(r).not.toContain("a388.g.akamai.net");
+	});
+
+	it("unwraps an Akamai URL inside an inline style url()", () => {
+		const html = `<div style="background: url('http://a388.g.akamai.net/f/388/21/1d/www.cnn.com/bg.png')">x</div>`;
+		const { html: r } = rewriteHtmlUrls(html, TARGET, TIME);
+		expect(r).toContain(`/web/${TIME}/http://www.cnn.com/bg.png`);
+		expect(r).not.toContain("a388.g.akamai.net");
+	});
+
+	it("preserves a non-CDN absolute URL unchanged through the unwrap path", () => {
+		const html = `<a href="http://images.example.com/photo.jpg">x</a>`;
+		const { html: r } = rewriteHtmlUrls(html, TARGET, TIME);
+		expect(r).toContain(`/web/${TIME}/http://images.example.com/photo.jpg`);
+	});
+});
+
+describe("rewriteCssUrls — CDN URLs with embedded origin", () => {
+	it("unwraps an Akamai URL in a CSS url() reference", () => {
+		const css = `body { background: url(http://a388.g.akamai.net/f/388/21/1d/www.cnn.com/bg.png); }`;
+		const r = rewriteCssUrls(css, TARGET, TIME);
+		expect(r).toContain(`/web/${TIME}/http://www.cnn.com/bg.png`);
+		expect(r).not.toContain("a388.g.akamai.net");
+	});
+});
+
 describe("rewriteHtmlUrls — <base href> handling", () => {
 	it("strips the <base> tag from the output", () => {
 		const html = `<html><head><base href="https://cdn.example.com/"></head><body></body></html>`;
