@@ -23,6 +23,7 @@ const queueChunkClose = jest.fn().mockResolvedValue(undefined);
 
 const queueEventsExactClose = jest.fn().mockResolvedValue(undefined);
 const queueEventsCrawlClose = jest.fn().mockResolvedValue(undefined);
+const queueEventsChunkClose = jest.fn().mockResolvedValue(undefined);
 
 const redisQuit = jest.fn().mockResolvedValue(undefined);
 
@@ -49,7 +50,12 @@ jest.mock("bullmq", () => ({
 	}),
 	QueueEvents: jest.fn().mockImplementation((name: string, opts: unknown) => {
 		queueEventsCtor(name, opts);
-		const close = name === "archive-exact" ? queueEventsExactClose : queueEventsCrawlClose;
+		const close =
+			name === "archive-exact"
+				? queueEventsExactClose
+				: name === "archive-crawl-chunk"
+					? queueEventsChunkClose
+					: queueEventsCrawlClose;
 		return { close, on: jest.fn() };
 	}),
 	Worker: jest.fn(),
@@ -136,6 +142,7 @@ describe("Dependencies (TASK-010)", () => {
 		queueChunkClose.mockClear();
 		queueEventsExactClose.mockClear();
 		queueEventsCrawlClose.mockClear();
+		queueEventsChunkClose.mockClear();
 		redisQuit.mockClear();
 		queueCtor.mockClear();
 		queueEventsCtor.mockClear();
@@ -166,9 +173,9 @@ describe("Dependencies (TASK-010)", () => {
 
 	it("constructs Queue and QueueEvents with the configured bullmqPrefix", () => {
 		new Dependencies(baseConfig);
-		// Three Queues (exact + crawl + chunk) + two QueueEvents (exact + crawl)
+		// Three Queues (exact + crawl + chunk) + three QueueEvents (exact + crawl + chunk)
 		expect(queueCtor).toHaveBeenCalledTimes(3);
-		expect(queueEventsCtor).toHaveBeenCalledTimes(2);
+		expect(queueEventsCtor).toHaveBeenCalledTimes(3);
 		// All were given prefix "tm"
 		for (const call of queueCtor.mock.calls) {
 			expect(call[1]).toEqual(expect.objectContaining({ prefix: "tm" }));
@@ -191,6 +198,7 @@ describe("Dependencies (TASK-010)", () => {
 		expect(queueChunkClose).toHaveBeenCalledTimes(1);
 		expect(queueEventsExactClose).toHaveBeenCalledTimes(1);
 		expect(queueEventsCrawlClose).toHaveBeenCalledTimes(1);
+		expect(queueEventsChunkClose).toHaveBeenCalledTimes(1);
 		expect(redisQuit).toHaveBeenCalledTimes(1);
 
 		const workerExactOrder = workerExactClose.mock.invocationCallOrder[0] as number;
@@ -201,6 +209,7 @@ describe("Dependencies (TASK-010)", () => {
 		const queueChunkOrder = queueChunkClose.mock.invocationCallOrder[0] as number;
 		const eventsExactOrder = queueEventsExactClose.mock.invocationCallOrder[0] as number;
 		const eventsCrawlOrder = queueEventsCrawlClose.mock.invocationCallOrder[0] as number;
+		const eventsChunkOrder = queueEventsChunkClose.mock.invocationCallOrder[0] as number;
 		const redisOrder = redisQuit.mock.invocationCallOrder[0] as number;
 
 		const lastWorker = Math.max(workerExactOrder, workerCrawlOrder, workerChunkOrder);
@@ -210,6 +219,7 @@ describe("Dependencies (TASK-010)", () => {
 			queueChunkOrder,
 			eventsExactOrder,
 			eventsCrawlOrder,
+			eventsChunkOrder,
 		);
 		const lastQueueOrEvent = Math.max(
 			queueExactOrder,
@@ -217,6 +227,7 @@ describe("Dependencies (TASK-010)", () => {
 			queueChunkOrder,
 			eventsExactOrder,
 			eventsCrawlOrder,
+			eventsChunkOrder,
 		);
 
 		// Workers drain before queues/events

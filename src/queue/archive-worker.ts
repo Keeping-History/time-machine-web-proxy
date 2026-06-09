@@ -320,28 +320,42 @@ export function startArchiveWorkers(opts: StartArchiveWorkersOpts): ArchiveWorke
 	chunk = new Worker(
 		QUEUE_CRAWL_CHUNK,
 		async (job) => {
-			assertDomainCrawlChunkJob(job.data);
-			const { host, time, page } = job.data;
-			const { from, to } = windowAround(time, crawlWindowDays);
-			const cdxUrl =
-				`https://web.archive.org/cdx/search/cdx?url=${encodeURIComponent(`${host}/*`)}` +
-				`&from=${from}&to=${to}&output=json&page=${page}`;
+			try {
+				assertDomainCrawlChunkJob(job.data);
+				const { host, time, page } = job.data;
+				await emitProgress(job, QUEUE_CRAWL_CHUNK, "picked_up", logger, { host, time, page });
 
-			const rows = await applyRateLimit(chunk, async () => {
-				const r = await cachedCdxFetch(
-					cdxUrl,
-					{ signal: AbortSignal.timeout(CDX_TIMEOUT_MS) },
-					{ redis, logger, enabled: cdxCacheEnabled, bullmqPrefix, validate: () => true },
-				);
-				if (!r.ok) throw new Error(`CDX fetch ${r.status}`);
-				return parseCdxPage(await r.json());
-			});
+				const { from, to } = windowAround(time, crawlWindowDays);
+				const cdxUrl =
+					`https://web.archive.org/cdx/search/cdx?url=${encodeURIComponent(`${host}/*`)}` +
+					`&from=${from}&to=${to}&output=json&page=${page}`;
 
-			const captures = pickClosestPerUrl(rows, time);
-			for (const { url, timestamp } of captures) {
-				await enqueueExactJob(url, timestamp);
+				const rows = await applyRateLimit(chunk, async () => {
+					const r = await cachedCdxFetch(
+						cdxUrl,
+						{ signal: AbortSignal.timeout(CDX_TIMEOUT_MS) },
+						{ redis, logger, enabled: cdxCacheEnabled, bullmqPrefix, validate: () => true },
+					);
+					if (!r.ok) throw new Error(`CDX fetch ${r.status}`);
+					return parseCdxPage(await r.json());
+				});
+
+				const captures = pickClosestPerUrl(rows, time);
+				for (const { url, timestamp } of captures) {
+					await enqueueExactJob(url, timestamp);
+				}
+				await emitProgress(job, QUEUE_CRAWL_CHUNK, "download_done", logger, {
+					host,
+					time,
+					page,
+					filesSeen: captures.length,
+				});
+			} catch (e) {
+				await emitProgress(job, QUEUE_CRAWL_CHUNK, "error", logger, {
+					error: e instanceof Error ? e.message : String(e),
+				});
+				throw e;
 			}
-			logger.info({ host, time, page, captures: captures.length }, "[worker:crawl-chunk] done");
 		},
 		{
 			connection,

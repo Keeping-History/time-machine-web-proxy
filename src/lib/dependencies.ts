@@ -81,6 +81,7 @@ export interface DependencyStore {
 	chunkQueue: Queue<DomainCrawlChunkJob>;
 	exactEvents: QueueEvents;
 	crawlEvents: QueueEvents;
+	chunkEvents: QueueEvents;
 	workers: { exact: Worker; crawl: Worker; chunk: Worker };
 	cache: CacheService;
 	archiveJobClient: ArchiveJobClient;
@@ -131,8 +132,13 @@ export class Dependencies {
 			connection: redis,
 			prefix: config.bullmqPrefix,
 		});
+		const chunkEvents = new QueueEvents(QUEUE_CRAWL_CHUNK, {
+			connection: redis,
+			prefix: config.bullmqPrefix,
+		});
 		attachQueueLogger(QUEUE_EXACT, exactEvents, logger);
 		attachQueueLogger(QUEUE_CRAWL, crawlEvents, logger);
+		attachQueueLogger(QUEUE_CRAWL_CHUNK, chunkEvents, logger);
 
 		const cache = new CacheService(config, logger);
 
@@ -170,6 +176,7 @@ export class Dependencies {
 			chunkQueue,
 			exactEvents,
 			crawlEvents,
+			chunkEvents,
 			workers,
 			cache,
 			archiveJobClient,
@@ -209,7 +216,7 @@ export class Dependencies {
 	}
 
 	async close(): Promise<void> {
-		const { workers, exactQueue, crawlQueue, chunkQueue, exactEvents, crawlEvents, redis } =
+		const { workers, exactQueue, crawlQueue, chunkQueue, exactEvents, crawlEvents, chunkEvents, redis } =
 			this.deps;
 		// 1. Drain workers first so in-flight jobs complete
 		await Promise.all([workers.exact.close(), workers.crawl.close(), workers.chunk.close()]);
@@ -220,6 +227,7 @@ export class Dependencies {
 			chunkQueue.close(),
 			exactEvents.close(),
 			crawlEvents.close(),
+			chunkEvents.close(),
 		]);
 		// 3. Quit Redis last (graceful QUIT after all subscribers disconnect)
 		await redis.quit();

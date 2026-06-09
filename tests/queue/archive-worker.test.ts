@@ -1187,6 +1187,39 @@ describe("chunk worker processor", () => {
 		expect(rateLimitErrorMock).toHaveBeenCalledTimes(1);
 	});
 
+	it("emits picked_up progress at job start", async () => {
+		startArchiveWorkers(baseOpts());
+		const worker = findWorker(QUEUE_CRAWL_CHUNK);
+		const job = makeJob("cc-pu", { host: "apple.com", time: "19980101000000", page: 2 });
+		await worker.processor(job);
+		expect(job.updateProgress).toHaveBeenCalledWith(
+			expect.objectContaining({ stage: "picked_up", queue: QUEUE_CRAWL_CHUNK, page: 2 }),
+		);
+	});
+
+	it("emits download_done with filesSeen=captures.length on success", async () => {
+		cachedCdxFetchMock.mockResolvedValue(makeCdxResponse(CDX_DATA_DEDUP));
+		const enqueueExactJob = jest.fn().mockResolvedValue(undefined);
+		startArchiveWorkers(baseOpts({ enqueueExactJob }));
+		const worker = findWorker(QUEUE_CRAWL_CHUNK);
+		const job = makeJob("cc-done", { host: "apple.com", time: "19980101000000", page: 0 });
+		await worker.processor(job);
+		expect(job.updateProgress).toHaveBeenCalledWith(
+			expect.objectContaining({ stage: "download_done", queue: QUEUE_CRAWL_CHUNK, filesSeen: 2 }),
+		);
+	});
+
+	it("emits error progress and rethrows on CDX failure", async () => {
+		cachedCdxFetchMock.mockRejectedValue(new Error("CDX exploded"));
+		startArchiveWorkers(baseOpts());
+		const worker = findWorker(QUEUE_CRAWL_CHUNK);
+		const job = makeJob("cc-err", { host: "apple.com", time: "19980101000000", page: 0 });
+		await expect(worker.processor(job)).rejects.toThrow("CDX exploded");
+		expect(job.updateProgress).toHaveBeenCalledWith(
+			expect.objectContaining({ stage: "error", queue: QUEUE_CRAWL_CHUNK, error: "CDX exploded" }),
+		);
+	});
+
 	it("'failed' event listener on chunk worker logs jobId, attemptsMade, data, err.message", async () => {
 		const logger = makeLogger();
 		startArchiveWorkers(baseOpts({ logger }));
