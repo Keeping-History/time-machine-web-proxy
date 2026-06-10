@@ -1,4 +1,5 @@
 import crypto from "node:crypto";
+import { createReadStream, promises as fsPromises } from "node:fs";
 import http, { type IncomingMessage, type ServerResponse } from "node:http";
 import type pino from "pino";
 import { type WebSocket, WebSocketServer } from "ws";
@@ -171,11 +172,14 @@ async function sseHandler(
 
 	try {
 		const result = await deps.proxy.fetch(targetUrl, time, onProgress);
+		const bodyBytes = result.bodyPath
+			? await fsPromises.readFile(result.bodyPath)
+			: result.body;
 		const bodyStr =
-			typeof result.body === "string" ? result.body : result.body.toString("base64");
+			typeof bodyBytes === "string" ? bodyBytes : (bodyBytes ?? Buffer.alloc(0)).toString("base64");
 		writeEvent("result", {
 			body: bodyStr,
-			bodyEncoding: typeof result.body === "string" ? "utf8" : "base64",
+			bodyEncoding: typeof bodyBytes === "string" ? "utf8" : "base64",
 			contentType: result.contentType,
 			archiveUrl: result.archiveUrl,
 			originalUrl: result.originalUrl,
@@ -389,7 +393,16 @@ export async function httpHandler(
 		if (result.contentType.startsWith("text/html")) {
 			res.setHeader("Content-Security-Policy", SANDBOX_CSP);
 		}
-		res.end(result.body);
+		if (result.bodyPath) {
+			const stream = createReadStream(result.bodyPath);
+			stream.once("error", (err) => {
+				deps.logger.error({ err, targetUrl, bodyPath: result.bodyPath }, "[TimeMachine] binary stream error");
+				res.destroy(err as Error);
+			});
+			stream.pipe(res);
+		} else {
+			res.end(result.body);
+		}
 		logRequest(deps, req, 200, start, { targetUrl, time, archiveUrl, cache: result.cache });
 	} catch (e) {
 		const status = errorHasStatus(e) ? e.status : 500;
@@ -520,10 +533,13 @@ export async function wsHandler(
 
 		deps.proxy
 			.fetch(targetUrl, time, onProgress)
-			.then((result) => {
+			.then(async (result) => {
 				if (ws.readyState !== ws.OPEN) return;
+				const bodyBytes = result.bodyPath
+					? await fsPromises.readFile(result.bodyPath)
+					: result.body;
 				const bodyStr =
-					typeof result.body === "string" ? result.body : result.body.toString("base64");
+					typeof bodyBytes === "string" ? bodyBytes : (bodyBytes ?? Buffer.alloc(0)).toString("base64");
 				ws.send(
 					JSON.stringify({
 						type: "result",

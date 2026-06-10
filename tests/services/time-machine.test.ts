@@ -1,3 +1,6 @@
+import { writeFileSync, unlinkSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type http from "node:http";
 import pino from "pino";
 import WebSocket from "ws";
@@ -284,6 +287,64 @@ describe("TimeMachineService HTTP handler — sandbox CSP on HTML responses", ()
 			);
 			expect(r.status).toBe(200);
 			expect(r.headers.get("content-security-policy")).toBeNull();
+		} finally {
+			await svc.stop();
+		}
+	});
+});
+
+describe("TimeMachineService HTTP handler — binary streaming via bodyPath", () => {
+	it("pipes createReadStream(bodyPath) to response when proxy returns bodyPath", async () => {
+		const binContent = Buffer.from([0x89, 0x50, 0x4e, 0x47]); // PNG magic bytes
+		const tmpPath = join(tmpdir(), `tm-test-binary-${Date.now()}.bin`);
+		writeFileSync(tmpPath, binContent);
+
+		try {
+			const fetchMock = jest.fn().mockResolvedValue({
+				contentType: "image/png",
+				archiveUrl: "http://example.com/img.png",
+				originalUrl: "http://example.com/img.png",
+				archiveTime: "20020401000000",
+				bodyPath: tmpPath,
+				cache: "HIT" as const,
+			});
+			const { svc } = makeService(fetchMock);
+			const port = await startAndAwaitListening(svc);
+
+			try {
+				const r = await fetch(
+					`http://127.0.0.1:${port}/web/20020401000000/http://example.com/img.png`,
+				);
+				expect(r.status).toBe(200);
+				expect(r.headers.get("content-type")).toBe("image/png");
+				const bytes = Buffer.from(await r.arrayBuffer());
+				expect(bytes).toEqual(binContent);
+			} finally {
+				await svc.stop();
+			}
+		} finally {
+			unlinkSync(tmpPath);
+		}
+	});
+
+	it("returns 500 when bodyPath refers to a non-existent file", async () => {
+		const fetchMock = jest.fn().mockResolvedValue({
+			contentType: "image/png",
+			archiveUrl: "http://example.com/img.png",
+			originalUrl: "http://example.com/img.png",
+			archiveTime: "20020401000000",
+			bodyPath: "/nonexistent/path/img.png",
+			cache: "HIT" as const,
+		});
+		const { svc } = makeService(fetchMock);
+		const port = await startAndAwaitListening(svc);
+
+		try {
+			// res.destroy() closes the connection without sending a complete response;
+			// fetch() will see a network error or incomplete response
+			await expect(
+				fetch(`http://127.0.0.1:${port}/web/20020401000000/http://example.com/img.png`),
+			).rejects.toThrow();
 		} finally {
 			await svc.stop();
 		}

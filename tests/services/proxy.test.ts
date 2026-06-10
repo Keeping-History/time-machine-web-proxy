@@ -157,18 +157,18 @@ describe("ProxyService.fetch — cache HIT", () => {
 		expect(result.archiveTime).toBe(TIME);
 	});
 
-	it("returns binary body as a raw Buffer (no rewrite)", async () => {
+	it("returns binary hit as bodyPath without loading file into memory", async () => {
 		const cache = makeCache(jest.fn().mockResolvedValue(binHit));
 		const client = makeClient();
-		mockedReadFile.mockResolvedValue(BIN_BODY);
 		const svc = new ProxyService(cache, client, logger, baseConfig);
 
 		const result = await svc.fetch(TARGET_IMG_URL, TIME);
 
 		expect(result.cache).toBe("HIT");
 		expect(result.contentType).toBe("image/png");
-		expect(result.body).toBeInstanceOf(Buffer);
-		expect((result.body as Buffer).equals(BIN_BODY)).toBe(true);
+		expect(result.bodyPath).toBe(binHit.absPath);
+		expect(result.body).toBeUndefined();
+		expect(mockedReadFile).not.toHaveBeenCalled();
 	});
 });
 
@@ -630,7 +630,7 @@ describe("ProxyResult.cache values", () => {
 		expect(result.cache).toBe("HIT");
 	});
 
-	it("Tier 2 ok returns cache='MISS_DIRECT'", async () => {
+	it("Tier 2 ok returns cache='MISS_DIRECT' for binary and sets bodyPath without readFile", async () => {
 		const lookup = jest
 			.fn<Promise<CacheHit | null>, [string, string]>()
 			.mockResolvedValueOnce(null)
@@ -643,11 +643,13 @@ describe("ProxyResult.cache values", () => {
 			body: Readable.from([BIN_BODY]),
 			contentType: "image/png",
 		});
-		mockedReadFile.mockResolvedValue(BIN_BODY);
 		const svc = new ProxyService(cache, client, logger, baseConfig, null, directClient);
 
 		const result = await svc.fetch(TARGET_IMG_URL, TIME);
 		expect(result.cache).toBe("MISS_DIRECT");
+		expect(result.bodyPath).toBe(binHit.absPath);
+		expect(result.body).toBeUndefined();
+		expect(mockedReadFile).not.toHaveBeenCalled();
 	});
 
 	it("Tier 3 worker returns cache='MISS_WORKER'", async () => {

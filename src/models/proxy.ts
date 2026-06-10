@@ -3,6 +3,9 @@ export interface ProxyResult {
 	archiveUrl: string;
 	originalUrl: string;
 	archiveTime: string;
-	body: string | Buffer;
+	/** Defined for text/html and text/css (loaded for transforms). Undefined when bodyPath is set. */
+	body?: string | Buffer;
+	/** Defined for binary content types; body is undefined. Caller streams via createReadStream. */
+	bodyPath?: string;
 	cache: "HIT" | "MISS_DIRECT" | "MISS_WORKER";
 }

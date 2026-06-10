@@ -155,9 +155,21 @@ export class ProxyService {
 			this.logger.info({ targetUrl, time }, "[CACHE HIT]");
 		}
 
-		const raw = await fs.readFile(hit.absPath);
 		const isHtml = hit.contentType.startsWith("text/html");
 		const isCss = hit.contentType.startsWith("text/css");
+
+		if (!isHtml && !isCss) {
+			return {
+				contentType: hit.contentType,
+				archiveUrl: targetUrl,
+				originalUrl: targetUrl,
+				archiveTime: hit.archiveTime ?? time,
+				bodyPath: hit.absPath,
+				cache: cacheStatus,
+			};
+		}
+
+		const raw = await fs.readFile(hit.absPath);
 		let body: string | Buffer = raw;
 
 		if (isHtml) {
