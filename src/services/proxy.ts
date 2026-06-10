@@ -7,7 +7,7 @@ import { cachedCdxFetch } from "../lib/cdx-cache";
 import type { DirectClient } from "../lib/dependencies";
 import { describeFetchError, errorHasStatus } from "../lib/errors";
 import { extractCdnEmbeddedUrl } from "../lib/redirect-unwrapper";
-import { rewriteCssUrls, rewriteHtmlUrls, stripWaybackToolbar } from "../lib/url-rewriter";
+import { inlineCssLinks, rewriteCssUrls, rewriteHtmlUrls, stripWaybackToolbar } from "../lib/url-rewriter";
 import { isHostWhitelisted } from "../lib/url-validator";
 import type { Config } from "../models/config";
 import type { ProxyResult } from "../models/proxy";
@@ -161,7 +161,13 @@ export class ProxyService {
 				this.config.lockTime,
 				this.config.proxyBase,
 			);
-			body = html;
+			body = await inlineCssLinks(
+				html,
+				this.buildCssFetcher(),
+				time,
+				this.config.lockTime,
+				this.config.proxyBase,
+			);
 
 			// Tier 1 (prewarm): fire-and-forget prefetch of discovered assets.
 			// Errors are swallowed so prewarm failures never affect the foreground response.
@@ -208,6 +214,29 @@ export class ProxyService {
 			archiveTime: hit.archiveTime ?? time,
 			body,
 			cache: cacheStatus,
+		};
+	}
+
+	private buildCssFetcher(): (cssUrl: string, ts: string) => Promise<string | null> {
+		return async (cssUrl: string, ts: string): Promise<string | null> => {
+			try {
+				const hit = await this.cache.lookup(cssUrl, ts);
+				if (hit) {
+					const raw = await fs.readFile(hit.absPath);
+					return raw.toString("utf-8");
+				}
+				if (!this.directClient) return null;
+				const result = await this.directClient.fetchAtRequestedTime(cssUrl, ts);
+				if (result.outcome !== "ok" || !result.body) return null;
+				await this.cache.writeFile(cssUrl, ts, result.body);
+				await this.cache.writeContentTypeSidecar(cssUrl, ts, "text/css");
+				if (result.resolvedTime) {
+					await this.cache.writeResolvedTimeSidecar(ts, cssUrl, result.resolvedTime);
+				}
+				return result.body.toString("utf-8");
+			} catch {
+				return null;
+			}
 		};
 	}
 
