@@ -25,11 +25,12 @@ describe("inlineCssLinks", () => {
 
   it("rewrites url() references inside inlined CSS", async () => {
     const imgUrl = "http://www.novell.com/images/bg.png";
-    const rawCss = `body { background: url(/web/${TIME}/${imgUrl}); }`;
+    const rawCss = `body { background: url(${imgUrl}); }`;
     const html = `<html><head><link rel="stylesheet" href="${proxyPath(CSS_URL)}"></head><body></body></html>`;
     const result = await inlineCssLinks(html, fetchReturns(rawCss), TIME, false, "");
-    // rewriteCssUrls should rewrite the url() to a proxy path
+    // rewriteCssUrls must rewrite the bare origin URL to a proxy path
     expect(result).toContain(`/web/${TIME}/${imgUrl}`);
+    expect(result).not.toContain(`url(${imgUrl})`);
   });
 
   it("preserves the media attribute as <style media='...'>", async () => {
