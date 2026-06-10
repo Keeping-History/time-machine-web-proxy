@@ -4,6 +4,7 @@
 // The token-bucket test uses jest fake timers to control Date.now() and
 // setTimeout without real wall-clock delay.
 
+import { Readable } from "node:stream";
 import type pino from "pino";
 import { WaybackDirectClient } from "../../src/clients/wayback-direct-client";
 
@@ -20,6 +21,15 @@ function makeLogger(): pino.Logger {
 	} as unknown as pino.Logger;
 }
 
+/** Drain a Node.js Readable to a UTF-8 string. */
+async function drainToString(readable: Readable): Promise<string> {
+	const chunks: Buffer[] = [];
+	for await (const chunk of readable) {
+		chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as Uint8Array));
+	}
+	return Buffer.concat(chunks).toString("utf-8");
+}
+
 /** Build a minimal Response-like object that satisfies our fetch usage. */
 function makeFetchResponse(opts: {
 	status: number;
@@ -28,6 +38,7 @@ function makeFetchResponse(opts: {
 	body?: string | Uint8Array;
 }): Response {
 	const headersMap = new Map(Object.entries(opts.headers ?? {}));
+	const bodyData = opts.body;
 	return {
 		status: opts.status,
 		ok: opts.status >= 200 && opts.status < 300,
@@ -35,16 +46,16 @@ function makeFetchResponse(opts: {
 		headers: {
 			get: (name: string) => headersMap.get(name.toLowerCase()) ?? null,
 		},
-		arrayBuffer: async () => {
-			const data = opts.body ?? "";
-			const bytes = typeof data === "string" ? Buffer.from(data) : Buffer.from(data);
-			// Copy into a fresh ArrayBuffer to avoid the Node.js Buffer pool
-			// slab issue (buf.buffer is an 8 KiB pool, not just the string bytes).
-			const ab = new ArrayBuffer(bytes.byteLength);
-			new Uint8Array(ab).set(bytes);
-			return ab;
-		},
-		text: async () => (typeof opts.body === "string" ? opts.body : ""),
+		body: bodyData !== undefined
+			? new ReadableStream<Uint8Array>({
+				start(controller) {
+					const bytes = typeof bodyData === "string" ? Buffer.from(bodyData) : Buffer.from(bodyData);
+					if (bytes.length > 0) controller.enqueue(bytes);
+					controller.close();
+				},
+			})
+			: null,
+		text: async () => (typeof bodyData === "string" ? bodyData : ""),
 	} as unknown as Response;
 }
 
@@ -79,7 +90,8 @@ describe("WaybackDirectClient.fetchAtResolvedTime", () => {
 		const client = makeClient({ ratePerSecond: 1000, burst: 1000 });
 		const result = await client.fetchAtResolvedTime("http://example.com/", "20200101000000");
 		expect(result.outcome).toBe("ok");
-		expect(result.body?.toString()).toBe(bodyText);
+		expect(result.body).toBeInstanceOf(Readable);
+		expect(await drainToString(result.body!)).toBe(bodyText);
 		expect(result.contentType).toBe("text/html; charset=utf-8");
 	});
 

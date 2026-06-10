@@ -222,7 +222,10 @@ export class CacheService {
 	async writeStream(url: string, time: string, readable: Readable): Promise<void> {
 		const dest = this.computeAbsPath(url, time);
 		const existing = this.writeInflight.get(dest);
-		if (existing) return existing;
+		if (existing) {
+			readable.resume(); // drain and discard — another write owns the destination
+			return existing;
+		}
 		const p = (async () => {
 			await fs.mkdir(dirname(dest), { recursive: true });
 			const tmp = `${dest}${TMP_SUFFIX}`;

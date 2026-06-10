@@ -70,6 +70,7 @@ jest.mock("bullmq", () => ({
 // --- Imports (after mocks) ---------------------------------------------------
 
 import { promises as fsPromises } from "node:fs";
+import { Readable } from "node:stream";
 import type pino from "pino";
 import type { RequestedResult, ResolvedResult } from "../../src/clients/wayback-direct-client";
 import { rewriteHtmlUrls, stripWaybackToolbar } from "../../src/lib/url-rewriter";
@@ -97,6 +98,7 @@ function makeLogger(): pino.Logger {
 function makeCache(dir = "/cache"): {
 	cacheDirForJob: jest.Mock;
 	writeFile: jest.Mock;
+	writeStream: jest.Mock;
 	writeContentTypeSidecar: jest.Mock;
 	writeNotFoundSentinel: jest.Mock;
 	writeTentativeNotFoundSentinel: jest.Mock;
@@ -106,6 +108,7 @@ function makeCache(dir = "/cache"): {
 	return {
 		cacheDirForJob: jest.fn((time: string, host: string) => `${dir}/v2/${time}/${host}`),
 		writeFile: jest.fn().mockResolvedValue(undefined),
+		writeStream: jest.fn().mockResolvedValue(undefined),
 		writeContentTypeSidecar: jest.fn().mockResolvedValue(undefined),
 		writeNotFoundSentinel: jest.fn().mockResolvedValue(undefined),
 		writeTentativeNotFoundSentinel: jest.fn().mockResolvedValue(undefined),
@@ -128,7 +131,7 @@ function defaultDirectClient(): {
 		fetchAtRequestedTime: jest.fn(
 			async (_url: string, _ts: string): Promise<RequestedResult> => ({
 				outcome: "ok" as const,
-				body: Buffer.from("<html></html>"),
+				body: Readable.from([Buffer.from("<html></html>")]),
 				contentType: "text/html",
 				resolvedTime: "20200115000000",
 			}),
@@ -136,7 +139,7 @@ function defaultDirectClient(): {
 		fetchAtResolvedTime: jest.fn(
 			async (_url: string, _ts: string): Promise<ResolvedResult> => ({
 				outcome: "ok" as const,
-				body: Buffer.from("<html></html>"),
+				body: Readable.from([Buffer.from("<html></html>")]),
 				contentType: "text/html",
 			}),
 		),
@@ -340,7 +343,7 @@ describe("worker progress emission", () => {
 		const directClient: ArchiveDirectClient = {
 			fetchAtRequestedTime: jest.fn(async () => ({
 				outcome: "ok" as const,
-				body: Buffer.from("ok"),
+				body: Readable.from([Buffer.from("ok")]),
 				contentType: "text/html",
 				resolvedTime: "20200115000000",
 			})),
@@ -440,9 +443,9 @@ describe("exact worker processor", () => {
 		expect(directClient.fetchAtResolvedTime).not.toHaveBeenCalled();
 	});
 
-	it("writes the response body to cache.writeFile keyed on (url, requested time, body)", async () => {
+	it("writes the response body to cache.writeStream keyed on (url, requested time)", async () => {
 		const cache = makeCache();
-		const body = Buffer.from("page-bytes");
+		const body = Readable.from([Buffer.from("page-bytes")]);
 		const directClient: ArchiveDirectClient = {
 			fetchAtRequestedTime: jest.fn(async () => ({
 				outcome: "ok" as const,
@@ -459,7 +462,7 @@ describe("exact worker processor", () => {
 			data: { url: "https://example.com/about", time: "20200101000000" },
 			token: "tk-w",
 		});
-		expect(cache.writeFile).toHaveBeenCalledWith(
+		expect(cache.writeStream).toHaveBeenCalledWith(
 			"https://example.com/about",
 			"20200101000000",
 			body,
@@ -560,7 +563,7 @@ describe("exact worker processor", () => {
 			"20200101000000",
 			"https://example.com/missing",
 		);
-		expect(cache.writeFile).not.toHaveBeenCalled();
+		expect(cache.writeStream).not.toHaveBeenCalled();
 		expect(cache.lookup).not.toHaveBeenCalled();
 	});
 
@@ -569,7 +572,7 @@ describe("exact worker processor", () => {
 		const directClient: ArchiveDirectClient = {
 			fetchAtRequestedTime: jest.fn(async () => ({
 				outcome: "ok" as const,
-				body: Buffer.from("ok"),
+				body: Readable.from([Buffer.from("ok")]),
 				contentType: "text/html",
 				resolvedTime: "20010822231227",
 			})),
@@ -594,7 +597,7 @@ describe("exact worker processor", () => {
 		const directClient: ArchiveDirectClient = {
 			fetchAtRequestedTime: jest.fn(async () => ({
 				outcome: "ok" as const,
-				body: Buffer.from("ok"),
+				body: Readable.from([Buffer.from("ok")]),
 				contentType: "text/html",
 				// resolvedTime intentionally omitted
 			})),
@@ -615,7 +618,7 @@ describe("exact worker processor", () => {
 		const directClient: ArchiveDirectClient = {
 			fetchAtRequestedTime: jest.fn(async () => ({
 				outcome: "ok" as const,
-				body: Buffer.from("ok"),
+				body: Readable.from([Buffer.from("ok")]),
 				contentType: "text/html",
 				resolvedTime: "not-a-timestamp",
 			})),

@@ -3,6 +3,7 @@
 // The inner WaybackDirectClient is replaced with a jest mock so we can control
 // exactly when each upstream promise resolves. No real network calls are made.
 
+import { Readable } from "node:stream";
 import { DedupingDirectClient } from "../../src/clients/deduping-direct-client";
 import type { WaybackDirectClient } from "../../src/clients/wayback-direct-client";
 
@@ -37,10 +38,10 @@ function makeMockInner(): MockInner {
 	};
 }
 
-const OK_RESOLVED = { outcome: "ok" as const, body: Buffer.from("r"), contentType: "text/plain" };
+const OK_RESOLVED = { outcome: "ok" as const, body: Readable.from(["r"]), contentType: "text/plain" };
 const OK_REQUESTED = {
 	outcome: "ok" as const,
-	body: Buffer.from("q"),
+	body: Readable.from(["q"]),
 	contentType: "text/html",
 	resolvedTime: "20200101000000",
 };

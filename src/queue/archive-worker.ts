@@ -159,7 +159,7 @@ export function startArchiveWorkers(opts: StartArchiveWorkersOpts): ArchiveWorke
 						if (!result.body) {
 							throw new Error(`direct fetch returned ok with no body for ${url} @ ${time}`);
 						}
-						await cache.writeFile(url, time, result.body);
+						await cache.writeStream(url, time, result.body);
 						if (result.contentType) {
 							await cache.writeContentTypeSidecar(url, time, result.contentType);
 						}

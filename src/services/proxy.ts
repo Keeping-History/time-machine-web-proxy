@@ -112,7 +112,7 @@ export class ProxyService {
 			if (this.directClient) {
 				const direct = await this.directClient.fetchAtRequestedTime(targetUrl, time);
 				if (direct.outcome === "ok" && direct.body) {
-					await this.cache.writeFile(targetUrl, time, direct.body);
+					await this.cache.writeStream(targetUrl, time, direct.body);
 					if (direct.resolvedTime) {
 						await this.cache.writeResolvedTimeSidecar(time, targetUrl, direct.resolvedTime);
 					}
@@ -187,7 +187,7 @@ export class ProxyService {
 						.fetchAtResolvedTime(asset.url, asset.embeddedTs)
 						.then(async (result) => {
 							if (result.outcome === "ok" && result.body) {
-								await this.cache.writeFile(asset.url, asset.embeddedTs, result.body);
+								await this.cache.writeStream(asset.url, asset.embeddedTs, result.body);
 								if (result.contentType) {
 									await this.cache.writeContentTypeSidecar(
 										asset.url,
@@ -231,7 +231,6 @@ export class ProxyService {
 
 	private buildCssFetcher(): (cssUrl: string, ts: string) => Promise<string | null> {
 		return async (cssUrl: string, ts: string): Promise<string | null> => {
-			let body: Buffer | null = null;
 			try {
 				const hit = await this.cache.lookup(cssUrl, ts);
 				if (hit) {
@@ -241,17 +240,20 @@ export class ProxyService {
 				if (!this.directClient) return null;
 				const result = await this.directClient.fetchAtRequestedTime(cssUrl, ts);
 				if (result.outcome !== "ok" || !result.body) return null;
-				body = result.body;
 				try {
-					await this.cache.writeFile(cssUrl, ts, result.body);
+					await this.cache.writeStream(cssUrl, ts, result.body);
 					await this.cache.writeContentTypeSidecar(cssUrl, ts, result.contentType ?? "text/css");
 					if (result.resolvedTime) {
 						await this.cache.writeResolvedTimeSidecar(ts, cssUrl, result.resolvedTime);
 					}
 				} catch (err) {
 					this.logger.warn({ cssUrl, ts, err }, "[proxy] CSS cache write error");
+					return null;
 				}
-				return body.toString("utf-8");
+				const written = await this.cache.lookup(cssUrl, ts);
+				if (!written) return null;
+				const raw = await fs.readFile(written.absPath);
+				return raw.toString("utf-8");
 			} catch (err) {
 				this.logger.warn({ cssUrl, ts, err }, "[proxy] CSS fetch error");
 				return null;

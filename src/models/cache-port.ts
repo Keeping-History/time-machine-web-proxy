@@ -1,7 +1,10 @@
+import type { Readable } from "node:stream";
+
 /** Minimal cache operations required by the archive workers. */
 export interface CachePort {
 	cacheDirForJob(time: string, host: string): string;
 	writeFile(url: string, time: string, data: Buffer): Promise<void>;
+	writeStream(url: string, time: string, readable: Readable): Promise<void>;
 	writeContentTypeSidecar(url: string, time: string, contentType: string): Promise<void>;
 	writeNotFoundSentinel(time: string, url: string): Promise<void>;
 	writeTentativeNotFoundSentinel(time: string, url: string): Promise<void>;

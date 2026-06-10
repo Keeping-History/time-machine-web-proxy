@@ -1,3 +1,4 @@
+import { Readable } from "node:stream";
 import type pino from "pino";
 import { TIMESTAMP_RE } from "../lib/archive-time";
 import { describeFetchError } from "../lib/errors";
@@ -15,7 +16,7 @@ export type DirectFetchOutcome = "ok" | "not_found" | "fallback";
 
 export interface ResolvedResult {
 	outcome: DirectFetchOutcome;
-	body?: Buffer;
+	body?: Readable;
 	contentType?: string;
 	reason?: string;
 }
@@ -260,10 +261,9 @@ export class WaybackDirectClient {
 		}
 
 		if (res.status === 200) {
-			const arrayBuffer = await res.arrayBuffer();
 			return {
 				outcome: "ok",
-				body: Buffer.from(arrayBuffer),
+				body: res.body ? Readable.fromWeb(res.body as Parameters<typeof Readable.fromWeb>[0]) : Readable.from([]),
 				contentType: res.headers.get("content-type") ?? undefined,
 			};
 		}
@@ -328,10 +328,9 @@ export class WaybackDirectClient {
 		if (res.status === 200) {
 			const resolvedTimeMatch = RESOLVED_TIME_RE.exec(res.url);
 			const resolvedTime = resolvedTimeMatch?.[1];
-			const arrayBuffer = await res.arrayBuffer();
 			return {
 				outcome: "ok",
-				body: Buffer.from(arrayBuffer),
+				body: res.body ? Readable.fromWeb(res.body as Parameters<typeof Readable.fromWeb>[0]) : Readable.from([]),
 				contentType: res.headers.get("content-type") ?? undefined,
 				resolvedTime,
 			};

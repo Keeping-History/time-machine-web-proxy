@@ -17,6 +17,7 @@
 //   Prewarm (Tier 1): after HTML response, fire-and-forget fetchAtResolvedTime per discoveredAsset
 
 import { promises as fs } from "node:fs";
+import { Readable } from "node:stream";
 import pino from "pino";
 import type { ArchiveJobClientPort } from "../../src/clients/archive-job-client";
 import type { DirectClient } from "../../src/lib/dependencies";
@@ -53,6 +54,7 @@ const makeCache = (lookupImpl?: jest.Mock): jest.Mocked<CacheService> =>
 	({
 		lookup: lookupImpl ?? jest.fn().mockResolvedValue(null),
 		writeFile: jest.fn().mockResolvedValue(undefined),
+		writeStream: jest.fn().mockResolvedValue(undefined),
 		writeNotFoundSentinel: jest.fn().mockResolvedValue(undefined),
 		writeResolvedTimeSidecar: jest.fn().mockResolvedValue(undefined),
 		writeContentTypeSidecar: jest.fn().mockResolvedValue(undefined),
@@ -261,7 +263,7 @@ describe("ProxyService.fetch — Tier 2 direct fetch", () => {
 		const cache = makeCache(lookup);
 		const client = makeClient();
 		const directClient = makeDirectClient();
-		const directBody = Buffer.from(PLAIN_HTML_BODY);
+		const directBody = Readable.from([Buffer.from(PLAIN_HTML_BODY)]);
 		directClient.fetchAtRequestedTime.mockResolvedValue({
 			outcome: "ok",
 			body: directBody,
@@ -282,7 +284,7 @@ describe("ProxyService.fetch — Tier 2 direct fetch", () => {
 
 		expect(result.cache).toBe("MISS_DIRECT");
 		expect(client.enqueueExactAndWait).not.toHaveBeenCalled();
-		expect(cache.writeFile).toHaveBeenCalledWith(TARGET_HTML_URL, TIME, directBody);
+		expect(cache.writeStream).toHaveBeenCalledWith(TARGET_HTML_URL, TIME, directBody);
 		expect(cache.writeResolvedTimeSidecar).toHaveBeenCalledWith(
 			TIME,
 			TARGET_HTML_URL,
@@ -305,7 +307,7 @@ describe("ProxyService.fetch — Tier 2 direct fetch", () => {
 		const directClient = makeDirectClient();
 		directClient.fetchAtRequestedTime.mockResolvedValue({
 			outcome: "ok",
-			body: Buffer.from(PLAIN_HTML_BODY),
+			body: Readable.from([Buffer.from(PLAIN_HTML_BODY)]),
 			contentType: "text/html; charset=utf-8",
 			resolvedTime: "20200101010000",
 		});
@@ -338,7 +340,7 @@ describe("ProxyService.fetch — Tier 2 direct fetch", () => {
 		const directClient = makeDirectClient();
 		directClient.fetchAtRequestedTime.mockResolvedValue({
 			outcome: "ok",
-			body: Buffer.from(PLAIN_HTML_BODY),
+			body: Readable.from([Buffer.from(PLAIN_HTML_BODY)]),
 			// no contentType on the direct result
 		});
 		mockedReadFile.mockResolvedValue(Buffer.from(PLAIN_HTML_BODY));
@@ -366,7 +368,7 @@ describe("ProxyService.fetch — Tier 2 direct fetch", () => {
 		const directClient = makeDirectClient();
 		directClient.fetchAtRequestedTime.mockResolvedValue({
 			outcome: "ok",
-			body: Buffer.from(PLAIN_HTML_BODY),
+			body: Readable.from([Buffer.from(PLAIN_HTML_BODY)]),
 			contentType: "text/html",
 			// no resolvedTime
 		});
@@ -418,7 +420,7 @@ describe("ProxyService.fetch — Tier 2 direct fetch", () => {
 
 		expect(result.cache).toBe("MISS_WORKER");
 		expect(client.enqueueExactAndWait).toHaveBeenCalledWith(TARGET_HTML_URL, TIME);
-		expect(cache.writeFile).not.toHaveBeenCalled();
+		expect(cache.writeStream).not.toHaveBeenCalled();
 	});
 
 	it("asset MISS without HTML context: Tier 2 first, Tier 3 on fallback", async () => {
@@ -514,10 +516,10 @@ describe("ProxyService.fetch — Tier 1 prewarm (fire-and-forget)", () => {
 		// Prewarm succeeds
 		directClient.fetchAtResolvedTime.mockResolvedValue({
 			outcome: "ok",
-			body: Buffer.from("fake asset"),
+			body: Readable.from([Buffer.from("fake asset")]),
 			contentType: "image/png",
 		});
-		(cache as jest.Mocked<CacheService>).writeFile = jest.fn().mockResolvedValue(undefined);
+		(cache as jest.Mocked<CacheService>).writeStream = jest.fn().mockResolvedValue(undefined);
 		mockedReadFile.mockResolvedValue(Buffer.from(HTML_BODY));
 		const svc = new ProxyService(cache, client, logger, baseConfig, null, directClient);
 
@@ -584,7 +586,7 @@ describe("ProxyService.fetch — Tier 1 prewarm (fire-and-forget)", () => {
 		const cache = makeCache(lookup);
 		const client = makeClient();
 		const directClient = makeDirectClient();
-		const directBody = Buffer.from(HTML_BODY);
+		const directBody = Readable.from([Buffer.from(HTML_BODY)]);
 		directClient.fetchAtRequestedTime.mockResolvedValue({
 			outcome: "ok",
 			body: directBody,
@@ -593,7 +595,7 @@ describe("ProxyService.fetch — Tier 1 prewarm (fire-and-forget)", () => {
 		});
 		directClient.fetchAtResolvedTime.mockResolvedValue({
 			outcome: "ok",
-			body: Buffer.from("asset bytes"),
+			body: Readable.from([Buffer.from("asset bytes")]),
 		});
 		mockedReadFile.mockResolvedValue(Buffer.from(HTML_BODY));
 		const svc = new ProxyService(
@@ -638,7 +640,7 @@ describe("ProxyResult.cache values", () => {
 		const directClient = makeDirectClient();
 		directClient.fetchAtRequestedTime.mockResolvedValue({
 			outcome: "ok",
-			body: BIN_BODY,
+			body: Readable.from([BIN_BODY]),
 			contentType: "image/png",
 		});
 		mockedReadFile.mockResolvedValue(BIN_BODY);
@@ -1259,13 +1261,19 @@ describe("ProxyService.fetch — CSS inlining", () => {
 		const waybackHref = `/web/${CSS_TS}/${INLINE_CSS_URL}`;
 		const html = htmlWithLink(waybackHref);
 
-		// HTML page: cache HIT; CSS: cache MISS
 		const htmlHitLocal: CacheHit = { absPath: "/cache/page.html", contentType: "text/html" };
+		const cssHitAfterWrite: CacheHit = { absPath: "/cache/style.css", contentType: "text/css" };
+		// First CSS lookup → miss; second (after writeStream) → hit
+		let cssLookupCalls = 0;
 		const cacheLookup = jest
 			.fn()
 			.mockImplementation((url: string, _ts: string) => {
 				if (url === TARGET_HTML_URL) return Promise.resolve(htmlHitLocal);
-				return Promise.resolve(null); // CSS miss
+				if (url === INLINE_CSS_URL) {
+					cssLookupCalls++;
+					if (cssLookupCalls >= 2) return Promise.resolve(cssHitAfterWrite);
+				}
+				return Promise.resolve(null);
 			});
 
 		const cache = makeCache(cacheLookup);
@@ -1273,18 +1281,21 @@ describe("ProxyService.fetch — CSS inlining", () => {
 		const directClient = makeDirectClient();
 		directClient.fetchAtRequestedTime.mockResolvedValueOnce({
 			outcome: "ok",
-			body: Buffer.from(CSS_CONTENT),
+			body: Readable.from([Buffer.from(CSS_CONTENT)]),
 			contentType: "text/css",
 		});
 
-		mockedReadFile.mockResolvedValueOnce(Buffer.from(html));
+		// readFile: HTML first, then CSS from cache hit path
+		mockedReadFile
+			.mockResolvedValueOnce(Buffer.from(html))
+			.mockResolvedValueOnce(Buffer.from(CSS_CONTENT));
 
 		const svc = new ProxyService(cache, client, logger, inlineConfig, null, directClient);
 		const result = await svc.fetch(TARGET_HTML_URL, TIME);
 
 		expect(String(result.body)).toContain(`<style>${CSS_CONTENT}</style>`);
 		expect(String(result.body)).not.toContain('<link rel="stylesheet"');
-		expect(cache.writeFile).toHaveBeenCalledWith(INLINE_CSS_URL, CSS_TS, expect.any(Buffer));
+		expect(cache.writeStream).toHaveBeenCalledWith(INLINE_CSS_URL, CSS_TS, expect.any(Readable));
 		expect(cache.writeContentTypeSidecar).toHaveBeenCalledWith(INLINE_CSS_URL, CSS_TS, "text/css");
 		expect(cache.writeResolvedTimeSidecar).not.toHaveBeenCalled();
 	});

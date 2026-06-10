@@ -918,6 +918,44 @@ describe("CacheService.writeStream", () => {
 		expect(mockCreateWriteStream).toHaveBeenCalledTimes(1);
 		expect(mockFs.rename).toHaveBeenCalledTimes(1);
 	});
+
+	it("drains the losing Readable via resume() when writeInflight short-circuits", async () => {
+		const svc = makeService();
+		const url = "https://example.com/asset.bin";
+
+		// Hold the first write open until we can confirm the second stream is drained
+		let releaseFirst!: () => void;
+		const firstGate = new Promise<void>((r) => { releaseFirst = r; });
+		mockCreateWriteStream.mockImplementationOnce(() => {
+			const pass = new PassThrough();
+			// Defer end until gate releases so writeInflight stays active
+			const origEnd = pass.end.bind(pass);
+			pass.end = ((...args: unknown[]) => {
+				void firstGate.then(() => (origEnd as (...a: unknown[]) => unknown)(...args));
+				return pass;
+			}) as typeof pass.end;
+			return pass;
+		});
+
+		const second = Readable.from([Buffer.from("b")]);
+		const endedSpy = jest.fn();
+		second.on("end", endedSpy);
+
+		const firstPromise = svc.writeStream(url, TIME, Readable.from([Buffer.from("a")]));
+		// Give the first write a tick to register in writeInflight
+		await new Promise((r) => setImmediate(r));
+
+		const secondPromise = svc.writeStream(url, TIME, second);
+
+		// Release the first write and let both settle
+		releaseFirst();
+		await Promise.all([firstPromise, secondPromise]);
+
+		// second Readable must have been fully consumed (resume'd)
+		expect(endedSpy).toHaveBeenCalled();
+		// Still only one write path executed
+		expect(mockCreateWriteStream).toHaveBeenCalledTimes(1);
+	});
 });
 
 describe("CacheService.handleCacheClear (v2)", () => {
