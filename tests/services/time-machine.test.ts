@@ -3,6 +3,7 @@ import pino from "pino";
 import { ShutdownController } from "../../src/lib/shutdown";
 import type { Config } from "../../src/models/config";
 import type { CacheService } from "../../src/services/cache";
+import type { SystemStatus } from "../../src/models/status";
 import type { ProxyService } from "../../src/services/proxy";
 import { TimeMachineService } from "../../src/services/time-machine";
 
@@ -64,7 +65,7 @@ const makeService = (
 	overrides: {
 		triggerDomainCrawl?: ProxyMock["triggerDomainCrawl"];
 		config?: Partial<Config>;
-		getStatus?: () => Promise<unknown>;
+		getStatus?: () => Promise<SystemStatus>;
 	} = {},
 ) => {
 	const proxy = {

@@ -19,6 +19,7 @@ interface FakeJob {
 
 interface FakeQueue {
 	add: jest.Mock;
+	addBulk?: jest.Mock;
 }
 
 type AddArgs = [string, Record<string, unknown>, Record<string, unknown>];
@@ -35,6 +36,7 @@ function makeFakeQueue(): FakeQueue {
 		add: jest.fn(async (_name: string, _data: unknown, opts: { jobId?: string }) =>
 			makeFakeJob(opts?.jobId),
 		),
+		addBulk: jest.fn().mockResolvedValue([]),
 	};
 }
 
@@ -412,20 +414,21 @@ describe("ArchiveJobClient.enqueueCrawlChunks", () => {
 	it("adds one chunk job per page (pages 0..N-1) when totalPages=3", async () => {
 		const { client, chunkQueue } = makeClient();
 		await client.enqueueCrawlChunks("apple.com", TIME, 3, 1000);
-		expect(chunkQueue.add).toHaveBeenCalledTimes(3);
+		expect(chunkQueue.addBulk!).toHaveBeenCalledTimes(1);
+		const jobs = chunkQueue.addBulk!.mock.calls[0][0] as Array<{ name: string; data: Record<string, unknown>; opts: Record<string, unknown> }>;
+		expect(jobs).toHaveLength(3);
 		for (let page = 0; page < 3; page++) {
-			const [name, data, opts] = chunkQueue.add.mock.calls[page] as AddArgs;
-			expect(name).toBe("crawl-chunk");
-			expect(data).toMatchObject({ host: "apple.com", time: TIME, page });
-			expect(opts.jobId).toBe(expectedChunkJobId("apple.com", TIME, page));
+			expect(jobs[page].name).toBe("crawl-chunk");
+			expect(jobs[page].data).toMatchObject({ host: "apple.com", time: TIME, page });
+			expect(jobs[page].opts.jobId).toBe(expectedChunkJobId("apple.com", TIME, page));
 		}
 	});
 
 	it("uses deterministic jobId of form 'cc-' + sha256(host|time|page).slice(0,16)", async () => {
 		const { client, chunkQueue } = makeClient();
 		await client.enqueueCrawlChunks("apple.com", TIME, 1, 1000);
-		const [, , opts] = chunkQueue.add.mock.calls[0] as AddArgs;
-		const jobId = opts.jobId as string;
+		const jobs = chunkQueue.addBulk!.mock.calls[0][0] as Array<{ opts: Record<string, unknown> }>;
+		const jobId = jobs[0].opts.jobId as string;
 		expect(jobId).toMatch(/^cc-[0-9a-f]{16}$/);
 		expect(jobId).toBe(expectedChunkJobId("apple.com", TIME, 0));
 	});
@@ -433,7 +436,8 @@ describe("ArchiveJobClient.enqueueCrawlChunks", () => {
 	it("clips to maxFanout when totalPages exceeds it", async () => {
 		const { client, chunkQueue } = makeClient();
 		await client.enqueueCrawlChunks("apple.com", TIME, 10, 3);
-		expect(chunkQueue.add).toHaveBeenCalledTimes(3);
+		const jobs = chunkQueue.addBulk!.mock.calls[0][0] as unknown[];
+		expect(jobs).toHaveLength(3);
 	});
 
 	it("is a no-op when domainCrawlEnabled is false", async () => {
@@ -441,19 +445,20 @@ describe("ArchiveJobClient.enqueueCrawlChunks", () => {
 		await expect(
 			client.enqueueCrawlChunks("apple.com", TIME, 5, 1000),
 		).resolves.toBeUndefined();
-		expect(chunkQueue.add).not.toHaveBeenCalled();
+		expect(chunkQueue.addBulk!).not.toHaveBeenCalled();
 	});
 
 	it("enqueues 0 jobs when totalPages is 0", async () => {
 		const { client, chunkQueue } = makeClient();
 		await client.enqueueCrawlChunks("apple.com", TIME, 0, 1000);
-		expect(chunkQueue.add).not.toHaveBeenCalled();
+		expect(chunkQueue.addBulk!).not.toHaveBeenCalled();
 	});
 
 	it("passes the CHUNK_JOB_OPTS: attempts/backoff/removeOnComplete/removeOnFail", async () => {
 		const { client, chunkQueue } = makeClient();
 		await client.enqueueCrawlChunks("apple.com", TIME, 1, 1000);
-		const [, , opts] = chunkQueue.add.mock.calls[0] as AddArgs;
+		const jobs = chunkQueue.addBulk!.mock.calls[0][0] as Array<{ opts: Record<string, unknown> }>;
+		const opts = jobs[0].opts;
 		expect(opts.attempts).toBe(3);
 		expect(opts.backoff).toEqual({ type: "exponential", delay: 2000 });
 		expect(opts.removeOnComplete).toEqual({ count: 100, age: 3600 });

@@ -423,6 +423,7 @@ export function attachQueueLogger(name: string, events: QueueEvents, logger: pin
 	});
 
 	events.on("stalled", ({ jobId }) => {
+		startTimes.delete(jobId);
 		logger.warn({ queue: name, jobId, event: "stalled" }, `[queue:${name}] stalled`);
 	});
 

@@ -9,10 +9,17 @@ jest.mock("node:fs", () => ({
 		rm: jest.fn(),
 		mkdir: jest.fn(),
 		rename: jest.fn(),
+		open: jest.fn(),
 	},
+	// createWriteStream is a sync constructor (not under promises). Tests that
+	// exercise writeStream override the return value to a PassThrough so
+	// pipeline can resolve; the default jest.fn() return is enough for tests
+	// that never call writeStream.
+	createWriteStream: jest.fn(),
 }));
 
-import { promises as fs } from "node:fs";
+import { createWriteStream, promises as fs } from "node:fs";
+import { PassThrough, Readable } from "node:stream";
 import pino from "pino";
 import { CacheService } from "../../src/services/cache";
 
@@ -22,6 +29,17 @@ const makeService = (cacheEnabled = true, notFoundTtlDays = 30) =>
 	new CacheService({ cacheDir: "/tmp/cache", cacheEnabled, notFoundTtlDays }, logger);
 
 const mockFs = fs as jest.Mocked<typeof fs>;
+
+function fakeFileHandle(data: Buffer) {
+	return {
+		read: jest.fn().mockImplementation((buf: Buffer, _off: number, len: number) => {
+			const n = Math.min(data.length, len);
+			data.copy(buf, 0, 0, n);
+			return Promise.resolve({ bytesRead: n });
+		}),
+		close: jest.fn().mockResolvedValue(undefined),
+	};
+}
 
 beforeEach(() => {
 	jest.resetAllMocks();
@@ -200,15 +218,14 @@ describe("CacheService.lookup (v2)", () => {
 		// cached body for an HTML signature serves it correctly without a
 		// cache wipe.
 		(mockFs.access as jest.Mock).mockResolvedValue(undefined);
-		(mockFs.readFile as jest.Mock).mockImplementation((p: string) => {
-			if (p.includes("/.content-types/"))
-				return Promise.reject(Object.assign(new Error("ENOENT"), { code: "ENOENT" }));
-			if (p.endsWith(".resolved-time"))
-				return Promise.reject(Object.assign(new Error("ENOENT"), { code: "ENOENT" }));
-			return Promise.resolve(
+		(mockFs.readFile as jest.Mock).mockRejectedValue(
+			Object.assign(new Error("ENOENT"), { code: "ENOENT" }),
+		);
+		(mockFs.open as jest.Mock).mockResolvedValue(
+			fakeFileHandle(
 				Buffer.from('<HTML><HEAD><meta http-equiv="refresh" content="0;url=/"></HEAD></HTML>'),
-			);
-		});
+			),
+		);
 		const svc = makeService();
 		const result = await svc.lookup("https://www.yahoo.com/r/ci", TIME);
 		expect(result?.contentType).toBe("text/html; charset=utf-8");
@@ -216,11 +233,12 @@ describe("CacheService.lookup (v2)", () => {
 
 	it("sniff recognises an XML prolog", async () => {
 		(mockFs.access as jest.Mock).mockResolvedValue(undefined);
-		(mockFs.readFile as jest.Mock).mockImplementation((p: string) => {
-			if (p.includes("/.content-types/") || p.endsWith(".resolved-time"))
-				return Promise.reject(Object.assign(new Error("ENOENT"), { code: "ENOENT" }));
-			return Promise.resolve(Buffer.from('<?xml version="1.0"?><rss></rss>'));
-		});
+		(mockFs.readFile as jest.Mock).mockRejectedValue(
+			Object.assign(new Error("ENOENT"), { code: "ENOENT" }),
+		);
+		(mockFs.open as jest.Mock).mockResolvedValue(
+			fakeFileHandle(Buffer.from('<?xml version="1.0"?><rss></rss>')),
+		);
 		const svc = makeService();
 		const result = await svc.lookup("https://example.com/feed", TIME);
 		expect(result?.contentType).toBe("application/xml");
@@ -232,32 +250,27 @@ describe("CacheService.lookup (v2)", () => {
 		// a particular type. Falsely promoting binary blobs to text/html based
 		// on a stray "<html" byte sequence would corrupt downloads.
 		(mockFs.access as jest.Mock).mockResolvedValue(undefined);
-		const readSpy = jest.fn().mockImplementation((p: string) => {
-			if (p.includes("/.content-types/") || p.endsWith(".resolved-time"))
-				return Promise.reject(Object.assign(new Error("ENOENT"), { code: "ENOENT" }));
-			return Promise.resolve(Buffer.from("<html>this is a trap</html>"));
-		});
-		(mockFs.readFile as jest.Mock).mockImplementation(readSpy);
+		(mockFs.readFile as jest.Mock).mockRejectedValue(
+			Object.assign(new Error("ENOENT"), { code: "ENOENT" }),
+		);
 		const svc = makeService();
 		const result = await svc.lookup("https://example.com/file.unknownext", TIME);
 		expect(result?.contentType).toBe("application/octet-stream");
-		// The cached body must never be read in the no-sniff path.
-		const bodyReads = readSpy.mock.calls.filter(
-			(call: [string]) =>
-				!call[0].includes("/.content-types/") && !call[0].endsWith(".resolved-time"),
-		);
-		expect(bodyReads).toHaveLength(0);
+		// sniffContentType must never be called for URLs with an extension —
+		// fs.open is the entry point for the partial-read sniff path.
+		expect(mockFs.open).not.toHaveBeenCalled();
 	});
 
 	it("sniff returns octet-stream for non-HTML/XML extensionless content", async () => {
 		// Random binary bytes should NOT be promoted to text/html. The
 		// sniffer's allowlist of signatures is intentionally narrow.
 		(mockFs.access as jest.Mock).mockResolvedValue(undefined);
-		(mockFs.readFile as jest.Mock).mockImplementation((p: string) => {
-			if (p.includes("/.content-types/") || p.endsWith(".resolved-time"))
-				return Promise.reject(Object.assign(new Error("ENOENT"), { code: "ENOENT" }));
-			return Promise.resolve(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
-		});
+		(mockFs.readFile as jest.Mock).mockRejectedValue(
+			Object.assign(new Error("ENOENT"), { code: "ENOENT" }),
+		);
+		(mockFs.open as jest.Mock).mockResolvedValue(
+			fakeFileHandle(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])),
+		);
 		const svc = makeService();
 		const result = await svc.lookup("https://example.com/blob", TIME);
 		expect(result?.contentType).toBe("application/octet-stream");
@@ -396,12 +409,16 @@ describe("CacheService.writeNotFoundSentinel + sentinel-aware lookup", () => {
 	it("writeResolvedTimeSidecar writes <root>/.resolved-time with the timestamp", async () => {
 		(mockFs.mkdir as jest.Mock).mockResolvedValue(undefined);
 		(mockFs.writeFile as jest.Mock).mockResolvedValue(undefined);
+		(mockFs.rename as jest.Mock).mockResolvedValue(undefined);
 		const svc = makeService();
 		await svc.writeResolvedTimeSidecar(TIME, "https://www.example.com/", "20010822231227");
+		const finalPath = "/tmp/cache/v2/20200101000000/www.example.com/.resolved-time";
+		const tmpPath = `${finalPath}.tmp`;
 		const path = (mockFs.writeFile as jest.Mock).mock.calls[0][0] as string;
 		const content = (mockFs.writeFile as jest.Mock).mock.calls[0][1] as string;
-		expect(path).toBe("/tmp/cache/v2/20200101000000/www.example.com/.resolved-time");
+		expect(path).toBe(tmpPath);
 		expect(content).toBe("20010822231227");
+		expect(mockFs.rename).toHaveBeenCalledWith(tmpPath, finalPath);
 	});
 
 	it("lookup populates CacheHit.archiveTime from the sidecar when present", async () => {
@@ -694,10 +711,16 @@ describe("CacheService.writeFile", () => {
 
 		expect(mockFs.writeFile).toHaveBeenCalledTimes(1);
 		const [path, contents] = (mockFs.writeFile as jest.Mock).mock.calls[0] as [string, string];
+		// atomicWrite writes to a .tmp sibling first…
 		expect(path).toMatch(
-			/^\/tmp\/cache\/v2\/20200101000000\/www\.yahoo\.com\/\.content-types\/[0-9a-f]{16}$/,
+			/^\/tmp\/cache\/v2\/20200101000000\/www\.yahoo\.com\/\.content-types\/[0-9a-f]{16}\.tmp$/,
 		);
 		expect(contents).toBe("text/html; charset=utf-8");
+		// …then renames to the final path so readers never see a partial file.
+		expect(mockFs.rename).toHaveBeenCalledWith(
+			expect.stringMatching(/\/\.content-types\/[0-9a-f]{16}\.tmp$/),
+			expect.stringMatching(/\/\.content-types\/[0-9a-f]{16}$/),
+		);
 		// Parent dir is created before the write to match the existing sentinel
 		// pattern — required when this is the first sidecar for a fresh host.
 		expect(mockFs.mkdir).toHaveBeenCalledWith(
@@ -775,6 +798,125 @@ describe("CacheService.writeFile", () => {
 
 		expect(mockFs.rename).toHaveBeenCalledTimes(1);
 		expect(mockFs.writeFile).toHaveBeenCalledTimes(1);
+	});
+});
+
+describe("CacheService.writeStream", () => {
+	const TIME = "20200101000000";
+	const mockCreateWriteStream = createWriteStream as jest.Mock;
+
+	beforeEach(() => {
+		(mockFs.mkdir as jest.Mock).mockResolvedValue(undefined);
+		(mockFs.rename as jest.Mock).mockResolvedValue(undefined);
+		// Default: return a fresh PassThrough each call so pipeline can resolve.
+		mockCreateWriteStream.mockImplementation(() => new PassThrough());
+	});
+
+	it("opens createWriteStream on the .tmp path then renames to the final destination", async () => {
+		const svc = makeService();
+		const url = "https://example.com/asset.bin";
+		const dest = svc.computeAbsPath(url, TIME);
+
+		await svc.writeStream(url, TIME, Readable.from([Buffer.from("hello")]));
+
+		const openedPath = mockCreateWriteStream.mock.calls[0][0] as string;
+		expect(openedPath).toBe(`${dest}.tmp`);
+
+		const [renameSrc, renameDest] = (mockFs.rename as jest.Mock).mock.calls[0] as [string, string];
+		expect(renameSrc).toBe(`${dest}.tmp`);
+		expect(renameDest).toBe(dest);
+	});
+
+	it("creates the parent directory before opening the write stream", async () => {
+		const order: string[] = [];
+		(mockFs.mkdir as jest.Mock).mockImplementation(async () => {
+			order.push("mkdir");
+		});
+		mockCreateWriteStream.mockImplementation(() => {
+			order.push("createWriteStream");
+			return new PassThrough();
+		});
+
+		const svc = makeService();
+		await svc.writeStream(
+			"https://example.com/deep/path/file.bin",
+			TIME,
+			Readable.from([Buffer.from("x")]),
+		);
+
+		expect(order[0]).toBe("mkdir");
+		expect(order).toContain("createWriteStream");
+		expect(mockFs.mkdir).toHaveBeenCalledWith(
+			"/tmp/cache/v2/20200101000000/example.com/deep/path",
+			{ recursive: true },
+		);
+	});
+
+	it("rejects path-traversal URL with status 400 without touching fs", async () => {
+		const svc = makeService();
+		await expect(
+			svc.writeStream(
+				"https://example.com/%2e%2e%2fetc%2fpasswd",
+				TIME,
+				Readable.from([Buffer.from("evil")]),
+			),
+		).rejects.toMatchObject({ status: 400 });
+		expect(mockCreateWriteStream).not.toHaveBeenCalled();
+		expect(mockFs.rename).not.toHaveBeenCalled();
+	});
+
+	it("rename happens AFTER the pipeline resolves — partial tmp files are never visible", async () => {
+		const order: string[] = [];
+		const pipelineGate: { release: (() => void) | null } = { release: null };
+		mockCreateWriteStream.mockImplementation(() => {
+			const pass = new PassThrough();
+			const origEnd = pass.end.bind(pass);
+			pass.end = ((...args: unknown[]) => {
+				// Defer the actual end (which signals pipeline completion) until
+				// the test releases it — this lets us assert rename is NOT called
+				// during the window where the tmp file is still being written.
+				pipelineGate.release = () => {
+					order.push("pipeline-end");
+					(origEnd as (...a: unknown[]) => unknown)(...args);
+				};
+				return pass;
+			}) as typeof pass.end;
+			return pass;
+		});
+		(mockFs.rename as jest.Mock).mockImplementation(async () => {
+			order.push("rename");
+		});
+
+		const svc = makeService();
+		const writePromise = svc.writeStream(
+			"https://example.com/asset.bin",
+			TIME,
+			Readable.from([Buffer.from("data")]),
+		);
+
+		// Give the pipeline a tick to start
+		await new Promise((r) => setImmediate(r));
+		expect(order).not.toContain("rename");
+
+		// Release the pipeline; rename should follow
+		pipelineGate.release?.();
+		await writePromise;
+
+		expect(order.indexOf("pipeline-end")).toBeLessThan(order.indexOf("rename"));
+	});
+
+	it("concurrent stream writes to the same dest deduplicate via writeInflight", async () => {
+		const svc = makeService();
+		const url = "https://example.com/asset.bin";
+
+		await Promise.all([
+			svc.writeStream(url, TIME, Readable.from([Buffer.from("a")])),
+			svc.writeStream(url, TIME, Readable.from([Buffer.from("b")])),
+		]);
+
+		// Only one tmp open + one rename — the second caller piggybacks
+		expect(mockCreateWriteStream).toHaveBeenCalledTimes(1);
+		expect(mockFs.rename).toHaveBeenCalledTimes(1);
 	});
 });
 

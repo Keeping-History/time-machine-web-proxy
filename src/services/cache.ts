@@ -1,7 +1,9 @@
 import { createHash } from "node:crypto";
-import { promises as fs } from "node:fs";
+import { createWriteStream, promises as fs } from "node:fs";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { dirname, extname, join, resolve, sep } from "node:path";
+import type { Readable } from "node:stream";
+import { pipeline } from "node:stream/promises";
 import { lookup as mimeLookup } from "mime-types";
 import type pino from "pino";
 import type { Config } from "../models/config";
@@ -30,6 +32,12 @@ export interface CacheHit {
 	// Resolved snapshot timestamp from the worker's CDX search, if a sidecar
 	// was written. Falls back to undefined for legacy cache files (pre-sidecar).
 	archiveTime?: string;
+}
+
+async function atomicWrite(path: string, data: string): Promise<void> {
+	const tmp = `${path}${TMP_SUFFIX}`;
+	await fs.writeFile(tmp, data);
+	await fs.rename(tmp, path);
 }
 
 export class CacheService {
@@ -189,11 +197,43 @@ export class CacheService {
 		}
 	}
 
+	/**
+	 * Atomic streaming write. Pipes `readable` into a sibling `.tmp` file
+	 * then renames to the final path. Memory footprint is the chunk size
+	 * (~64 KB) regardless of payload, so the burst-concurrency × asset-size
+	 * heap pressure that buffered writes incur is gone.
+	 *
+	 * Same atomic-visibility contract as writeFile: partial tmp files are
+	 * never visible at the destination because the rename is the only path
+	 * exposing the data.
+	 *
+	 * Same in-flight dedup as writeFile: concurrent calls to the same
+	 * destination share a single pipeline+rename so prewarm races don't
+	 * double-write.
+	 */
+	async writeStream(url: string, time: string, readable: Readable): Promise<void> {
+		const dest = this.computeAbsPath(url, time);
+		const existing = this.writeInflight.get(dest);
+		if (existing) return existing;
+		const p = (async () => {
+			await fs.mkdir(dirname(dest), { recursive: true });
+			const tmp = `${dest}${TMP_SUFFIX}`;
+			await pipeline(readable, createWriteStream(tmp));
+			await fs.rename(tmp, dest);
+		})();
+		this.writeInflight.set(dest, p);
+		try {
+			return await p;
+		} finally {
+			this.writeInflight.delete(dest);
+		}
+	}
+
 	async writeResolvedTimeSidecar(time: string, url: string, resolvedTime: string): Promise<void> {
 		const u = new URL(url);
 		const root = this.cacheDirForJob(time, u.hostname);
 		await fs.mkdir(root, { recursive: true });
-		await fs.writeFile(join(root, ".resolved-time"), resolvedTime);
+		await atomicWrite(join(root, ".resolved-time"), resolvedTime);
 	}
 
 	/**
@@ -205,7 +245,7 @@ export class CacheService {
 	async writeContentTypeSidecar(url: string, time: string, contentType: string): Promise<void> {
 		const abs = this.buildPerUrlSubpath(time, url, CONTENT_TYPE_SUBDIR);
 		await fs.mkdir(dirname(abs), { recursive: true });
-		await fs.writeFile(abs, contentType);
+		await atomicWrite(abs, contentType);
 	}
 
 	/**
@@ -337,6 +377,11 @@ export class CacheService {
 
 			const v2Root = join(this.config.cacheDir, ROOT_VERSION);
 			const domainFilter = u.searchParams.get("domain");
+			if (domainFilter !== null && !/^(\*\.)?[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$/i.test(domainFilter)) {
+				res.setHeader("Content-Type", "application/json");
+				res.writeHead(400).end(JSON.stringify({ error: "invalid domain filter" }));
+				return;
+			}
 
 			// No filter: nuke the entire v2 root.
 			if (!domainFilter) {
@@ -387,7 +432,7 @@ export class CacheService {
 			res.writeHead(200).end(JSON.stringify({ deleted, total }));
 		} catch (e) {
 			this.logger.error({ err: e }, "[cache:clear] failed");
-			res.writeHead(500).end("Internal error");
+			if (!res.headersSent) res.writeHead(500).end("Internal error");
 		}
 	}
 
@@ -413,15 +458,13 @@ export class CacheService {
  * embedded in HTML or text files would match.
  */
 async function sniffContentType(absPath: string): Promise<string | null> {
+	const fh = await fs.open(absPath, "r").catch(() => null);
+	if (!fh) return null;
 	try {
-		const raw = await fs.readFile(absPath);
-		if (!raw || raw.length === 0) return null;
-		const buf = raw instanceof Buffer ? raw : Buffer.from(raw);
-		const head = buf
-			.subarray(0, Math.min(SNIFF_BYTES, buf.length))
-			.toString("utf-8")
-			.trimStart()
-			.toLowerCase();
+		const buf = Buffer.alloc(SNIFF_BYTES);
+		const { bytesRead } = await fh.read(buf, 0, SNIFF_BYTES, 0);
+		if (bytesRead === 0) return null;
+		const head = buf.subarray(0, bytesRead).toString("utf-8").trimStart().toLowerCase();
 		if (
 			head.startsWith("<!doctype") ||
 			head.startsWith("<html") ||
@@ -439,5 +482,7 @@ async function sniffContentType(absPath: string): Promise<string | null> {
 		return null;
 	} catch {
 		return null;
+	} finally {
+		await fh.close().catch(() => undefined);
 	}
 }

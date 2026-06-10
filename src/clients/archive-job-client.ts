@@ -162,10 +162,13 @@ export class ArchiveJobClient implements ArchiveJobClientPort {
 	): Promise<void> {
 		if (!this.domainCrawlEnabled) return;
 		const limit = Math.min(totalPages, maxFanout);
-		for (let page = 0; page < limit; page += 1) {
-			const jobId = crawlChunkJobId(host, time, page);
-			await this.chunkQueue.add("crawl-chunk", { host, time, page }, { ...CHUNK_JOB_OPTS, jobId });
-		}
+		const jobs = Array.from({ length: limit }, (_, page) => ({
+			name: "crawl-chunk" as const,
+			data: { host, time, page },
+			opts: { ...CHUNK_JOB_OPTS, jobId: crawlChunkJobId(host, time, page) },
+		}));
+		if (jobs.length === 0) return;
+		await this.chunkQueue.addBulk(jobs);
 		if (totalPages > maxFanout) {
 			this.logger.warn(
 				{ host, time, totalPages, enqueued: maxFanout },

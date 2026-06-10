@@ -1,3 +1,4 @@
+import crypto from "node:crypto";
 import http, { type IncomingMessage, type ServerResponse } from "node:http";
 import type pino from "pino";
 import { type WebSocket, WebSocketServer } from "ws";
@@ -8,6 +9,7 @@ import { unwrapRedirectUrl } from "../lib/redirect-unwrapper";
 import { parseWaybackPath, sanitizeTimeParam, unwrapNestedProxyUrl } from "../lib/url-rewriter";
 import type { Config } from "../models/config";
 import type { JobProgress } from "../models/job-progress";
+import type { SystemStatus } from "../models/status";
 import { isWsRequest, type WsRequest, type WsResponse } from "../models/websocket";
 import type { CacheService } from "./cache";
 import type { ProxyService } from "./proxy";
@@ -27,6 +29,17 @@ export interface UrlValidatorModule {
 const SANDBOX_CSP =
 	"sandbox allow-scripts allow-same-origin allow-forms allow-modals allow-popups allow-top-navigation-by-user-activation";
 
+/**
+ * Constant-time Bearer token comparison. Returns false immediately if lengths
+ * differ (no timing oracle via early return on length mismatch is acceptable
+ * because length is not secret — a wrong-length token is structurally invalid).
+ */
+function bearerTokenValid(authHeader: string, expected: string): boolean {
+	const actual = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : "";
+	if (actual.length !== expected.length) return false;
+	return crypto.timingSafeEqual(Buffer.from(actual), Buffer.from(expected));
+}
+
 export class TimeMachineService {
 	private server!: http.Server;
 	private wss!: WebSocketServer;
@@ -42,7 +55,7 @@ export class TimeMachineService {
 		private readonly onStop?: () => Promise<void>,
 		/** Optional status provider for GET /status. When omitted the endpoint
 		 * is unavailable (404). Wired by Dependencies.getStatus in production. */
-		private readonly getStatus?: () => Promise<unknown>,
+		private readonly getStatus?: () => Promise<SystemStatus>,
 	) {}
 
 	start(): Promise<void> {
@@ -53,7 +66,12 @@ export class TimeMachineService {
 		this.wss.on("connection", (ws: WebSocket) => this.wsHandler(ws));
 
 		if (!this.signalHandler) {
-			this.signalHandler = () => void this.stop();
+			this.signalHandler = () => {
+				this.stop().catch((err) => {
+					this.logger.error({ err }, "shutdown failed");
+					process.exit(1);
+				});
+			};
 			process.on("SIGTERM", this.signalHandler);
 			process.on("SIGINT", this.signalHandler);
 		}
@@ -207,13 +225,13 @@ export class TimeMachineService {
 					return;
 				}
 				const auth = req.headers.authorization ?? "";
-				if (auth !== `Bearer ${this.config.cacheClearToken}`) {
+				if (!bearerTokenValid(auth, this.config.cacheClearToken!)) {
 					res.writeHead(401).end("Unauthorized");
 					this.logRequest(req, 401, start);
 					return;
 				}
 				await this.cache.handleCacheClear(req, res);
-				this.logRequest(req, 200, start);
+				this.logRequest(req, res.statusCode, start);
 				return;
 			}
 			res.writeHead(404).end("Not found");
@@ -233,7 +251,7 @@ export class TimeMachineService {
 					return;
 				}
 				const auth = req.headers.authorization ?? "";
-				if (auth !== `Bearer ${this.config.cacheClearToken}`) {
+				if (!bearerTokenValid(auth, this.config.cacheClearToken!)) {
 					res.writeHead(401).end("Unauthorized");
 					this.logRequest(req, 401, start);
 					return;
@@ -369,6 +387,7 @@ export class TimeMachineService {
 			"Cache-Control": "no-cache, no-transform",
 			Connection: "keep-alive",
 			"X-Accel-Buffering": "no",
+			"Content-Security-Policy": SANDBOX_CSP,
 		});
 
 		const writeEvent = (event: string, data: unknown): void => {
@@ -421,6 +440,7 @@ export class TimeMachineService {
 
 	private wsHandler(ws: WebSocket): void {
 		this.logger.info("[TimeMachine WS] Client connected");
+		ws.on("error", (err) => this.logger.error({ err }, "[TimeMachine WS] socket error"));
 		let isAlive = true;
 		ws.on("pong", () => {
 			isAlive = true;
@@ -449,6 +469,7 @@ export class TimeMachineService {
 				if (!isWsRequest(parsed)) throw new SyntaxError("Invalid message shape");
 				msg = parsed;
 			} catch {
+				if (ws.readyState !== ws.OPEN) return;
 				ws.send(
 					JSON.stringify({ type: "error", status: 400, message: "Invalid JSON" } as WsResponse),
 				);
@@ -459,6 +480,7 @@ export class TimeMachineService {
 			try {
 				time = sanitizeTimeParam(msg.time ?? null, this.config.defaultTime);
 			} catch {
+				if (ws.readyState !== ws.OPEN) return;
 				ws.send(
 					JSON.stringify({
 						type: "error",
@@ -483,6 +505,7 @@ export class TimeMachineService {
 					unwrapRedirectUrl(normalizeHostname(unwrappedUrl, this.config.domainRemap)),
 				);
 			} catch (e) {
+				if (ws.readyState !== ws.OPEN) return;
 				ws.send(
 					JSON.stringify({
 						type: "error",
@@ -495,6 +518,7 @@ export class TimeMachineService {
 			}
 
 			if (!this.validator.isHostWhitelisted(targetUrl, this.config.whitelistHosts)) {
+				if (ws.readyState !== ws.OPEN) return;
 				ws.send(
 					JSON.stringify({
 						type: "error",
@@ -532,7 +556,7 @@ export class TimeMachineService {
 							archiveUrl: result.archiveUrl,
 							originalUrl: result.originalUrl,
 							archiveTime: result.archiveTime,
-							cache: result.cache,
+							cache: result.cache === "HIT" ? "HIT" : "MISS",
 						} as WsResponse),
 					);
 				})

@@ -548,6 +548,264 @@ describe("rewrite() — wayback-wrapped URL unwrap preserves the embedded timest
 	});
 });
 
+// ─── lockTime=true mode ───────────────────────────────────────────────────────
+//
+// When lockTime=true the shim must emit /web/<url> paths — without any
+// timestamp segment — so all navigation falls through to the server's default
+// configured time.  If the timestamp leaks into the rewritten URL, requests
+// will resolve to a pinned snapshot instead of the server-default, breaking the
+// "lock the era, not the snapshot" contract.
+
+function installShimLocked(
+	ts: string = TS,
+	originalUrl: string = ORIG_URL,
+	proxyBase = "",
+): void {
+	document
+		.querySelectorAll('meta[name="wayback-context"]')
+		.forEach((el) => el.parentNode?.removeChild(el));
+
+	const meta = document.createElement("meta");
+	meta.setAttribute("name", "wayback-context");
+	meta.setAttribute("data-ts", ts);
+	meta.setAttribute("data-url", originalUrl);
+	meta.setAttribute("data-lock-time", "true");
+	meta.setAttribute("data-proxy-base", proxyBase);
+	document.head.insertBefore(meta, document.head.firstChild);
+
+	const script = generateShimScript(ts, originalUrl, true, proxyBase);
+	new Function(script)();
+}
+
+describe("lockTime=true — fetch rewrites omit the timestamp segment", () => {
+	it("produces /web/<absolute-url> (no timestamp) for a relative path", async () => {
+		const captured: string[] = [];
+
+		const realFetch = window.fetch;
+		window.fetch = (input: RequestInfo | URL): Promise<Response> => {
+			captured.push(typeof input === "string" ? input : (input as Request).url);
+			return Promise.resolve({ ok: true } as Response);
+		};
+		installShimLocked();
+
+		await window.fetch("/img/logo.png");
+
+		installShim();
+		window.fetch = realFetch;
+
+		// Timestamp must be absent — if it were present the page would pin to a
+		// specific snapshot rather than the server-configured default time.
+		expect(captured[0]).toBe("/web/http://www.example.com/img/logo.png");
+		expect(captured[0]).not.toContain(TS);
+	});
+
+	it("produces /web/<absolute-url> for an absolute http URL", async () => {
+		const captured: string[] = [];
+
+		const realFetch = window.fetch;
+		window.fetch = (input: RequestInfo | URL): Promise<Response> => {
+			captured.push(typeof input === "string" ? input : (input as Request).url);
+			return Promise.resolve({ ok: true } as Response);
+		};
+		installShimLocked();
+
+		await window.fetch("http://other.com/asset.js");
+
+		installShim();
+		window.fetch = realFetch;
+
+		expect(captured[0]).toBe("/web/http://other.com/asset.js");
+		expect(captured[0]).not.toContain(TS);
+	});
+});
+
+describe("lockTime=true — src setter rewrites omit the timestamp segment", () => {
+	it("HTMLImageElement.src produces /web/<url> path (no timestamp)", () => {
+		installShimLocked();
+
+		const img = document.createElement("img");
+		img.setAttribute("data-test-node", "1");
+		img.src = "/img/photo.png";
+
+		installShim();
+
+		// The browser resolves .src against document.baseURI; check via URL parse.
+		const resolved = new URL(img.src);
+		expect(resolved.pathname + resolved.search).toBe(
+			"/web/http://www.example.com/img/photo.png",
+		);
+		expect(img.src).not.toContain(TS);
+	});
+
+	it("HTMLScriptElement.src produces /web/<url> path (no timestamp)", () => {
+		installShimLocked();
+
+		const el = document.createElement("script");
+		el.setAttribute("data-test-node", "1");
+		el.src = "/js/app.js";
+
+		installShim();
+
+		const resolved = new URL(el.src);
+		expect(resolved.pathname + resolved.search).toBe(
+			"/web/http://www.example.com/js/app.js",
+		);
+		expect(el.src).not.toContain(TS);
+	});
+
+	it("HTMLIFrameElement.src produces /web/<url> path (no timestamp)", () => {
+		installShimLocked();
+
+		const el = document.createElement("iframe");
+		el.setAttribute("data-test-node", "1");
+		el.src = "/embed/widget";
+
+		installShim();
+
+		const resolved = new URL(el.src);
+		expect(resolved.pathname + resolved.search).toBe(
+			"/web/http://www.example.com/embed/widget",
+		);
+		expect(el.src).not.toContain(TS);
+	});
+});
+
+describe("lockTime=true — href setter rewrites omit the timestamp segment", () => {
+	it("HTMLLinkElement.href produces /web/<url> path (no timestamp)", () => {
+		installShimLocked();
+
+		const el = document.createElement("link");
+		el.setAttribute("data-test-node", "1");
+		el.href = "/css/style.css";
+
+		installShim();
+
+		const resolved = new URL(el.href);
+		expect(resolved.pathname + resolved.search).toBe(
+			"/web/http://www.example.com/css/style.css",
+		);
+		expect(el.href).not.toContain(TS);
+	});
+
+	it("HTMLAnchorElement.href produces /web/<url> path (no timestamp)", () => {
+		installShimLocked();
+
+		const el = document.createElement("a");
+		el.setAttribute("data-test-node", "1");
+		el.href = "/about";
+
+		installShim();
+
+		const resolved = new URL(el.href);
+		expect(resolved.pathname + resolved.search).toBe(
+			"/web/http://www.example.com/about",
+		);
+		expect(el.href).not.toContain(TS);
+	});
+});
+
+describe("lockTime=true — document.write rewrites omit the timestamp segment", () => {
+	it("document.write rewrites src= without a timestamp", () => {
+		const captured: string[] = [];
+
+		const realWrite = document.write.bind(document);
+		document.write = (html: string): void => {
+			captured.push(html);
+		};
+		installShimLocked();
+
+		document.write('<img src="/img/banner.gif">');
+
+		document.write = realWrite;
+		installShim();
+
+		expect(captured[0]).toContain("/web/http://www.example.com/img/banner.gif");
+		expect(captured[0]).not.toContain(TS);
+	});
+
+	it("document.write rewrites href= without a timestamp", () => {
+		const captured: string[] = [];
+
+		const realWrite = document.write.bind(document);
+		document.write = (html: string): void => {
+			captured.push(html);
+		};
+		installShimLocked();
+
+		document.write('<a href="/contact">contact</a>');
+
+		document.write = realWrite;
+		installShim();
+
+		expect(captured[0]).toContain("/web/http://www.example.com/contact");
+		expect(captured[0]).not.toContain(TS);
+	});
+});
+
+describe("lockTime=true — wayback-wrapped URL unwrap drops the embedded timestamp", () => {
+	it("unwraps http://web.archive.org/web/<ts>/<url> to /web/<url> (no ts) via fetch", async () => {
+		const captured: string[] = [];
+
+		const realFetch = window.fetch;
+		window.fetch = (input: RequestInfo | URL): Promise<Response> => {
+			captured.push(typeof input === "string" ? input : (input as Request).url);
+			return Promise.resolve({ ok: true } as Response);
+		};
+		installShimLocked();
+
+		await window.fetch(`http://web.archive.org/web/${INNER_TS}/http://other.com/asset.js`);
+
+		installShim();
+		window.fetch = realFetch;
+
+		// lockTime strips the embedded ts — requests must not pin to a snapshot.
+		expect(captured[0]).toBe("/web/http://other.com/asset.js");
+		expect(captured[0]).not.toContain(INNER_TS);
+		expect(captured[0]).not.toContain(TS);
+	});
+
+	it("unwraps https://web.archive.org/web/<ts>im_/<url> to /web/<url> (no ts) via fetch", async () => {
+		const captured: string[] = [];
+
+		const realFetch = window.fetch;
+		window.fetch = (input: RequestInfo | URL): Promise<Response> => {
+			captured.push(typeof input === "string" ? input : (input as Request).url);
+			return Promise.resolve({ ok: true } as Response);
+		};
+		installShimLocked();
+
+		await window.fetch(`https://web.archive.org/web/${INNER_TS}im_/https://cdn.example.com/r.css`);
+
+		installShim();
+		window.fetch = realFetch;
+
+		expect(captured[0]).toBe("/web/https://cdn.example.com/r.css");
+		expect(captured[0]).not.toContain(INNER_TS);
+	});
+});
+
+describe("lockTime=true — already-proxied /web/... paths are pass-through", () => {
+	it("does not re-process a path-form /web/<url> URL via fetch", async () => {
+		const captured: string[] = [];
+
+		const realFetch = window.fetch;
+		window.fetch = (input: RequestInfo | URL): Promise<Response> => {
+			captured.push(typeof input === "string" ? input : (input as Request).url);
+			return Promise.resolve({ ok: true } as Response);
+		};
+		installShimLocked();
+
+		const pathForm = "/web/http://other.com/already-proxied.png";
+		await window.fetch(pathForm);
+
+		installShim();
+		window.fetch = realFetch;
+
+		// Idempotent: already a /web/ path — must not be wrapped again.
+		expect(captured[0]).toBe(pathForm);
+	});
+});
+
 describe("rewrite() — path-form /web/<ts>/<url> input is pass-through (no double unwrap)", () => {
 	it("does not re-process a bare path-form URL through the wayback regex", async () => {
 		const captured: string[] = [];
