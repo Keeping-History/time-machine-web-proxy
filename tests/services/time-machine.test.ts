@@ -1,5 +1,6 @@
 import type http from "node:http";
 import pino from "pino";
+import WebSocket from "ws";
 import { ShutdownController } from "../../src/lib/shutdown";
 import type { Config } from "../../src/models/config";
 import type { CacheService } from "../../src/services/cache";
@@ -834,6 +835,217 @@ describe("TimeMachineService HTTP handler — POST /crawl (admin)", () => {
 			});
 			expect(r.status).toBe(404);
 		} finally {
+			await svc.stop();
+		}
+	});
+});
+
+describe("TimeMachineService HTTP handler — DELETE /cache (token auth)", () => {
+	const TOKEN = "cache-clear-token";
+
+	it("returns 403 when CACHE_CLEAR_TOKEN is empty (endpoint disabled)", async () => {
+		const { svc } = makeService(undefined, {
+			config: { cacheClearToken: "" },
+		});
+		const port = await startAndAwaitListening(svc);
+		try {
+			const r = await fetch(`http://127.0.0.1:${port}/cache`, {
+				method: "DELETE",
+				headers: { Authorization: `Bearer ${TOKEN}` },
+			});
+			expect(r.status).toBe(403);
+		} finally {
+			await svc.stop();
+		}
+	});
+
+	it("returns 401 when Authorization header is missing", async () => {
+		const { svc } = makeService(undefined, {
+			config: { cacheClearToken: TOKEN },
+		});
+		const port = await startAndAwaitListening(svc);
+		try {
+			const r = await fetch(`http://127.0.0.1:${port}/cache`, {
+				method: "DELETE",
+			});
+			expect(r.status).toBe(401);
+		} finally {
+			await svc.stop();
+		}
+	});
+
+	it("returns 401 when Bearer token is wrong", async () => {
+		const { svc } = makeService(undefined, {
+			config: { cacheClearToken: TOKEN },
+		});
+		const port = await startAndAwaitListening(svc);
+		try {
+			const r = await fetch(`http://127.0.0.1:${port}/cache`, {
+				method: "DELETE",
+				headers: { Authorization: "Bearer wrong-token" },
+			});
+			expect(r.status).toBe(401);
+		} finally {
+			await svc.stop();
+		}
+	});
+
+	it("returns 200 and calls cache.handleCacheClear when token is correct", async () => {
+		// handleCacheClear is the CacheService boundary — verify the correct token
+		// reaches it and the response is delegated to that handler.
+		const handleCacheClear = jest.fn().mockImplementation(
+			(_req: unknown, res: { writeHead: (s: number) => { end: () => void } }) => {
+				res.writeHead(200).end();
+				return Promise.resolve();
+			},
+		);
+		const { svc } = makeService(undefined, {
+			config: { cacheClearToken: TOKEN },
+		});
+		// Replace the cache mock's handleCacheClear after construction.
+		const cache = (svc as unknown as { cache: { handleCacheClear: jest.Mock } }).cache;
+		cache.handleCacheClear = handleCacheClear;
+		const port = await startAndAwaitListening(svc);
+		try {
+			const r = await fetch(`http://127.0.0.1:${port}/cache`, {
+				method: "DELETE",
+				headers: { Authorization: `Bearer ${TOKEN}` },
+			});
+			expect(r.status).toBe(200);
+			expect(handleCacheClear).toHaveBeenCalledTimes(1);
+		} finally {
+			await svc.stop();
+		}
+	});
+});
+
+describe("TimeMachineService WebSocket handler — /ws", () => {
+	const okResult = {
+		contentType: "text/html",
+		archiveUrl: "http://example.com/page",
+		originalUrl: "http://example.com/page",
+		archiveTime: "20020401000000",
+		body: "<html>ok</html>",
+		cache: "HIT" as const,
+	};
+
+	function connectWs(port: number): Promise<WebSocket> {
+		return new Promise((resolve, reject) => {
+			const ws = new WebSocket(`ws://127.0.0.1:${port}/ws`);
+			ws.once("open", () => resolve(ws));
+			ws.once("error", reject);
+		});
+	}
+
+	function nextMessage(ws: WebSocket): Promise<unknown> {
+		return new Promise((resolve, reject) => {
+			ws.once("message", (data) => {
+				try {
+					resolve(JSON.parse(data.toString("utf-8")));
+				} catch (e) {
+					reject(e);
+				}
+			});
+			ws.once("error", reject);
+		});
+	}
+
+	it("sends a result frame for a valid proxy request", async () => {
+		const fetchMock = jest.fn().mockResolvedValue(okResult);
+		const { svc } = makeService(fetchMock);
+		const port = await startAndAwaitListening(svc);
+		const ws = await connectWs(port);
+		try {
+			ws.send(JSON.stringify({ type: "fetch", id: "req-1", url: "http://example.com/page", time: "20020401000000" }));
+			const frame = await nextMessage(ws) as Record<string, unknown>;
+			expect(frame.type).toBe("result");
+			expect(frame.id).toBe("req-1");
+			expect(frame.contentType).toBe("text/html");
+			expect(frame.html).toBe("<html>ok</html>");
+			expect(frame.cache).toBe("HIT");
+		} finally {
+			ws.close();
+			await svc.stop();
+		}
+	});
+
+	it("sends a 403 error frame when validateTargetUrl throws (invalid URL)", async () => {
+		const fetchMock = jest.fn();
+		const { svc } = makeService(fetchMock);
+		// Override the validator to reject the URL.
+		const validator = (svc as unknown as { validator: { validateTargetUrl: jest.Mock } }).validator;
+		validator.validateTargetUrl = jest.fn().mockImplementation(() => {
+			throw Object.assign(new Error("Invalid URL"), { status: 403 });
+		});
+		const port = await startAndAwaitListening(svc);
+		const ws = await connectWs(port);
+		try {
+			ws.send(JSON.stringify({ type: "fetch", id: "req-2", url: "http://blocked.example/page" }));
+			const frame = await nextMessage(ws) as Record<string, unknown>;
+			expect(frame.type).toBe("error");
+			expect(frame.id).toBe("req-2");
+			expect(frame.status).toBe(403);
+			expect(fetchMock).not.toHaveBeenCalled();
+		} finally {
+			ws.close();
+			await svc.stop();
+		}
+	});
+
+	it("sends a 400 error frame when time parameter is malformed", async () => {
+		const fetchMock = jest.fn();
+		const { svc } = makeService(fetchMock);
+		const port = await startAndAwaitListening(svc);
+		const ws = await connectWs(port);
+		try {
+			// sanitizeTimeParam rejects strings that aren't 14-digit timestamps.
+			ws.send(JSON.stringify({ type: "fetch", id: "req-3", url: "http://example.com/", time: "not-a-time" }));
+			const frame = await nextMessage(ws) as Record<string, unknown>;
+			expect(frame.type).toBe("error");
+			expect(frame.id).toBe("req-3");
+			expect(frame.status).toBe(400);
+			expect(fetchMock).not.toHaveBeenCalled();
+		} finally {
+			ws.close();
+			await svc.stop();
+		}
+	});
+
+	it("forwards progress events from the onProgress callback before the result frame", async () => {
+		const fetchMock = jest.fn(
+			async (_url: string, _time: string, onProgress?: (p: unknown) => void) => {
+				onProgress?.({ stage: "resolved", jobId: "job-1", queue: "archive-exact", ts: 1, resolved: "20020401000000" });
+				onProgress?.({ stage: "download_done", jobId: "job-1", queue: "archive-exact", ts: 2 });
+				return okResult;
+			},
+		);
+		const { svc } = makeService(fetchMock as unknown as ProxyMock["fetch"]);
+		const port = await startAndAwaitListening(svc);
+		const ws = await connectWs(port);
+		try {
+			const frames: unknown[] = [];
+			// Collect 3 frames: 2 progress + 1 result.
+			const done = new Promise<void>((resolve, reject) => {
+				ws.on("message", (data) => {
+					try {
+						frames.push(JSON.parse(data.toString("utf-8")));
+						if (frames.length === 3) resolve();
+					} catch (e) {
+						reject(e);
+					}
+				});
+				ws.once("error", reject);
+			});
+			ws.send(JSON.stringify({ type: "fetch", id: "req-4", url: "http://example.com/page", time: "20020401000000" }));
+			await done;
+			const types = (frames as Array<Record<string, unknown>>).map((f) => f.type);
+			expect(types).toEqual(["progress", "progress", "result"]);
+			const stages = (frames as Array<Record<string, unknown>>)
+				.filter((f) => f.type === "progress")
+				.map((f) => (f.progress as Record<string, unknown>).stage);
+			expect(stages).toEqual(["resolved", "download_done"]);
+		} finally {
+			ws.close();
 			await svc.stop();
 		}
 	});

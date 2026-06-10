@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import type pino from "pino";
+import { TIMESTAMP_RE } from "./archive-time";
 
 // Minimal Redis surface the helper uses — satisfied by real IORedis and by
 // simple jest mocks in tests without importing the full ioredis type.
@@ -11,7 +12,6 @@ interface RedisCacheClient {
 const HISTORICAL_TTL_S = 7 * 24 * 60 * 60;
 const OPEN_EDGE_TTL_S = 5 * 60;
 const HISTORICAL_THRESHOLD_MS = 24 * 60 * 60 * 1000;
-const TIMESTAMP_RE = /^\d{14}$/;
 
 const inflight = new Map<string, Promise<Response>>();
 

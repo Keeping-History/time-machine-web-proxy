@@ -231,6 +231,7 @@ export class ProxyService {
 
 	private buildCssFetcher(): (cssUrl: string, ts: string) => Promise<string | null> {
 		return async (cssUrl: string, ts: string): Promise<string | null> => {
+			let body: Buffer | null = null;
 			try {
 				const hit = await this.cache.lookup(cssUrl, ts);
 				if (hit) {
@@ -240,13 +241,19 @@ export class ProxyService {
 				if (!this.directClient) return null;
 				const result = await this.directClient.fetchAtRequestedTime(cssUrl, ts);
 				if (result.outcome !== "ok" || !result.body) return null;
-				await this.cache.writeFile(cssUrl, ts, result.body);
-				await this.cache.writeContentTypeSidecar(cssUrl, ts, result.contentType ?? "text/css");
-				if (result.resolvedTime) {
-					await this.cache.writeResolvedTimeSidecar(ts, cssUrl, result.resolvedTime);
+				body = result.body;
+				try {
+					await this.cache.writeFile(cssUrl, ts, result.body);
+					await this.cache.writeContentTypeSidecar(cssUrl, ts, result.contentType ?? "text/css");
+					if (result.resolvedTime) {
+						await this.cache.writeResolvedTimeSidecar(ts, cssUrl, result.resolvedTime);
+					}
+				} catch (err) {
+					this.logger.warn({ cssUrl, ts, err }, "[proxy] CSS cache write error");
 				}
-				return result.body.toString("utf-8");
-			} catch {
+				return body.toString("utf-8");
+			} catch (err) {
+				this.logger.warn({ cssUrl, ts, err }, "[proxy] CSS fetch error");
 				return null;
 			}
 		};
@@ -298,7 +305,7 @@ export class ProxyService {
 			);
 		} catch (e) {
 			this.logger.warn(
-				{ host, error: e instanceof Error ? e.message : String(e) },
+				{ host, err: e instanceof Error ? e : new Error(String(e)) },
 				"[crawl-skip] enqueue failed",
 			);
 		}
@@ -369,7 +376,9 @@ export class ProxyService {
 			`&from=${from}&to=${to}&output=json&showNumPages=true`;
 		const parsePageCount = (body: string): number => {
 			const rows = JSON.parse(body) as unknown[][];
-			return Number.parseInt(rows[1]?.[0] as string, 10);
+			const n = Number.parseInt(String(rows[1]?.[0] ?? ""), 10);
+			if (Number.isNaN(n)) throw new Error("CDX page count is not a number");
+			return n;
 		};
 		const isValidPageCount = (body: string): boolean => {
 			try {

@@ -1,8 +1,7 @@
 import type pino from "pino";
+import { TIMESTAMP_RE } from "../lib/archive-time";
 import { describeFetchError } from "../lib/errors";
 import { logger as defaultLogger } from "../lib/logger";
-
-const TIMESTAMP_RE = /^\d{14}$/;
 const RESOLVED_TIME_RE = /\/web\/(\d{14})id_\//;
 const WAYBACK_BASE = "https://web.archive.org/web";
 

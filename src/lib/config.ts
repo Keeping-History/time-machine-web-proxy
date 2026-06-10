@@ -55,7 +55,7 @@ function parseIntInRange(
 
 export function loadConfig(): Config {
 	const hostname = process.env.LISTENER ?? "0.0.0.0";
-	const port = Number(process.env.TIMEMACHINE_PORT) || 8765;
+	const port = parseIntInRange(process.env.TIMEMACHINE_PORT, "TIMEMACHINE_PORT", 8765, 1, 65535);
 	const proxyBase = process.env.PROXY_BASE_URL ?? `http://${hostname}:${port}`;
 	const proxyBaseHostname = new URL(proxyBase).hostname;
 
@@ -73,13 +73,13 @@ export function loadConfig(): Config {
 		proxyBase,
 		proxyBaseHostname,
 		cacheClearToken: process.env.CACHE_CLEAR_TOKEN ?? "",
-		wsKeepaliveMs: Number(process.env.WS_KEEPALIVE_MS) || 30_000,
+		wsKeepaliveMs: parseIntInRange(process.env.WS_KEEPALIVE_MS, "WS_KEEPALIVE_MS", 30_000, 1_000, 300_000),
 		redisUrl: process.env.REDIS_URL ?? "redis://localhost:6379",
 		bullmqPrefix: process.env.BULLMQ_PREFIX ?? "tm",
 		domainCrawlEnabled: process.env.DOMAIN_CRAWL_ENABLED?.toLowerCase() !== "false",
-		workerConcurrency: Number(process.env.WORKER_CONCURRENCY) || 2,
-		workerRateLimitPerSec: Number(process.env.WORKER_RATE_LIMIT_PER_SEC) || 1,
-		crawlMaxCdxPages: Number(process.env.CRAWL_MAX_CDX_PAGES) || 50,
+		workerConcurrency: parseIntInRange(process.env.WORKER_CONCURRENCY, "WORKER_CONCURRENCY", 2, 1, 50),
+		workerRateLimitPerSec: parseIntInRange(process.env.WORKER_RATE_LIMIT_PER_SEC, "WORKER_RATE_LIMIT_PER_SEC", 1, 1, 100),
+		crawlMaxCdxPages: parseIntInRange(process.env.CRAWL_MAX_CDX_PAGES, "CRAWL_MAX_CDX_PAGES", 50, 1, 10_000),
 		crawlWindowDays: parseIntInRange(
 			process.env.CRAWL_WINDOW_DAYS,
 			"CRAWL_WINDOW_DAYS",

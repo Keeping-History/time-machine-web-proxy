@@ -195,11 +195,11 @@ export class Dependencies {
 	 * an unhealthy queue can't mask the rest of the report.
 	 */
 	async getStatus(): Promise<SystemStatus> {
-		const { redis, exactQueue, crawlQueue, chunkQueue } = this.deps;
+		const { redis, exactQueue, crawlQueue, chunkQueue, logger } = this.deps;
 		const [exactCounts, crawlCounts, chunkCounts] = await Promise.all([
-			safeJobCounts(exactQueue),
-			safeJobCounts(crawlQueue),
-			safeJobCounts(chunkQueue),
+			safeJobCounts(exactQueue, logger),
+			safeJobCounts(crawlQueue, logger),
+			safeJobCounts(chunkQueue, logger),
 		]);
 		return {
 			redis: { status: (redis as IORedis & { status?: string }).status ?? "unknown" },
@@ -246,7 +246,7 @@ export class Dependencies {
  * shape is stable. A queue that's mid-shutdown or whose Redis is down may
  * reject — we surface zeros rather than 500'ing the whole /status call.
  */
-async function safeJobCounts<T>(queue: Queue<T>): Promise<SystemStatus["queues"][string]> {
+async function safeJobCounts<T>(queue: Queue<T>, logger: pino.Logger): Promise<SystemStatus["queues"][string]> {
 	try {
 		const counts = await queue.getJobCounts("failed", "waiting", "active", "completed", "delayed");
 		return {
@@ -256,7 +256,8 @@ async function safeJobCounts<T>(queue: Queue<T>): Promise<SystemStatus["queues"]
 			completed: counts.completed ?? 0,
 			delayed: counts.delayed ?? 0,
 		};
-	} catch {
+	} catch (err) {
+		logger.warn({ err }, "[deps] safeJobCounts Redis error");
 		return { failed: 0, waiting: 0, active: 0, completed: 0, delayed: 0 };
 	}
 }

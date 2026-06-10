@@ -6,6 +6,7 @@ import type { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { lookup as mimeLookup } from "mime-types";
 import type pino from "pino";
+import { errorHasStatus } from "../lib/errors";
 import type { Config } from "../models/config";
 
 const ROOT_VERSION = "v2";
@@ -106,7 +107,10 @@ export class CacheService {
 			const contentType = await this.resolveContentType(primaryAbs, url, time);
 			const archiveTime = await this.readResolvedTime(time, u.hostname);
 			return { absPath: primaryAbs, contentType, archiveTime };
-		} catch {
+		} catch (e) {
+			if ((e as NodeJS.ErrnoException).code !== "ENOENT") {
+				this.logger.warn({ err: e, path: primaryAbs }, "[cache] unexpected stat error");
+			}
 			/* fall through to directory-index fallback */
 		}
 		// Directory-index fallback: the Wayback downloader saves `http://host/mac`
@@ -121,7 +125,10 @@ export class CacheService {
 				await fs.access(fallbackAbs);
 				const archiveTime = await this.readResolvedTime(time, u.hostname);
 				return { absPath: fallbackAbs, contentType: "text/html", archiveTime };
-			} catch {
+			} catch (e) {
+				if ((e as NodeJS.ErrnoException).code !== "ENOENT") {
+					this.logger.warn({ err: e, path: fallbackAbs }, "[cache] unexpected stat error");
+				}
 				/* fall through to sentinel check */
 			}
 		}
@@ -145,7 +152,7 @@ export class CacheService {
 				throw Object.assign(new Error("Not in archive (tentative)"), { status: 404 });
 			}
 		} catch (e) {
-			if ((e as { status?: number }).status === 404) throw e;
+			if (errorHasStatus(e) && e.status === 404) throw e;
 			/* tentative sentinel absent — fall through to permanent check */
 		}
 		// Negative-cache sentinel: worker writes one when CDX confirms 404.

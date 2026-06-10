@@ -1,3 +1,5 @@
+export const TIMESTAMP_RE = /^\d{14}$/;
+
 // Convert a 14-digit YYYYMMDDhhmmss timestamp into the calendar-day window
 // it falls within. Shared between the domain crawler (so CDX returns ALL
 // captures of the host on that day rather than only the exact requested

@@ -4,7 +4,7 @@ import type IORedis from "ioredis";
 import type pino from "pino";
 import type { RequestedResult, ResolvedResult } from "../clients/wayback-direct-client";
 import { cachedCdxFetch } from "../lib/cdx-cache";
-import { windowAround } from "../lib/archive-time";
+import { TIMESTAMP_RE, windowAround } from "../lib/archive-time";
 import type { JobProgress, JobProgressQueue, JobProgressStage } from "../models/job-progress";
 import type { CacheService } from "../services/cache";
 import { rewriteHtmlUrls, stripWaybackToolbar } from "../lib/url-rewriter";
@@ -108,8 +108,6 @@ function failOnFallback(result: ResolvedResult, url: string, ts: string): never 
 	const reason = result.reason ?? "unknown";
 	throw new Error(`direct fetch fallback for ${url} @ ${ts}: ${reason}`);
 }
-
-const TIMESTAMP_RE = /^\d{14}$/;
 
 /**
  * Inspect a thrown error and, if its message contains a 429/rate-limit
@@ -382,7 +380,7 @@ export function startArchiveWorkers(opts: StartArchiveWorkersOpts): ArchiveWorke
 					jobId: job?.id,
 					attemptsMade: job?.attemptsMade,
 					data: job?.data,
-					err: err.message,
+					err: err,
 				},
 				`[worker:${name}] failed`,
 			);

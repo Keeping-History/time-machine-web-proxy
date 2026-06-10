@@ -766,7 +766,7 @@ describe("exact worker processor", () => {
 				jobId: "failed-1",
 				attemptsMade: 3,
 				data: expect.any(Object),
-				err: "boom",
+				err: expect.any(Error),
 			}),
 			expect.stringContaining("failed"),
 		);
@@ -813,7 +813,7 @@ describe("crawl worker processor", () => {
 			expect.objectContaining({
 				jobId: "crawl-fail-1",
 				attemptsMade: 2,
-				err: "crawl boom",
+				err: expect.any(Error),
 			}),
 			expect.stringContaining("failed"),
 		);
@@ -1293,7 +1293,7 @@ describe("chunk worker processor", () => {
 			new Error("chunk boom"),
 		);
 		expect(logger.error).toHaveBeenCalledWith(
-			expect.objectContaining({ jobId: "cc-fail-1", attemptsMade: 1, err: "chunk boom" }),
+			expect.objectContaining({ jobId: "cc-fail-1", attemptsMade: 1, err: expect.any(Error) }),
 			expect.stringContaining("failed"),
 		);
 	});

@@ -7,6 +7,11 @@ type Element = DefaultTreeAdapterTypes.Element;
 type TextNode = DefaultTreeAdapterTypes.TextNode;
 type ParentNode = DefaultTreeAdapterTypes.ParentNode;
 
+// parse5's NS enum is not in its public exports; the HTML namespace URI is the correct runtime value.
+const HTML_NS = "http://www.w3.org/1999/xhtml" as unknown as Parameters<
+	typeof defaultTreeAdapter.createElement
+>[1];
+
 const RE_LEADING_WHITESPACE = /^[\s\t\r\n]+</i;
 const RE_WAYBACK_JS_HEAD = /((?:<head[^>]*>))[\s\S]*?<!-- End Wayback Rewrite JS Include -->/i;
 const RE_WAYBACK_JS_HTML = /((?:<html[^>]*>))[\s\S]*?<!-- End Wayback Rewrite JS Include -->/i;
@@ -429,10 +434,8 @@ const injectShim = (doc: ParentNode, targetUrl: string, time: string, lockTime: 
 
 	// Build <meta name="wayback-context" data-ts="..." data-url="..." data-lock-time="..." data-proxy-base="...">
 	const metaNode = defaultTreeAdapter.createElement(
-		"meta", // parse5's NS enum is not in its public exports; the HTML namespace URI is the correct runtime value
-		"http://www.w3.org/1999/xhtml" as unknown as Parameters<
-			typeof defaultTreeAdapter.createElement
-		>[1],
+		"meta",
+		HTML_NS,
 		[
 			{ name: "name", value: "wayback-context" },
 			{ name: "data-ts", value: time },
@@ -444,10 +447,8 @@ const injectShim = (doc: ParentNode, targetUrl: string, time: string, lockTime: 
 
 	// Build <script>...</script> containing the shim IIFE
 	const scriptNode = defaultTreeAdapter.createElement(
-		"script", // parse5's NS enum is not in its public exports; the HTML namespace URI is the correct runtime value
-		"http://www.w3.org/1999/xhtml" as unknown as Parameters<
-			typeof defaultTreeAdapter.createElement
-		>[1],
+		"script",
+		HTML_NS,
 		[],
 	);
 	const scriptText = defaultTreeAdapter.createTextNode(
@@ -539,9 +540,7 @@ export const inlineCssLinks = async (
 
 		const styleNode = defaultTreeAdapter.createElement(
 			"style",
-			"http://www.w3.org/1999/xhtml" as unknown as Parameters<
-				typeof defaultTreeAdapter.createElement
-			>[1],
+			HTML_NS,
 			[],
 		);
 
@@ -555,9 +554,8 @@ export const inlineCssLinks = async (
 
 		const parent = link.parentNode;
 		if (!parent) continue;
-		const idx = (parent as ParentNode).childNodes.indexOf(link);
-		(parent as ParentNode).childNodes.splice(idx, 1, styleNode);
-		styleNode.parentNode = parent as ParentNode;
+		defaultTreeAdapter.insertBefore(parent, styleNode, link);
+		defaultTreeAdapter.detachNode(link);
 	}
 
 	return serialize(doc);
