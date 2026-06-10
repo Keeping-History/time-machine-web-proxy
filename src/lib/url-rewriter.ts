@@ -223,6 +223,23 @@ const rewriteOneUrl = (
 	const trimmed = raw.trim();
 	if (!trimmed || RE_SKIP_PREFIX.test(trimmed)) return raw;
 
+	// Already proxied through this proxy instance: unwrap and re-wrap so
+	// lockTime / proxyBase changes apply uniformly and double-wrapping is avoided.
+	// A URL in the form `{proxyBase}/web/{ts}/{url}` must be treated as if it
+	// arrived as a plain archive reference — extract ts + inner url, then emit
+	// a single clean proxy URL. Without this, a <link href> that the rewriter
+	// already emitted in absolute-proxy form gets wrapped again, producing
+	// `/web/<ts>/http://localhost:8080/web/<ts>/<url>`.
+	if (proxyBase && trimmed.startsWith(proxyBase)) {
+		const suffix = trimmed.slice(proxyBase.length);
+		const alreadyProxied = suffix.match(RE_WAYBACK_PATH);
+		if (alreadyProxied) {
+			const [, ts, innerUrl] = alreadyProxied;
+			const resolvedTs = ts ?? fallbackTime;
+			return buildProxyUrl(innerUrl, resolvedTs, lockTime, proxyBase);
+		}
+	}
+
 	const archive = trimmed.match(RE_ARCHIVE_URL);
 	if (archive) {
 		const [, ts, rawOriginal] = archive;

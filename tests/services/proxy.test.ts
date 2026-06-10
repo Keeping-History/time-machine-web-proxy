@@ -1161,3 +1161,110 @@ describe("ProxyService.triggerDomainCrawl — explicit admin enqueue", () => {
 		expect(client.enqueueDomainCrawl).not.toHaveBeenCalled();
 	});
 });
+
+// --- CSS inlining -----------------------------------------------------------
+
+describe("ProxyService.fetch — CSS inlining", () => {
+	const CSS_URL = "http://www.example.com/style.css";
+	const CSS_TS = TIME;
+	const CSS_CONTENT = "body { color: red; }";
+
+	// baseConfig omits lockTime and cdxCacheEnabled; supply them so buildCssFetcher
+	// receives a well-typed config and rewriteCssUrls gets lockTime=false rather than undefined.
+	const inlineConfig = { ...baseConfig, lockTime: false, cdxCacheEnabled: false } as unknown as typeof baseConfig;
+
+	const htmlWithLink = (href: string) =>
+		`<html><head><link rel="stylesheet" href="${href}"></head><body>hello</body></html>`;
+
+	it("inlines a cached stylesheet as a <style> block", async () => {
+		const proxyHref = `http://localhost:8080/web/${CSS_TS}/${CSS_URL}`;
+		const html = htmlWithLink(proxyHref);
+
+		// HTML page: cache HIT
+		const htmlHitLocal: CacheHit = { absPath: "/cache/page.html", contentType: "text/html" };
+		// CSS: cache HIT
+		const cssHitLocal: CacheHit = { absPath: "/cache/style.css", contentType: "text/css" };
+
+		const cacheLookup = jest
+			.fn()
+			.mockImplementation((url: string, _ts: string) => {
+				if (url === TARGET_HTML_URL) return Promise.resolve(htmlHitLocal);
+				if (url === CSS_URL) return Promise.resolve(cssHitLocal);
+				return Promise.resolve(null);
+			});
+
+		const cache = makeCache(cacheLookup);
+		const client = makeClient();
+
+		// readFile: first call returns HTML, second returns CSS
+		mockedReadFile
+			.mockResolvedValueOnce(Buffer.from(html))
+			.mockResolvedValueOnce(Buffer.from(CSS_CONTENT));
+
+		const svc = new ProxyService(cache, client, logger, inlineConfig);
+		const result = await svc.fetch(TARGET_HTML_URL, TIME);
+
+		expect(String(result.body)).toContain(`<style>${CSS_CONTENT}</style>`);
+		expect(String(result.body)).not.toContain('<link rel="stylesheet"');
+	});
+
+	it("inlines a stylesheet fetched live (cache miss, directClient available)", async () => {
+		const proxyHref = `http://localhost:8080/web/${CSS_TS}/${CSS_URL}`;
+		const html = htmlWithLink(proxyHref);
+
+		// HTML page: cache HIT; CSS: cache MISS
+		const htmlHitLocal: CacheHit = { absPath: "/cache/page.html", contentType: "text/html" };
+		const cacheLookup = jest
+			.fn()
+			.mockImplementation((url: string, _ts: string) => {
+				if (url === TARGET_HTML_URL) return Promise.resolve(htmlHitLocal);
+				return Promise.resolve(null); // CSS miss
+			});
+
+		const cache = makeCache(cacheLookup);
+		const client = makeClient();
+		const directClient = makeDirectClient();
+		directClient.fetchAtRequestedTime.mockResolvedValueOnce({
+			outcome: "ok",
+			body: Buffer.from(CSS_CONTENT),
+			contentType: "text/css",
+		});
+
+		mockedReadFile.mockResolvedValueOnce(Buffer.from(html));
+
+		const svc = new ProxyService(cache, client, logger, inlineConfig, null, directClient);
+		const result = await svc.fetch(TARGET_HTML_URL, TIME);
+
+		expect(String(result.body)).toContain(`<style>${CSS_CONTENT}</style>`);
+		expect(String(result.body)).not.toContain('<link rel="stylesheet"');
+		expect(cache.writeFile).toHaveBeenCalledWith(CSS_URL, CSS_TS, expect.any(Buffer));
+		expect(cache.writeContentTypeSidecar).toHaveBeenCalledWith(CSS_URL, CSS_TS, "text/css");
+		expect(cache.writeResolvedTimeSidecar).not.toHaveBeenCalled();
+	});
+
+	it("leaves <link> intact when CSS fetch fails", async () => {
+		const proxyHref = `http://localhost:8080/web/${CSS_TS}/${CSS_URL}`;
+		const html = htmlWithLink(proxyHref);
+
+		const htmlHitLocal: CacheHit = { absPath: "/cache/page.html", contentType: "text/html" };
+		const cacheLookup = jest
+			.fn()
+			.mockImplementation((url: string, _ts: string) => {
+				if (url === TARGET_HTML_URL) return Promise.resolve(htmlHitLocal);
+				return Promise.resolve(null);
+			});
+
+		const cache = makeCache(cacheLookup);
+		const client = makeClient();
+		const directClient = makeDirectClient();
+		directClient.fetchAtRequestedTime.mockResolvedValueOnce({ outcome: "not_found" });
+
+		mockedReadFile.mockResolvedValueOnce(Buffer.from(html));
+
+		const svc = new ProxyService(cache, client, logger, inlineConfig, null, directClient);
+		const result = await svc.fetch(TARGET_HTML_URL, TIME);
+
+		expect(String(result.body)).toContain('<link rel="stylesheet"');
+		expect(String(result.body)).not.toContain("<style>");
+	});
+});
