@@ -212,3 +212,24 @@ export function loadConfig(): Config {
 export function ensureCacheDir(cacheDir: string): void {
 	mkdirSync(cacheDir, { recursive: true });
 }
+
+const CACHE_CLEAR_TOKEN_MIN_LENGTH = 16;
+
+/**
+ * Logs warnings about unsafe configuration values. Call this after the logger
+ * is available (i.e. after loadConfig and createLogger in index.ts). Does NOT
+ * throw — operators may have valid reasons for short-lived or constrained tokens.
+ */
+export function validateConfig(
+	config: Config,
+	logger: { warn: (msg: string) => void },
+): void {
+	if (
+		config.cacheClearToken.length > 0 &&
+		config.cacheClearToken.length < CACHE_CLEAR_TOKEN_MIN_LENGTH
+	) {
+		logger.warn(
+			`[config] CACHE_CLEAR_TOKEN is set but shorter than ${CACHE_CLEAR_TOKEN_MIN_LENGTH} characters — consider using a longer token for adequate entropy`,
+		);
+	}
+}

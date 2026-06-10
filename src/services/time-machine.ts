@@ -160,6 +160,11 @@ export class TimeMachineService {
 		}
 	}
 
+	private setSecurityHeaders(res: ServerResponse): void {
+		res.setHeader("X-Content-Type-Options", "nosniff");
+		res.setHeader("Referrer-Policy", "no-referrer");
+	}
+
 	private setCorsHeaders(req: IncomingMessage, res: ServerResponse): void {
 		const origin = req.headers.origin;
 		const allowed = this.config.allowedOrigins;
@@ -177,6 +182,7 @@ export class TimeMachineService {
 	private async httpHandler(req: IncomingMessage, res: ServerResponse): Promise<void> {
 		const start = Date.now();
 		this.setCorsHeaders(req, res);
+		this.setSecurityHeaders(res);
 
 		if (req.method === "OPTIONS") {
 			res.writeHead(204).end();

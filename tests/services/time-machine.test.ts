@@ -986,6 +986,67 @@ describe("TimeMachineService HTTP handler — CORS / OPTIONS", () => {
 	});
 });
 
+describe("TimeMachineService HTTP handler — security headers", () => {
+	const okResult = {
+		contentType: "text/html",
+		archiveUrl: "http://example.com/page",
+		originalUrl: "http://example.com/page",
+		archiveTime: "20020401000000",
+		body: "<html>ok</html>",
+		cache: "HIT" as const,
+	};
+
+	it("sets X-Content-Type-Options: nosniff on proxy responses", async () => {
+		const fetchMock = jest.fn().mockResolvedValue(okResult);
+		const { svc } = makeService(fetchMock);
+		const port = await startAndAwaitListening(svc);
+		try {
+			const r = await fetch(`http://127.0.0.1:${port}/web/20020401000000/http://example.com/page`);
+			expect(r.headers.get("x-content-type-options")).toBe("nosniff");
+		} finally {
+			await svc.stop();
+		}
+	});
+
+	it("sets Referrer-Policy: no-referrer on proxy responses", async () => {
+		const fetchMock = jest.fn().mockResolvedValue(okResult);
+		const { svc } = makeService(fetchMock);
+		const port = await startAndAwaitListening(svc);
+		try {
+			const r = await fetch(`http://127.0.0.1:${port}/web/20020401000000/http://example.com/page`);
+			expect(r.headers.get("referrer-policy")).toBe("no-referrer");
+		} finally {
+			await svc.stop();
+		}
+	});
+
+	it("sets X-Content-Type-Options and Referrer-Policy on error responses (e.g. 400)", async () => {
+		const { svc } = makeService();
+		const port = await startAndAwaitListening(svc);
+		try {
+			const r = await fetch(`http://127.0.0.1:${port}/`);
+			expect(r.status).toBe(400);
+			expect(r.headers.get("x-content-type-options")).toBe("nosniff");
+			expect(r.headers.get("referrer-policy")).toBe("no-referrer");
+		} finally {
+			await svc.stop();
+		}
+	});
+
+	it("sets X-Content-Type-Options and Referrer-Policy on OPTIONS preflight", async () => {
+		const { svc } = makeService();
+		const port = await startAndAwaitListening(svc);
+		try {
+			const r = await fetch(`http://127.0.0.1:${port}/`, { method: "OPTIONS" });
+			expect(r.status).toBe(204);
+			expect(r.headers.get("x-content-type-options")).toBe("nosniff");
+			expect(r.headers.get("referrer-policy")).toBe("no-referrer");
+		} finally {
+			await svc.stop();
+		}
+	});
+});
+
 describe("TimeMachineService WebSocket handler — /ws", () => {
 	const okResult = {
 		contentType: "text/html",

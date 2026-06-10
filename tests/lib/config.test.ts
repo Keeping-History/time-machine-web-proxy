@@ -1,4 +1,4 @@
-import { loadConfig } from "../../src/lib/config";
+import { loadConfig, validateConfig } from "../../src/lib/config";
 
 describe("loadConfig", () => {
 	const originalEnv = process.env;
@@ -273,5 +273,43 @@ describe("loadConfig", () => {
 		expect(config.outboundProxyUrls).toEqual(["http://proxymesh.example.com:31280"]);
 		expect(config.outboundProxyUsername).toBe("user");
 		expect(config.outboundProxyPassword).toBe("secret");
+	});
+});
+
+describe("validateConfig", () => {
+	it("does not warn when cacheClearToken is empty (feature disabled)", () => {
+		const logger = { warn: jest.fn() };
+		const config = loadConfig();
+		validateConfig({ ...config, cacheClearToken: "" }, logger);
+		expect(logger.warn).not.toHaveBeenCalled();
+	});
+
+	it("does not warn when cacheClearToken meets the minimum length", () => {
+		const logger = { warn: jest.fn() };
+		const config = loadConfig();
+		validateConfig({ ...config, cacheClearToken: "a".repeat(16) }, logger);
+		expect(logger.warn).not.toHaveBeenCalled();
+	});
+
+	it("does not warn when cacheClearToken exceeds the minimum length", () => {
+		const logger = { warn: jest.fn() };
+		const config = loadConfig();
+		validateConfig({ ...config, cacheClearToken: "a".repeat(32) }, logger);
+		expect(logger.warn).not.toHaveBeenCalled();
+	});
+
+	it("warns when cacheClearToken is set but shorter than 16 characters", () => {
+		const logger = { warn: jest.fn() };
+		const config = loadConfig();
+		validateConfig({ ...config, cacheClearToken: "short" }, logger);
+		expect(logger.warn).toHaveBeenCalledTimes(1);
+		expect(logger.warn.mock.calls[0][0]).toMatch(/CACHE_CLEAR_TOKEN/);
+		expect(logger.warn.mock.calls[0][0]).toMatch(/16/);
+	});
+
+	it("does not throw even for a very short token — warn only", () => {
+		const logger = { warn: jest.fn() };
+		const config = loadConfig();
+		expect(() => validateConfig({ ...config, cacheClearToken: "x" }, logger)).not.toThrow();
 	});
 });

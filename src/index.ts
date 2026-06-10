@@ -4,7 +4,7 @@
 // The inspiration source: https://github.com/remino/timeprox
 // Rémi's website: https://remino.net
 
-import { ensureCacheDir, loadConfig } from "./lib/config";
+import { ensureCacheDir, loadConfig, validateConfig } from "./lib/config";
 import { Dependencies } from "./lib/dependencies";
 import { createLogger, logger as bootErrorLogger } from "./lib/logger";
 import { installOutboundProxy } from "./lib/outbound-proxy";
@@ -27,6 +27,7 @@ async function main(): Promise<void> {
 	// mutation; this is the single call site. The await ensures startup probes
 	// complete (and throw if all proxies are unreachable) before we go further.
 	const bootLogger = createLogger();
+	validateConfig(config, bootLogger);
 	const outboundProxy = await installOutboundProxy(config, bootLogger);
 
 	const dependencies = new Dependencies(config, outboundProxy);

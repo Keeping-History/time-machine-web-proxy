@@ -7,7 +7,7 @@ import { cachedCdxFetch } from "../lib/cdx-cache";
 import type { DirectClient } from "../lib/dependencies";
 import { describeFetchError, errorHasStatus } from "../lib/errors";
 import { extractCdnEmbeddedUrl } from "../lib/redirect-unwrapper";
-import { inlineCssLinks, rewriteCssUrls, rewriteHtmlUrls, stripWaybackToolbar } from "../lib/url-rewriter";
+import { inlineCssLinksOnAst, rewriteCssUrls, rewriteHtmlUrlsToAst, stripWaybackToolbar } from "../lib/url-rewriter";
 import { isHostnameWhitelisted } from "../lib/url-validator";
 import type { Config } from "../models/config";
 import type { ProxyResult } from "../models/proxy";
@@ -162,15 +162,15 @@ export class ProxyService {
 
 		if (isHtml) {
 			const stripped = stripWaybackToolbar(raw.toString("utf-8"));
-			const { html, discoveredAssets } = rewriteHtmlUrls(
+			const { document, discoveredAssets } = rewriteHtmlUrlsToAst(
 				stripped,
 				targetUrl,
 				time,
 				this.config.lockTime,
 				this.config.proxyBase,
 			);
-			body = await inlineCssLinks(
-				html,
+			body = await inlineCssLinksOnAst(
+				document,
 				this.buildCssFetcher(),
 				time,
 				this.config.lockTime,

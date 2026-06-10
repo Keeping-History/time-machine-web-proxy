@@ -6,6 +6,7 @@ type Node = DefaultTreeAdapterTypes.Node;
 type Element = DefaultTreeAdapterTypes.Element;
 type TextNode = DefaultTreeAdapterTypes.TextNode;
 type ParentNode = DefaultTreeAdapterTypes.ParentNode;
+type Document = DefaultTreeAdapterTypes.Document;
 
 // parse5's NS enum is not in its public exports; the HTML namespace URI is the correct runtime value.
 const HTML_NS = "http://www.w3.org/1999/xhtml" as unknown as Parameters<
@@ -363,6 +364,11 @@ export interface RewriteHtmlResult {
 	discoveredAssets: DiscoveredAsset[];
 }
 
+export interface RewriteHtmlAstResult {
+	document: Document;
+	discoveredAssets: DiscoveredAsset[];
+}
+
 // Walk the tree depth-first to find the first element with the given tag name.
 const findElement = (node: Node, tag: string): Element | null => {
 	if (isElement(node) && node.tagName.toLowerCase() === tag) return node;
@@ -433,6 +439,23 @@ export const rewriteHtmlUrls = (
 	visit(doc, effectiveBase, time, lockTime, collect, assets, proxyBase);
 	injectShim(doc, targetUrl, time, lockTime, proxyBase);
 	return { html: serialize(doc), discoveredAssets: assets };
+};
+
+export const rewriteHtmlUrlsToAst = (
+	html: string,
+	targetUrl: string,
+	time: string,
+	lockTime = false,
+	proxyBase = "",
+): RewriteHtmlAstResult => {
+	const collect = new Set<string>();
+	const assets: DiscoveredAsset[] = [];
+	const doc = parse(html);
+	// <base href> handling first so its effective base is used during visit().
+	const effectiveBase = consumeBaseTag(doc, targetUrl);
+	visit(doc, effectiveBase, time, lockTime, collect, assets, proxyBase);
+	injectShim(doc, targetUrl, time, lockTime, proxyBase);
+	return { document: doc, discoveredAssets: assets };
 };
 
 export const stripWaybackToolbar = (html: string): string =>
@@ -508,4 +531,66 @@ export const inlineCssLinks = async (
 	}
 
 	return serialize(doc);
+};
+
+type CssFetcher = (cssUrl: string, ts: string) => Promise<string | null>;
+
+export const inlineCssLinksOnAst = async (
+	document: Document,
+	fetchCss: CssFetcher,
+	time: string,
+	lockTime: boolean,
+	proxyBase: string,
+): Promise<string> => {
+	const linkNodes: Element[] = [];
+
+	const collectLinks = (node: Node): void => {
+		if (isStylesheetLink(node)) {
+			linkNodes.push(node as Element);
+		}
+		if (hasChildNodes(node)) {
+			for (const child of node.childNodes) collectLinks(child);
+		}
+	};
+	collectLinks(document);
+
+	for (const link of linkNodes) {
+		const hrefAttr = link.attrs.find((a) => a.name === "href");
+		if (!hrefAttr?.value) continue;
+
+		const rawHref = hrefAttr.value;
+		const path =
+			proxyBase && rawHref.startsWith(proxyBase) ? rawHref.slice(proxyBase.length) : rawHref;
+		const match = path.match(RE_WAYBACK_PATH);
+		if (!match) continue;
+
+		const [, ts, cssUrl] = match;
+		const resolvedTs = ts ?? time;
+
+		const cssContent = await fetchCss(cssUrl, resolvedTs);
+		if (!cssContent) continue;
+
+		const rewritten = rewriteCssUrls(cssContent, cssUrl, resolvedTs, lockTime, undefined, undefined, proxyBase);
+
+		const styleNode = defaultTreeAdapter.createElement(
+			"style",
+			HTML_NS,
+			[],
+		);
+
+		const mediaAttr = link.attrs.find((a) => a.name === "media");
+		if (mediaAttr) {
+			styleNode.attrs.push({ name: "media", value: mediaAttr.value });
+		}
+
+		const textNode = defaultTreeAdapter.createTextNode(rewritten);
+		defaultTreeAdapter.appendChild(styleNode, textNode);
+
+		const parent = link.parentNode;
+		if (!parent) continue;
+		defaultTreeAdapter.insertBefore(parent, styleNode, link);
+		defaultTreeAdapter.detachNode(link);
+	}
+
+	return serialize(document);
 };
