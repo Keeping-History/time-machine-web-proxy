@@ -1,18 +1,7 @@
 import { mkdirSync } from "node:fs";
 import { parseDomainRemap } from "./hostname-normalizer";
+import { parseWhitelist } from "./url-validator";
 import type { Config, OutboundProxyChooser } from "../models/config";
-
-const parseSnapshotWindowDays = (csv: string): number[] => {
-	const parts = csv.split(",").map((s) => s.trim());
-	if (parts.length === 0 || parts.some((s) => s === "")) {
-		throw new Error(`Invalid SNAPSHOT_WINDOW_DAYS: empty entry in "${csv}"`);
-	}
-	const parsed = parts.map((s) => Number.parseInt(s, 10));
-	if (parsed.some((n) => !Number.isFinite(n) || n < 0)) {
-		throw new Error(`Invalid SNAPSHOT_WINDOW_DAYS: "${csv}" — must be non-negative integers`);
-	}
-	return parsed;
-};
 
 function parseOutboundProxyUrls(raw: string | undefined): string[] {
 	if (!raw) return [];
@@ -80,8 +69,7 @@ export function loadConfig(): Config {
 			.split(",")
 			.map((s) => s.trim())
 			.filter(Boolean),
-		whitelistHosts: process.env.WHITELIST_HOSTS ?? "*",
-		proxyPrefix: process.env.PROXY_PREFIX ?? "",
+		whitelistHosts: parseWhitelist(process.env.WHITELIST_HOSTS ?? ""),
 		proxyBase,
 		proxyBaseHostname,
 		cacheClearToken: process.env.CACHE_CLEAR_TOKEN ?? "",
@@ -91,7 +79,6 @@ export function loadConfig(): Config {
 		domainCrawlEnabled: process.env.DOMAIN_CRAWL_ENABLED?.toLowerCase() !== "false",
 		workerConcurrency: Number(process.env.WORKER_CONCURRENCY) || 2,
 		workerRateLimitPerSec: Number(process.env.WORKER_RATE_LIMIT_PER_SEC) || 1,
-		downloaderThreadsCount: Number(process.env.DOWNLOADER_THREADS_COUNT) || 3,
 		crawlMaxCdxPages: Number(process.env.CRAWL_MAX_CDX_PAGES) || 50,
 		crawlWindowDays: parseIntInRange(
 			process.env.CRAWL_WINDOW_DAYS,
@@ -114,20 +101,6 @@ export function loadConfig(): Config {
 		outboundProxyCooldownMs: parseOutboundProxyCooldownMs(
 			process.env.OUTBOUND_PROXY_COOLDOWN_SECONDS,
 		),
-		snapshotWindowDays: parseSnapshotWindowDays(
-			process.env.SNAPSHOT_WINDOW_DAYS ?? "30,365,3650,0",
-		),
-		// Direct/top-level URLs: strict at-or-before by default. The user typed
-		// a time and expects the page state at that time — drifting forward to
-		// a later capture changes what they're viewing. Opt in with
-		// ALLOW_LATER_FALLBACK=true if a strict snapshot is unavailable too often.
-		allowLaterFallback: process.env.ALLOW_LATER_FALLBACK?.toLowerCase() === "true",
-		// Asset URLs (images, CSS, JS, fonts, media): bidirectional closest by
-		// default. Sub-resources at the exact requested timestamp are rare;
-		// without later-fallback the proxy 404s assets that exist a few hours
-		// after the requested time. Opt out with ASSET_LATER_FALLBACK=false.
-		assetLaterFallback: process.env.ASSET_LATER_FALLBACK?.toLowerCase() !== "false",
-
 		// Direct-fetch kill switches and tuning knobs
 		directFetchEnabled: parseBool(process.env.DIRECT_FETCH_ENABLED, "DIRECT_FETCH_ENABLED", true),
 		directFetchMaxConcurrent: parseIntInRange(

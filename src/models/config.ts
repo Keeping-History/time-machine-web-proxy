@@ -6,8 +6,7 @@ export interface Config {
 	cacheDir: string;
 	cacheEnabled: boolean;
 	allowedOrigins: string[];
-	whitelistHosts: string;
-	proxyPrefix: string;
+	whitelistHosts: string[];
 	proxyBase: string;
 	proxyBaseHostname: string;
 	cacheClearToken: string;
@@ -19,7 +18,6 @@ export interface Config {
 	domainCrawlEnabled: boolean;
 	workerConcurrency: number;
 	workerRateLimitPerSec: number;
-	downloaderThreadsCount: number;
 	crawlMaxCdxPages: number;
 	/** CDX time window around `time` for crawl-mode queries, in days.
 	 *  Env: CRAWL_WINDOW_DAYS (default 30, 1-3650). */
@@ -36,18 +34,6 @@ export interface Config {
 	 * Each consecutive re-probe failure extends the cooldown linearly by
 	 * this base value (X, 2X, 3X, ...). */
 	outboundProxyCooldownMs: number;
-
-	// — Snapshot timestamp resolver —
-	snapshotWindowDays: number[];
-	/** Bidirectional ("closest snapshot") resolution for DIRECT/top-level URLs.
-	 *  Off by default: a user who typed a time wants the page state at that
-	 *  time, not a drifted later capture. Env: ALLOW_LATER_FALLBACK. */
-	allowLaterFallback: boolean;
-	/** Bidirectional resolution for ASSET URLs (images, CSS, JS, fonts, media).
-	 *  On by default: assets rarely line up at the page's exact requested
-	 *  timestamp, and serving the closest capture matches web.archive.org's
-	 *  own behavior for sub-resources. Env: ASSET_LATER_FALLBACK. */
-	assetLaterFallback: boolean;
 
 	// — Direct-fetch kill switches and tuning knobs —
 	/** Master switch for direct Wayback asset fetching. Env: DIRECT_FETCH_ENABLED (default true). */

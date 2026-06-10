@@ -39,13 +39,14 @@ const logger = pino({ level: "silent" });
 
 const baseConfig = {
 	proxyBase: "http://localhost:8080",
-	proxyPrefix: "",
-	whitelistHosts: "*",
+	whitelistHosts: ["*"],
 	crawlMaxCdxPages: 50,
 	crawlWindowDays: 30,
 	crawlMaxChunkFanout: 1000,
 	bullmqPrefix: "tm",
 	domainCrawlEnabled: true,
+	prewarmEnabled: true,
+	prewarmMaxAssetsPerPage: 100,
 } as unknown as Config;
 
 const makeCache = (lookupImpl?: jest.Mock): jest.Mocked<CacheService> =>
@@ -183,7 +184,7 @@ describe("ProxyService.fetch — cache MISS (no directClient → MISS_WORKER)", 
 		// Non-whitelisted to skip crawl side-effect for this test
 		const svc = new ProxyService(cache, client, logger, {
 			...baseConfig,
-			whitelistHosts: "other.com",
+			whitelistHosts: ["other.com"],
 		});
 
 		const result = await svc.fetch(TARGET_HTML_URL, TIME);
@@ -272,7 +273,7 @@ describe("ProxyService.fetch — Tier 2 direct fetch", () => {
 			cache,
 			client,
 			logger,
-			{ ...baseConfig, whitelistHosts: "other.com" },
+			{ ...baseConfig, whitelistHosts: ["other.com"] },
 			null,
 			directClient,
 		);
@@ -313,7 +314,7 @@ describe("ProxyService.fetch — Tier 2 direct fetch", () => {
 			cache,
 			client,
 			logger,
-			{ ...baseConfig, whitelistHosts: "other.com" },
+			{ ...baseConfig, whitelistHosts: ["other.com"] },
 			null,
 			directClient,
 		);
@@ -345,7 +346,7 @@ describe("ProxyService.fetch — Tier 2 direct fetch", () => {
 			cache,
 			client,
 			logger,
-			{ ...baseConfig, whitelistHosts: "other.com" },
+			{ ...baseConfig, whitelistHosts: ["other.com"] },
 			null,
 			directClient,
 		);
@@ -408,7 +409,7 @@ describe("ProxyService.fetch — Tier 2 direct fetch", () => {
 			cache,
 			client,
 			logger,
-			{ ...baseConfig, whitelistHosts: "other.com" },
+			{ ...baseConfig, whitelistHosts: ["other.com"] },
 			null,
 			directClient,
 		);
@@ -599,7 +600,7 @@ describe("ProxyService.fetch — Tier 1 prewarm (fire-and-forget)", () => {
 			cache,
 			client,
 			logger,
-			{ ...baseConfig, whitelistHosts: "other.com" },
+			{ ...baseConfig, whitelistHosts: ["other.com"] },
 			null,
 			directClient,
 		);
@@ -684,7 +685,7 @@ describe("ProxyService.fetch — domain crawl fire-and-forget", () => {
 			cache,
 			client,
 			logger,
-			{ ...baseConfig, whitelistHosts: "example.com" },
+			{ ...baseConfig, whitelistHosts: ["example.com"] },
 			redis as unknown as import("ioredis").default,
 		);
 
@@ -722,7 +723,7 @@ describe("ProxyService.fetch — domain crawl fire-and-forget", () => {
 			cache,
 			client,
 			logger,
-			{ ...baseConfig, whitelistHosts: "example.com" },
+			{ ...baseConfig, whitelistHosts: ["example.com"] },
 			redis as unknown as import("ioredis").default,
 		);
 
@@ -745,7 +746,7 @@ describe("ProxyService.fetch — domain crawl fire-and-forget", () => {
 			cache,
 			client,
 			logger,
-			{ ...baseConfig, whitelistHosts: "other.com" },
+			{ ...baseConfig, whitelistHosts: ["other.com"] },
 			redis as unknown as import("ioredis").default,
 		);
 
@@ -759,7 +760,7 @@ describe("ProxyService.fetch — domain crawl fire-and-forget", () => {
 		expect(mockedFetch).not.toHaveBeenCalled();
 	});
 
-	it("fans-out to chunk crawl when CDX page count exceeds crawlMaxCdxPages (no longer skips)", async () => {
+	it("caps chunk-crawl fan-out at crawlMaxCdxPages when CDX page count exceeds the cap", async () => {
 		const lookup = jest
 			.fn<Promise<CacheHit | null>, [string, string]>()
 			.mockResolvedValueOnce(null)
@@ -773,7 +774,7 @@ describe("ProxyService.fetch — domain crawl fire-and-forget", () => {
 			cache,
 			client,
 			logger,
-			{ ...baseConfig, whitelistHosts: "example.com", crawlMaxCdxPages: 50, crawlMaxChunkFanout: 1000 },
+			{ ...baseConfig, whitelistHosts: ["example.com"], crawlMaxCdxPages: 50, crawlMaxChunkFanout: 1000 },
 			redis as unknown as import("ioredis").default,
 		);
 
@@ -781,7 +782,8 @@ describe("ProxyService.fetch — domain crawl fire-and-forget", () => {
 		await new Promise((r) => setImmediate(r));
 
 		expect(client.enqueueDomainCrawl).toHaveBeenCalledWith("example.com", TIME);
-		expect(client.enqueueCrawlChunks).toHaveBeenCalledWith("example.com", TIME, 9999, 1000);
+		// CDX returned 9999 pages but crawlMaxCdxPages=50 caps the fan-out
+		expect(client.enqueueCrawlChunks).toHaveBeenCalledWith("example.com", TIME, 50, 1000);
 	});
 
 	it("skips crawl when Redis budget is already consumed (SET NX returns null)", async () => {
@@ -798,7 +800,7 @@ describe("ProxyService.fetch — domain crawl fire-and-forget", () => {
 			cache,
 			client,
 			logger,
-			{ ...baseConfig, whitelistHosts: "example.com" },
+			{ ...baseConfig, whitelistHosts: ["example.com"] },
 			redis as unknown as import("ioredis").default,
 		);
 
@@ -824,7 +826,7 @@ describe("ProxyService.fetch — domain crawl fire-and-forget", () => {
 			cache,
 			client,
 			logger,
-			{ ...baseConfig, whitelistHosts: "example.com" },
+			{ ...baseConfig, whitelistHosts: ["example.com"] },
 			redis as unknown as import("ioredis").default,
 		);
 
@@ -852,7 +854,7 @@ describe("ProxyService.fetch — domain crawl fire-and-forget", () => {
 			cache,
 			client,
 			logger,
-			{ ...baseConfig, whitelistHosts: "example.com", crawlWindowDays: 30 },
+			{ ...baseConfig, whitelistHosts: ["example.com"], crawlWindowDays: 30 },
 			redis as unknown as import("ioredis").default,
 		);
 
@@ -878,7 +880,7 @@ describe("ProxyService.fetch — domain crawl fire-and-forget", () => {
 		mockedFetch.mockReturnValue(cdxOk(5));
 		const svc = new ProxyService(cache, client, logger, {
 			...baseConfig,
-			whitelistHosts: "example.com",
+			whitelistHosts: ["example.com"],
 		});
 
 		await svc.fetch(TARGET_HTML_URL, TIME);
@@ -901,7 +903,7 @@ describe("ProxyService.fetch — domain crawl fire-and-forget", () => {
 			cache,
 			client,
 			logger,
-			{ ...baseConfig, whitelistHosts: "example.com" },
+			{ ...baseConfig, whitelistHosts: ["example.com"] },
 			redis as unknown as import("ioredis").default,
 		);
 		await svc.fetch(TARGET_HTML_URL, TIME);
@@ -925,7 +927,7 @@ describe("ProxyService.fetch — domain crawl fire-and-forget", () => {
 			cache,
 			client,
 			logger,
-			{ ...baseConfig, whitelistHosts: "example.com" },
+			{ ...baseConfig, whitelistHosts: ["example.com"] },
 			redis as unknown as import("ioredis").default,
 		);
 		await svc.fetch(TARGET_HTML_URL, TIME);
@@ -947,7 +949,7 @@ describe("ProxyService.fetch — domain crawl fire-and-forget", () => {
 			cache,
 			client,
 			logger,
-			{ ...baseConfig, whitelistHosts: "example.com", crawlMaxChunkFanout: 1000 },
+			{ ...baseConfig, whitelistHosts: ["example.com"], crawlMaxChunkFanout: 1000 },
 			redis as unknown as import("ioredis").default,
 		);
 
@@ -974,7 +976,7 @@ describe("ProxyService.triggerDomainCrawl — explicit admin enqueue", () => {
 		mockedFetch.mockReturnValue(cdxOk(10));
 		const svc = new ProxyService(cache, client, logger, {
 			...baseConfig,
-			whitelistHosts: "example.com",
+			whitelistHosts: ["example.com"],
 			crawlMaxChunkFanout: 1000,
 		});
 
@@ -1004,7 +1006,7 @@ describe("ProxyService.triggerDomainCrawl — explicit admin enqueue", () => {
 		const client = makeClient();
 		const svc = new ProxyService(cache, client, logger, {
 			...baseConfig,
-			whitelistHosts: "other.com",
+			whitelistHosts: ["other.com"],
 		});
 
 		await expect(svc.triggerDomainCrawl("example.com", TIME)).rejects.toMatchObject({
@@ -1021,7 +1023,7 @@ describe("ProxyService.triggerDomainCrawl — explicit admin enqueue", () => {
 		mockedFetch.mockReturnValue(cdxOk(75));
 		const svc = new ProxyService(cache, client, logger, {
 			...baseConfig,
-			whitelistHosts: "example.com",
+			whitelistHosts: ["example.com"],
 			crawlMaxCdxPages: 50,
 			crawlMaxChunkFanout: 1000,
 		});
@@ -1045,7 +1047,7 @@ describe("ProxyService.triggerDomainCrawl — explicit admin enqueue", () => {
 		const client = makeClient();
 		const svc = new ProxyService(cache, client, logger, {
 			...baseConfig,
-			whitelistHosts: "example.com",
+			whitelistHosts: ["example.com"],
 		});
 
 		await expect(svc.triggerDomainCrawl("example.com", TIME)).rejects.toThrow(/ENOTFOUND/);
@@ -1070,7 +1072,7 @@ describe("ProxyService.triggerDomainCrawl — explicit admin enqueue", () => {
 		});
 		const svc = new ProxyService(cache, client, logger, {
 			...baseConfig,
-			whitelistHosts: "example.com",
+			whitelistHosts: ["example.com"],
 		});
 
 		await svc.triggerDomainCrawl("example.com", TIME, { skipPreflight: true });
@@ -1086,7 +1088,7 @@ describe("ProxyService.triggerDomainCrawl — explicit admin enqueue", () => {
 		const client = makeClient();
 		const svc = new ProxyService(cache, client, logger, {
 			...baseConfig,
-			whitelistHosts: "other.com",
+			whitelistHosts: ["other.com"],
 		});
 
 		await expect(
@@ -1121,7 +1123,7 @@ describe("ProxyService.triggerDomainCrawl — explicit admin enqueue", () => {
 			cache,
 			client,
 			logger,
-			{ ...baseConfig, whitelistHosts: "example.com" },
+			{ ...baseConfig, whitelistHosts: ["example.com"] },
 			redis as unknown as import("ioredis").default,
 		);
 
@@ -1137,7 +1139,7 @@ describe("ProxyService.triggerDomainCrawl — explicit admin enqueue", () => {
 		mockedFetch.mockReturnValue(cdxOk(0));
 		const svc = new ProxyService(cache, client, logger, {
 			...baseConfig,
-			whitelistHosts: "example.com",
+			whitelistHosts: ["example.com"],
 		});
 		await expect(svc.triggerDomainCrawl("example.com", TIME)).rejects.toMatchObject({
 			status: 422,
@@ -1153,7 +1155,7 @@ describe("ProxyService.triggerDomainCrawl — explicit admin enqueue", () => {
 		);
 		const svc = new ProxyService(cache, client, logger, {
 			...baseConfig,
-			whitelistHosts: "example.com",
+			whitelistHosts: ["example.com"],
 		});
 		await expect(svc.triggerDomainCrawl("example.com", TIME)).rejects.toThrow(
 			/CDX page count indeterminate/,

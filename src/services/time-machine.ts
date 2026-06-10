@@ -16,7 +16,7 @@ import type { ProxyService } from "./proxy";
 
 export interface UrlValidatorModule {
 	validateTargetUrl: (url: string) => string;
-	isHostWhitelisted: (url: string, whitelistHosts: string) => boolean;
+	isHostWhitelisted: (url: string, whitelistHosts: string[]) => boolean;
 }
 
 // Blocks JS-driven top-level navigation (location.href = externalUrl, meta-refresh

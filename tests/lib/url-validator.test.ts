@@ -19,40 +19,58 @@ describe("parseWhitelist", () => {
 });
 
 describe("isHostWhitelisted", () => {
-	it("allows everything when whitelist is *", () => {
-		expect(isHostWhitelisted("http://any.example.com/path", "*")).toBe(true);
+	it("allows everything when whitelist is ['*']", () => {
+		expect(isHostWhitelisted("http://any.example.com/path", ["*"])).toBe(true);
 	});
 
-	it("allows everything when whitelist is empty", () => {
-		expect(isHostWhitelisted("http://any.example.com/path", "")).toBe(true);
+	it("denies everything when whitelist is empty (fail-closed)", () => {
+		expect(isHostWhitelisted("http://any.example.com/path", [])).toBe(false);
 	});
 
 	it("allows exact hostname match", () => {
-		expect(isHostWhitelisted("http://example.com/path", "example.com")).toBe(true);
+		expect(isHostWhitelisted("http://example.com/path", ["example.com"])).toBe(true);
 	});
 
 	it("rejects non-matching hostname", () => {
-		expect(isHostWhitelisted("http://evil.com/path", "example.com")).toBe(false);
+		expect(isHostWhitelisted("http://evil.com/path", ["example.com"])).toBe(false);
 	});
 
 	it("allows wildcard subdomain match", () => {
-		expect(isHostWhitelisted("http://sub.example.com/path", "*.example.com")).toBe(true);
+		expect(isHostWhitelisted("http://sub.example.com/path", ["*.example.com"])).toBe(true);
 	});
 
 	it("allows exact domain when wildcard is *.example.com", () => {
-		expect(isHostWhitelisted("http://example.com/path", "*.example.com")).toBe(true);
+		expect(isHostWhitelisted("http://example.com/path", ["*.example.com"])).toBe(true);
 	});
 
 	it("rejects subdomain not matching wildcard pattern", () => {
-		expect(isHostWhitelisted("http://sub.other.com/path", "*.example.com")).toBe(false);
+		expect(isHostWhitelisted("http://sub.other.com/path", ["*.example.com"])).toBe(false);
 	});
 
 	it("allows match against one of multiple patterns", () => {
-		expect(isHostWhitelisted("http://foo.com/path", "example.com,foo.com")).toBe(true);
+		expect(isHostWhitelisted("http://foo.com/path", ["example.com", "foo.com"])).toBe(true);
 	});
 
 	it("returns false for invalid URL", () => {
-		expect(isHostWhitelisted("not-a-url", "example.com")).toBe(false);
+		expect(isHostWhitelisted("not-a-url", ["example.com"])).toBe(false);
+	});
+});
+
+describe("parseWhitelist + isHostWhitelisted integration", () => {
+	it("empty string input → deny-all", () => {
+		expect(isHostWhitelisted("http://any.example.com/path", parseWhitelist(""))).toBe(false);
+	});
+
+	it("whitespace-only input → deny-all", () => {
+		expect(isHostWhitelisted("http://any.example.com/path", parseWhitelist("   "))).toBe(false);
+	});
+
+	it("comma-only input → deny-all", () => {
+		expect(isHostWhitelisted("http://any.example.com/path", parseWhitelist(",,,"))).toBe(false);
+	});
+
+	it("explicit '*' → allow-all", () => {
+		expect(isHostWhitelisted("http://any.example.com/path", parseWhitelist("*"))).toBe(true);
 	});
 });
 

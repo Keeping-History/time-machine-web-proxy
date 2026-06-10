@@ -63,6 +63,8 @@ export class ProxyService {
 			| "cdxCacheEnabled"
 			| "lockTime"
 			| "proxyBase"
+			| "prewarmEnabled"
+			| "prewarmMaxAssetsPerPage"
 		>,
 		private readonly redis: IORedis | null = null,
 		private readonly directClient: DirectClient | null = null,
@@ -172,8 +174,9 @@ export class ProxyService {
 
 			// Tier 1 (prewarm): fire-and-forget prefetch of discovered assets.
 			// Errors are swallowed so prewarm failures never affect the foreground response.
-			if (this.directClient && discoveredAssets.length > 0) {
-				for (const asset of discoveredAssets) {
+			if (this.config.prewarmEnabled && this.directClient && discoveredAssets.length > 0) {
+				const assetsToPrewarm = discoveredAssets.slice(0, this.config.prewarmMaxAssetsPerPage);
+				for (const asset of assetsToPrewarm) {
 					void this.directClient
 						.fetchAtResolvedTime(asset.url, asset.embeddedTs)
 						.then(async (result) => {
@@ -276,12 +279,13 @@ export class ProxyService {
 				this.logger.debug({ host }, "[crawl-skip] 0 CDX pages in window");
 				return;
 			}
-			this.logger.info({ host, time, pages }, "[crawl] fan-out");
+			const cappedPages = Math.min(pages, this.config.crawlMaxCdxPages);
+			this.logger.info({ host, time, pages, cappedPages }, "[crawl] fan-out");
 			await this.archiveJobClient.enqueueDomainCrawl(host, time);
 			await this.archiveJobClient.enqueueCrawlChunks(
 				host,
 				time,
-				pages,
+				cappedPages,
 				this.config.crawlMaxChunkFanout,
 			);
 		} catch (e) {
@@ -326,12 +330,10 @@ export class ProxyService {
 				"[crawl] preflight SKIPPED by admin — runaway-crawl guard disabled for this request",
 			);
 			await this.archiveJobClient.enqueueDomainCrawl(host, time);
-			await this.archiveJobClient.enqueueCrawlChunks(
-				host,
-				time,
-				this.config.crawlMaxChunkFanout,
-				this.config.crawlMaxChunkFanout,
-			);
+			// Without a CDX page-count, fanout serves as both the total-pages
+			// estimate and the cap — Math.min(fanout, fanout) is intentional.
+			const fanout = this.config.crawlMaxChunkFanout;
+			await this.archiveJobClient.enqueueCrawlChunks(host, time, fanout, fanout);
 		} else {
 			const pages = await this.cdxPageCount(host, time);
 			if (pages === 0) {

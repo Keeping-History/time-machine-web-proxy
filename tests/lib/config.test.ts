@@ -19,7 +19,6 @@ describe("loadConfig", () => {
 		delete process.env.CACHE_ENABLED;
 		delete process.env.CORS_ORIGIN;
 		delete process.env.WHITELIST_HOSTS;
-		delete process.env.PROXY_PREFIX;
 		delete process.env.PROXY_BASE_URL;
 		delete process.env.CACHE_CLEAR_TOKEN;
 		delete process.env.WS_KEEPALIVE_MS;
@@ -28,14 +27,10 @@ describe("loadConfig", () => {
 		delete process.env.DOMAIN_CRAWL_ENABLED;
 		delete process.env.WORKER_CONCURRENCY;
 		delete process.env.WORKER_RATE_LIMIT_PER_SEC;
-		delete process.env.DOWNLOADER_THREADS_COUNT;
 		delete process.env.CRAWL_MAX_CDX_PAGES;
 		delete process.env.OUTBOUND_PROXY_URLS;
 		delete process.env.OUTBOUND_PROXY_USERNAME;
 		delete process.env.OUTBOUND_PROXY_PASSWORD;
-		delete process.env.SNAPSHOT_WINDOW_DAYS;
-		delete process.env.ALLOW_LATER_FALLBACK;
-		delete process.env.ASSET_LATER_FALLBACK;
 
 		const config = loadConfig();
 
@@ -44,8 +39,8 @@ describe("loadConfig", () => {
 		expect(config.hostname).toBe("0.0.0.0");
 		expect(config.cacheDir).toBe("/app/cache");
 		expect(config.cacheEnabled).toBe(true);
-		expect(config.whitelistHosts).toBe("*");
-		expect(config.proxyPrefix).toBe("");
+		expect(config.whitelistHosts).toEqual([]);
+
 		expect(config.cacheClearToken).toBe("");
 		expect(config.wsKeepaliveMs).toBe(30_000);
 		expect(config.redisUrl).toBe("redis://localhost:6379");
@@ -53,91 +48,10 @@ describe("loadConfig", () => {
 		expect(config.domainCrawlEnabled).toBe(true);
 		expect(config.workerConcurrency).toBe(2);
 		expect(config.workerRateLimitPerSec).toBe(1);
-		expect(config.downloaderThreadsCount).toBe(3);
 		expect(config.crawlMaxCdxPages).toBe(50);
 		expect(config.outboundProxyUrls).toEqual([]);
 		expect(config.outboundProxyUsername).toBe("");
 		expect(config.outboundProxyPassword).toBe("");
-		expect(config.snapshotWindowDays).toEqual([30, 365, 3650, 0]);
-		// Direct URLs default to strict at-or-before: the user typed a time
-		// and should see the page state at that time, not a drifted later one.
-		expect(config.allowLaterFallback).toBe(false);
-		// Assets default to bidirectional closest: sub-resources rarely line
-		// up at the page's exact requested timestamp, so the proxy mirrors
-		// web.archive.org's own "nearest snapshot" behavior for them.
-		expect(config.assetLaterFallback).toBe(true);
-	});
-
-	it("parses SNAPSHOT_WINDOW_DAYS CSV into number[]", () => {
-		process.env.SNAPSHOT_WINDOW_DAYS = "7,30,90,0";
-		expect(loadConfig().snapshotWindowDays).toEqual([7, 30, 90, 0]);
-	});
-
-	it("trims whitespace in SNAPSHOT_WINDOW_DAYS entries", () => {
-		process.env.SNAPSHOT_WINDOW_DAYS = " 7 , 30 , 90 ";
-		expect(loadConfig().snapshotWindowDays).toEqual([7, 30, 90]);
-	});
-
-	it("throws on non-numeric SNAPSHOT_WINDOW_DAYS entries", () => {
-		process.env.SNAPSHOT_WINDOW_DAYS = "30,abc,90";
-		expect(() => loadConfig()).toThrow(/SNAPSHOT_WINDOW_DAYS/);
-	});
-
-	it("throws on negative SNAPSHOT_WINDOW_DAYS entries", () => {
-		process.env.SNAPSHOT_WINDOW_DAYS = "30,-1,90";
-		expect(() => loadConfig()).toThrow(/SNAPSHOT_WINDOW_DAYS/);
-	});
-
-	it("throws on empty SNAPSHOT_WINDOW_DAYS", () => {
-		process.env.SNAPSHOT_WINDOW_DAYS = "";
-		expect(() => loadConfig()).toThrow(/SNAPSHOT_WINDOW_DAYS/);
-	});
-
-	it("treats ALLOW_LATER_FALLBACK=true (case-insensitive) as true — only opt-in value", () => {
-		process.env.ALLOW_LATER_FALLBACK = "true";
-		expect(loadConfig().allowLaterFallback).toBe(true);
-
-		process.env.ALLOW_LATER_FALLBACK = "TRUE";
-		expect(loadConfig().allowLaterFallback).toBe(true);
-
-		process.env.ALLOW_LATER_FALLBACK = "True";
-		expect(loadConfig().allowLaterFallback).toBe(true);
-	});
-
-	it("treats any ALLOW_LATER_FALLBACK value other than 'true' as false (default-off for direct URLs)", () => {
-		process.env.ALLOW_LATER_FALLBACK = "false";
-		expect(loadConfig().allowLaterFallback).toBe(false);
-
-		process.env.ALLOW_LATER_FALLBACK = "yes";
-		expect(loadConfig().allowLaterFallback).toBe(false);
-
-		process.env.ALLOW_LATER_FALLBACK = "1";
-		expect(loadConfig().allowLaterFallback).toBe(false);
-
-		process.env.ALLOW_LATER_FALLBACK = "";
-		expect(loadConfig().allowLaterFallback).toBe(false);
-	});
-
-	it("treats ASSET_LATER_FALLBACK=false (case-insensitive) as false — only opt-out value", () => {
-		process.env.ASSET_LATER_FALLBACK = "false";
-		expect(loadConfig().assetLaterFallback).toBe(false);
-
-		process.env.ASSET_LATER_FALLBACK = "FALSE";
-		expect(loadConfig().assetLaterFallback).toBe(false);
-
-		process.env.ASSET_LATER_FALLBACK = "False";
-		expect(loadConfig().assetLaterFallback).toBe(false);
-	});
-
-	it("treats any ASSET_LATER_FALLBACK value other than 'false' as true (default-on for assets)", () => {
-		process.env.ASSET_LATER_FALLBACK = "true";
-		expect(loadConfig().assetLaterFallback).toBe(true);
-
-		process.env.ASSET_LATER_FALLBACK = "yes";
-		expect(loadConfig().assetLaterFallback).toBe(true);
-
-		process.env.ASSET_LATER_FALLBACK = "";
-		expect(loadConfig().assetLaterFallback).toBe(true);
 	});
 
 	it("reads values from env vars", () => {
@@ -215,17 +129,15 @@ describe("loadConfig", () => {
 		expect(loadConfig().domainCrawlEnabled).toBe(true);
 	});
 
-	it("reads worker and downloader integer env vars", () => {
+	it("reads worker integer env vars", () => {
 		process.env.WORKER_CONCURRENCY = "5";
 		process.env.WORKER_RATE_LIMIT_PER_SEC = "2";
-		process.env.DOWNLOADER_THREADS_COUNT = "8";
 		process.env.CRAWL_MAX_CDX_PAGES = "100";
 
 		const config = loadConfig();
 
 		expect(config.workerConcurrency).toBe(5);
 		expect(config.workerRateLimitPerSec).toBe(2);
-		expect(config.downloaderThreadsCount).toBe(8);
 		expect(config.crawlMaxCdxPages).toBe(100);
 	});
 
