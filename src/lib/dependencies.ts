@@ -3,13 +3,11 @@ import type IORedis from "ioredis";
 import type pino from "pino";
 import { ArchiveJobClient } from "../clients/archive-job-client";
 import { DedupingDirectClient } from "../clients/deduping-direct-client";
-import {
-	type RequestedResult,
-	type ResolvedResult,
-	WaybackDirectClient,
-} from "../clients/wayback-direct-client";
+import { WaybackDirectClient } from "../clients/wayback-direct-client";
 import type { Config } from "../models/config";
+import type { DirectClientPort } from "../models/direct-client";
 import type { SystemStatus } from "../models/status";
+import type { UrlValidatorModule } from "../models/url-validator";
 import { attachQueueLogger, startArchiveWorkers } from "../queue/archive-worker";
 import {
 	type DomainCrawlChunkJob,
@@ -21,7 +19,6 @@ import {
 } from "../queue/jobs";
 import { CacheService } from "../services/cache";
 import { ProxyService } from "../services/proxy";
-import type { UrlValidatorModule } from "../services/time-machine";
 import { createLogger } from "./logger";
 import type { RotatingProxyDispatcher } from "./outbound-proxy";
 import { createRedis } from "./redis";
@@ -29,10 +26,7 @@ import { ShutdownController } from "./shutdown";
 import { isHostWhitelisted, validateTargetUrl } from "./url-validator";
 
 /** Minimal interface shared by the real DedupingDirectClient and the passthrough stub. */
-export interface DirectClient {
-	fetchAtResolvedTime(url: string, ts: string): Promise<ResolvedResult>;
-	fetchAtRequestedTime(url: string, ts: string): Promise<RequestedResult>;
-}
+export type DirectClient = DirectClientPort;
 
 /** Passthrough stub used when DIRECT_FETCH_ENABLED=false. */
 const passthroughDirectClient: DirectClient = {

@@ -11,13 +11,11 @@ import type { Config } from "../models/config";
 import type { JobProgress } from "../models/job-progress";
 import type { SystemStatus } from "../models/status";
 import { isWsRequest, type WsRequest, type WsResponse } from "../models/websocket";
+import type { UrlValidatorModule } from "../models/url-validator";
 import type { CacheService } from "./cache";
 import type { ProxyService } from "./proxy";
 
-export interface UrlValidatorModule {
-	validateTargetUrl: (url: string) => string;
-	isHostWhitelisted: (url: string, whitelistHosts: string[]) => boolean;
-}
+export type { UrlValidatorModule };
 
 // Blocks JS-driven top-level navigation (location.href = externalUrl, meta-refresh
 // without user action) while keeping the archived page functional. User-initiated

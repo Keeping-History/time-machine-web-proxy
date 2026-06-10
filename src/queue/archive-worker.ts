@@ -2,11 +2,15 @@ import { promises as fs } from "node:fs";
 import { type ConnectionOptions, type Job, type QueueEvents, Worker } from "bullmq";
 import type IORedis from "ioredis";
 import type pino from "pino";
-import type { RequestedResult, ResolvedResult } from "../clients/wayback-direct-client";
+import type { ResolvedResult } from "../clients/wayback-direct-client";
 import { cachedCdxFetch } from "../lib/cdx-cache";
 import { TIMESTAMP_RE, windowAround } from "../lib/archive-time";
 import type { JobProgress, JobProgressQueue, JobProgressStage } from "../models/job-progress";
-import type { CacheService } from "../services/cache";
+import type { CachePort } from "../models/cache-port";
+import type { DirectClientPort } from "../models/direct-client";
+
+/** @deprecated Use DirectClientPort from models/direct-client instead. */
+export type ArchiveDirectClient = DirectClientPort;
 import { rewriteHtmlUrls, stripWaybackToolbar } from "../lib/url-rewriter";
 import {
 	assertDomainCrawlChunkJob,
@@ -18,33 +22,10 @@ import {
 } from "./jobs";
 import { parseCdxPage, pickClosestPerUrl } from "./cdx-page";
 
-/**
- * Minimal structural shape of the direct-fetch client the workers need. Kept
- * local to avoid an import cycle with `lib/dependencies.ts`, which is the
- * module that constructs the real `DedupingDirectClient` and passes it in.
- *
- * `fetchAtRequestedTime` drives the exact worker: Wayback's `id_` endpoint
- * resolves the nearest snapshot server-side and redirects to it, sidestepping
- * the CDX endpoint entirely.
- */
-export interface ArchiveDirectClient {
-	fetchAtRequestedTime(url: string, ts: string): Promise<RequestedResult>;
-	fetchAtResolvedTime(url: string, ts: string): Promise<ResolvedResult>;
-}
-
 export interface StartArchiveWorkersOpts {
 	connection: ConnectionOptions;
-	cache: Pick<
-		CacheService,
-		| "cacheDirForJob"
-		| "writeFile"
-		| "writeContentTypeSidecar"
-		| "writeNotFoundSentinel"
-		| "writeTentativeNotFoundSentinel"
-		| "writeResolvedTimeSidecar"
-		| "lookup"
-	>;
-	directClient: ArchiveDirectClient;
+	cache: CachePort;
+	directClient: DirectClientPort;
 	/** Fire-and-forget callback to enqueue an archive-exact job for a discovered
 	 *  link. Keeps the crawl worker decoupled from BullMQ internals. */
 	enqueueExactJob: (url: string, time: string) => Promise<void>;
