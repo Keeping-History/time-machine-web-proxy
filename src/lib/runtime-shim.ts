@@ -118,7 +118,7 @@ export const generateShimScript = (
   });
 
   // --- document.write / document.writeln ---
-  var ATTR_RE = /((?:src|href)s*=s*)(["'])([^"']+)\\2/gi;
+  var ATTR_RE = /((?:src|href)\\s*=\\s*)(["'])([^"']+)\\2/gi;
 
   function rewriteHtmlString(html) {
     return html.replace(ATTR_RE, function (match, prefix, quote, url) {

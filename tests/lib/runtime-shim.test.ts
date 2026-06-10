@@ -287,6 +287,45 @@ describe("document.write / document.writeln rewriting", () => {
 
 		expect(captured[0]).toContain(`/web/${TS}im_/http://www.example.com/js/track.js`);
 	});
+
+	// Regression: ATTR_RE template literal previously dropped the `\` from `\s*`,
+	// so the emitted regex matched literal `s` characters instead of whitespace.
+	// HTML with any space around `=` slipped through unrewritten and the browser
+	// fetched the live origin, defeating proxy isolation.
+	it("document.write rewrites src = with whitespace around the equals sign", () => {
+		const captured: string[] = [];
+
+		const realWrite = document.write.bind(document);
+		document.write = (html: string): void => {
+			captured.push(html);
+		};
+		installShim();
+
+		document.write('<img src = "/img/banner.gif">');
+
+		document.write = realWrite;
+		installShim();
+
+		expect(captured[0]).toContain(`/web/${TS}im_/http://www.example.com/img/banner.gif`);
+		expect(captured[0]).not.toContain('src = "/img/banner.gif"');
+	});
+
+	it("document.write rewrites href  =  with multiple spaces around the equals sign", () => {
+		const captured: string[] = [];
+
+		const realWrite = document.write.bind(document);
+		document.write = (html: string): void => {
+			captured.push(html);
+		};
+		installShim();
+
+		document.write('<a href  =  "/contact">contact</a>');
+
+		document.write = realWrite;
+		installShim();
+
+		expect(captured[0]).toContain(`/web/${TS}im_/http://www.example.com/contact`);
+	});
 });
 
 // ─── MutationObserver ────────────────────────────────────────────────────────
