@@ -800,6 +800,48 @@ describe("rewriteHtmlUrls — lockTime", () => {
 	});
 });
 
+describe("rewriteCssUrls — position: fixed containment", () => {
+	it("rewrites position: fixed to position: absolute", () => {
+		const css = `.nav { position: fixed; top: 0; }`;
+		const r = rewriteCssUrls(css, "http://example.com/page", TIME);
+		expect(r).toContain("position: absolute");
+		expect(r).not.toContain("position: fixed");
+	});
+
+	it("rewrites position:fixed (no spaces) to position: absolute", () => {
+		const css = `.nav { position:fixed; top: 0; }`;
+		const r = rewriteCssUrls(css, "http://example.com/page", TIME);
+		expect(r).toContain("position: absolute");
+		expect(r).not.toContain("position:fixed");
+	});
+
+	it("rewrites POSITION: FIXED (uppercase) to position: absolute", () => {
+		const css = `.nav { POSITION: FIXED; top: 0; }`;
+		const r = rewriteCssUrls(css, "http://example.com/page", TIME);
+		expect(r).toContain("position: absolute");
+		expect(r).not.toMatch(/POSITION\s*:\s*FIXED/i);
+	});
+
+	it("rewrites all occurrences when multiple rules use position: fixed", () => {
+		const css = `.a { position: fixed; } .b { position: fixed; }`;
+		const r = rewriteCssUrls(css, "http://example.com/page", TIME);
+		expect(r).not.toContain("position: fixed");
+		expect((r.match(/position: absolute/g) ?? []).length).toBe(2);
+	});
+
+	it("leaves position: absolute untouched", () => {
+		const css = `.box { position: absolute; top: 10px; }`;
+		const r = rewriteCssUrls(css, "http://example.com/page", TIME);
+		expect(r).toContain("position: absolute");
+	});
+
+	it("leaves position: relative untouched", () => {
+		const css = `.box { position: relative; }`;
+		const r = rewriteCssUrls(css, "http://example.com/page", TIME);
+		expect(r).toContain("position: relative");
+	});
+});
+
 describe("rewriteCssUrls — lockTime", () => {
 	it("strips the timestamp segment from url() values when lockTime is true", () => {
 		const css = `background: url('/web/20191231235959/http://example.com/img.png')`;

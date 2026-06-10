@@ -288,10 +288,12 @@ export const rewriteCssUrls = (
 	assets?: DiscoveredAsset[],
 	proxyBase = "",
 ): string =>
-	css.replace(RE_CSS_URL, (_, before, url, after) => {
-		const rewritten = rewriteOneUrl(url, targetUrl, time, lockTime, collect, assets, proxyBase);
-		return `${before}${rewritten}${after}`;
-	});
+	css
+		.replace(RE_CSS_URL, (_, before, url, after) => {
+			const rewritten = rewriteOneUrl(url, targetUrl, time, lockTime, collect, assets, proxyBase);
+			return `${before}${rewritten}${after}`;
+		})
+		.replace(/\bposition\s*:\s*fixed\b/gi, "position: absolute");
 
 const rewriteMetaRefresh = (
 	content: string,
