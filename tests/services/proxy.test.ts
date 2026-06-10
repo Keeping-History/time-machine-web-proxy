@@ -1177,8 +1177,8 @@ describe("ProxyService.fetch — CSS inlining", () => {
 		`<html><head><link rel="stylesheet" href="${href}"></head><body>hello</body></html>`;
 
 	it("inlines a cached stylesheet as a <style> block", async () => {
-		const proxyHref = `http://localhost:8080/web/${CSS_TS}/${CSS_URL}`;
-		const html = htmlWithLink(proxyHref);
+		const waybackHref = `/web/${CSS_TS}/${CSS_URL}`;
+		const html = htmlWithLink(waybackHref);
 
 		// HTML page: cache HIT
 		const htmlHitLocal: CacheHit = { absPath: "/cache/page.html", contentType: "text/html" };
@@ -1209,8 +1209,8 @@ describe("ProxyService.fetch — CSS inlining", () => {
 	});
 
 	it("inlines a stylesheet fetched live (cache miss, directClient available)", async () => {
-		const proxyHref = `http://localhost:8080/web/${CSS_TS}/${CSS_URL}`;
-		const html = htmlWithLink(proxyHref);
+		const waybackHref = `/web/${CSS_TS}/${CSS_URL}`;
+		const html = htmlWithLink(waybackHref);
 
 		// HTML page: cache HIT; CSS: cache MISS
 		const htmlHitLocal: CacheHit = { absPath: "/cache/page.html", contentType: "text/html" };
@@ -1243,8 +1243,8 @@ describe("ProxyService.fetch — CSS inlining", () => {
 	});
 
 	it("leaves <link> intact when CSS fetch fails", async () => {
-		const proxyHref = `http://localhost:8080/web/${CSS_TS}/${CSS_URL}`;
-		const html = htmlWithLink(proxyHref);
+		const waybackHref = `/web/${CSS_TS}/${CSS_URL}`;
+		const html = htmlWithLink(waybackHref);
 
 		const htmlHitLocal: CacheHit = { absPath: "/cache/page.html", contentType: "text/html" };
 		const cacheLookup = jest
