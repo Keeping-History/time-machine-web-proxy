@@ -13,7 +13,7 @@ const ORIG_URL = "http://www.example.com/news/story";
  * insert that tag first.  We use `new Function(script)()` in test setup —
  * eval is acceptable in test code; the constraint is on the production shim.
  */
-function installShim(ts: string = TS, originalUrl: string = ORIG_URL): void {
+function installShim(ts: string = TS, originalUrl: string = ORIG_URL, proxyBase = ""): void {
 	// Remove any pre-existing wayback-context meta (idempotent installs in tests)
 	document
 		.querySelectorAll('meta[name="wayback-context"]')
@@ -23,9 +23,10 @@ function installShim(ts: string = TS, originalUrl: string = ORIG_URL): void {
 	meta.setAttribute("name", "wayback-context");
 	meta.setAttribute("data-ts", ts);
 	meta.setAttribute("data-url", originalUrl);
+	meta.setAttribute("data-proxy-base", proxyBase);
 	document.head.insertBefore(meta, document.head.firstChild);
 
-	const script = generateShimScript(ts, originalUrl);
+	const script = generateShimScript(ts, originalUrl, false, proxyBase);
 	new Function(script)();
 }
 
@@ -77,6 +78,8 @@ beforeAll(() => {
 		if (!absolute.startsWith("http://") && !absolute.startsWith("https://")) return url;
 		return `/web/${TS}im_/${absolute}`;
 	};
+	// Note: the inline mirror above omits proxyBase and WAYBACK_ABS_RE branches —
+	// those are tested via the real shim (window.fetch pattern) below.
 });
 
 // ─── rewrite() — opaque schemes pass through ─────────────────────────────────
@@ -525,5 +528,76 @@ describe("rewrite() — path-form /web/<ts>/<url> input is pass-through (no doub
 
 		// Pass-through unchanged — no doubled prefix, no mod-stripping.
 		expect(captured[0]).toBe(pathForm);
+	});
+});
+
+// ─── proxyBase: absolute proxy URL idempotency ───────────────────────────────
+//
+// When the server-side url-rewriter has proxyBase set (e.g. https://dev.keepinghistory.org),
+// it emits absolute hrefs like https://dev.keepinghistory.org/web/<ts>/<url>.
+// Without this fix, the shim treats those as external URLs and double-wraps them:
+//   /web/<ts>im_/https://dev.keepinghistory.org/web/<ts>/<url>
+// With the fix, the shim strips the proxyBase prefix to get the root-relative
+// path form, which is the already-proxied idempotent guard.
+
+const PROXY_BASE = "https://proxy.example.com";
+
+describe("rewrite() — proxyBase absolute URL is not double-wrapped", () => {
+	it("strips proxyBase prefix from an absolute proxy URL via window.fetch", async () => {
+		const captured: string[] = [];
+
+		const realFetch = window.fetch;
+		window.fetch = (input: RequestInfo | URL): Promise<Response> => {
+			captured.push(typeof input === "string" ? input : (input as Request).url);
+			return Promise.resolve({ ok: true } as Response);
+		};
+		installShim(TS, ORIG_URL, PROXY_BASE);
+
+		await window.fetch(`${PROXY_BASE}/web/${TS}/http://www.apple.com/`);
+
+		installShim(); // restore default (no proxyBase)
+		window.fetch = realFetch;
+
+		// Must be stripped to path form — NOT double-wrapped as /web/<ts>im_/<proxyBase>/web/...
+		expect(captured[0]).toBe(`/web/${TS}/http://www.apple.com/`);
+		expect(captured[0]).not.toContain(PROXY_BASE);
+	});
+
+	it("strips proxyBase prefix with a timestamp modifier in the inner path", async () => {
+		const captured: string[] = [];
+
+		const realFetch = window.fetch;
+		window.fetch = (input: RequestInfo | URL): Promise<Response> => {
+			captured.push(typeof input === "string" ? input : (input as Request).url);
+			return Promise.resolve({ ok: true } as Response);
+		};
+		installShim(TS, ORIG_URL, PROXY_BASE);
+
+		await window.fetch(`${PROXY_BASE}/web/${INNER_TS}/http://cdn.example.com/img.gif`);
+
+		installShim();
+		window.fetch = realFetch;
+
+		expect(captured[0]).toBe(`/web/${INNER_TS}/http://cdn.example.com/img.gif`);
+		expect(captured[0]).not.toContain(PROXY_BASE);
+	});
+
+	it("does not affect URLs on a different host when proxyBase is set", async () => {
+		const captured: string[] = [];
+
+		const realFetch = window.fetch;
+		window.fetch = (input: RequestInfo | URL): Promise<Response> => {
+			captured.push(typeof input === "string" ? input : (input as Request).url);
+			return Promise.resolve({ ok: true } as Response);
+		};
+		installShim(TS, ORIG_URL, PROXY_BASE);
+
+		await window.fetch("http://other.com/page.html");
+
+		installShim();
+		window.fetch = realFetch;
+
+		// External URL should still be wrapped, not stripped
+		expect(captured[0]).toBe(`/web/${TS}im_/http://other.com/page.html`);
 	});
 });

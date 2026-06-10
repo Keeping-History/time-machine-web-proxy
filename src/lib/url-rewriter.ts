@@ -423,11 +423,11 @@ const findElement = (node: Node, tag: string): Element | null => {
 
 // Inject <meta name="wayback-context"> and the runtime shim <script> as the
 // first two children of <head>, so they execute before any page scripts.
-const injectShim = (doc: ParentNode, targetUrl: string, time: string, lockTime: boolean): void => {
+const injectShim = (doc: ParentNode, targetUrl: string, time: string, lockTime: boolean, proxyBase = ""): void => {
 	const head = findElement(doc, "head");
 	if (!head) return;
 
-	// Build <meta name="wayback-context" data-ts="..." data-url="..." data-lock-time="...">
+	// Build <meta name="wayback-context" data-ts="..." data-url="..." data-lock-time="..." data-proxy-base="...">
 	const metaNode = defaultTreeAdapter.createElement(
 		"meta", // parse5's NS enum is not in its public exports; the HTML namespace URI is the correct runtime value
 		"http://www.w3.org/1999/xhtml" as unknown as Parameters<
@@ -438,6 +438,7 @@ const injectShim = (doc: ParentNode, targetUrl: string, time: string, lockTime: 
 			{ name: "data-ts", value: time },
 			{ name: "data-url", value: targetUrl },
 			{ name: "data-lock-time", value: lockTime ? "true" : "false" },
+			{ name: "data-proxy-base", value: proxyBase },
 		],
 	);
 
@@ -450,7 +451,7 @@ const injectShim = (doc: ParentNode, targetUrl: string, time: string, lockTime: 
 		[],
 	);
 	const scriptText = defaultTreeAdapter.createTextNode(
-		generateShimScript(time, targetUrl, lockTime),
+		generateShimScript(time, targetUrl, lockTime, proxyBase),
 	);
 	defaultTreeAdapter.appendChild(scriptNode, scriptText);
 
@@ -480,7 +481,7 @@ export const rewriteHtmlUrls = (
 	// <base href> handling first so its effective base is used during visit().
 	const effectiveBase = consumeBaseTag(doc, targetUrl);
 	visit(doc, effectiveBase, time, lockTime, collect, assets, proxyBase);
-	injectShim(doc, targetUrl, time, lockTime);
+	injectShim(doc, targetUrl, time, lockTime, proxyBase);
 	return { html: serialize(doc), discoveredAssets: assets };
 };
 

@@ -25,11 +25,13 @@ export const generateShimScript = (
 	ts: string,
 	originalUrl: string,
 	lockTime = false,
+	proxyBase = "",
 ): string => `(function () {
   var meta = document.querySelector('meta[name="wayback-context"]');
   var _ts = (meta && meta.getAttribute('data-ts')) || ${JSON.stringify(ts)};
   var _orig = (meta && meta.getAttribute('data-url')) || ${JSON.stringify(originalUrl)};
   var _lock = (meta && meta.getAttribute('data-lock-time') === 'true') || ${JSON.stringify(lockTime)};
+  var _base = (meta && meta.getAttribute('data-proxy-base')) || ${JSON.stringify(proxyBase)};
 
   // Opaque/non-network schemes that must never be rewritten.
   var SKIP_RE = /^(?:data:|blob:|javascript:|mailto:|tel:|sms:|about:|#)/i;
@@ -50,7 +52,12 @@ export const generateShimScript = (
     // (ts, url) and emit a clean path-form URL the proxy understands.
     var wm = trimmed.match(WAYBACK_ABS_RE);
     if (wm) return _lock ? '/web/' + wm[2] : '/web/' + wm[1] + '/' + wm[2];
-    // Already proxied: idempotent pass-through.
+    // Absolute URL pointing at the proxy's own origin (emitted by the server-side
+    // url-rewriter when proxyBase is set): strip the base so the result is a
+    // root-relative /web/... path. Without this, the URL falls through to the
+    // new URL() branch below and gets double-wrapped as /web/<ts>im_/<proxyBase>/web/...
+    if (_base && trimmed.indexOf(_base + '/web/') === 0) return trimmed.slice(_base.length);
+    // Already proxied (root-relative path): idempotent pass-through.
     if (trimmed.indexOf('/web/') === 0) return url;
     // Resolve relative URLs against the original page URL.
     var absolute;

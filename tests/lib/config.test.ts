@@ -30,7 +30,7 @@ describe("loadConfig", () => {
 		delete process.env.WORKER_RATE_LIMIT_PER_SEC;
 		delete process.env.DOWNLOADER_THREADS_COUNT;
 		delete process.env.CRAWL_MAX_CDX_PAGES;
-		delete process.env.OUTBOUND_PROXY_URL;
+		delete process.env.OUTBOUND_PROXY_URLS;
 		delete process.env.OUTBOUND_PROXY_USERNAME;
 		delete process.env.OUTBOUND_PROXY_PASSWORD;
 		delete process.env.SNAPSHOT_WINDOW_DAYS;
