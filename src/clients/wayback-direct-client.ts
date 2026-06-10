@@ -185,16 +185,22 @@ export class WaybackDirectClient {
 			config.ratePerSecond ?? DEFAULT_RATE_PER_SECOND,
 			config.burst ?? DEFAULT_BURST,
 		);
-		this.timeoutMs =
-			config.timeoutMs ??
-			(process.env.DIRECT_FETCH_TIMEOUT_MS
-				? Number(process.env.DIRECT_FETCH_TIMEOUT_MS)
-				: DEFAULT_TIMEOUT_MS);
+		this.timeoutMs = config.timeoutMs ?? DEFAULT_TIMEOUT_MS;
 		this.breaker = new CircuitBreaker(
 			config.breakerBaseMs ?? DEFAULT_BREAKER_BASE_MS,
 			config.breakerMaxMs ?? DEFAULT_BREAKER_MAX_MS,
 		);
 		this.log = config.logger ?? defaultLogger;
+	}
+
+	/** Waits for a rate-limit token to become available and consumes it. */
+	private async awaitToken(url: string, ts: string): Promise<void> {
+		const waitMs = this.bucket.tryConsume();
+		if (waitMs > 0) {
+			this.log.debug({ url, ts, waitMs }, "[direct] rate-limited");
+			await new Promise<void>((resolve) => setTimeout(resolve, waitMs));
+			await this.bucket.consume();
+		}
 	}
 
 	/**
@@ -218,12 +224,7 @@ export class WaybackDirectClient {
 			return { outcome: "fallback", reason: "circuit-half-open-busy" };
 		}
 
-		const waitMs = this.bucket.tryConsume();
-		if (waitMs > 0) {
-			this.log.debug({ url, ts, waitMs }, "[direct] rate-limited");
-			await new Promise<void>((resolve) => setTimeout(resolve, waitMs));
-			await this.bucket.consume();
-		}
+		await this.awaitToken(url, ts);
 
 		const archiveUrl = `${WAYBACK_BASE}/${ts}id_/${url}`;
 		this.log.debug({ archiveUrl, ts }, "[direct] resolved-fetch");
@@ -292,12 +293,7 @@ export class WaybackDirectClient {
 			return { outcome: "fallback", reason: "circuit-half-open-busy" };
 		}
 
-		const waitMs = this.bucket.tryConsume();
-		if (waitMs > 0) {
-			this.log.debug({ url, ts, waitMs }, "[direct] rate-limited");
-			await new Promise<void>((resolve) => setTimeout(resolve, waitMs));
-			await this.bucket.consume();
-		}
+		await this.awaitToken(url, ts);
 
 		const archiveUrl = `${WAYBACK_BASE}/${ts}id_/${url}`;
 		this.log.debug({ archiveUrl, ts }, "[direct] requested-fetch");

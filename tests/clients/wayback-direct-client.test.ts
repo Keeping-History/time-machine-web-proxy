@@ -389,12 +389,16 @@ describe("WaybackDirectClient token bucket", () => {
 		expect(callsAfter).toBe(TOTAL);
 	});
 
-	it("reads DIRECT_FETCH_TIMEOUT_MS from environment when no timeoutMs is given", () => {
+	it("uses DEFAULT_TIMEOUT_MS (10_000) when no timeoutMs is provided in config", () => {
+		const client = new WaybackDirectClient({ logger: makeLogger() });
+		expect((client as unknown as { timeoutMs: number }).timeoutMs).toBe(10_000);
+	});
+
+	it("uses config.timeoutMs when provided, ignoring any DIRECT_FETCH_TIMEOUT_MS env var", () => {
 		const orig = process.env.DIRECT_FETCH_TIMEOUT_MS;
 		process.env.DIRECT_FETCH_TIMEOUT_MS = "7777";
-		const client = new WaybackDirectClient({ logger: makeLogger() });
-		// Access the private field via cast to verify it was set
-		expect((client as unknown as { timeoutMs: number }).timeoutMs).toBe(7777);
+		const client = new WaybackDirectClient({ logger: makeLogger(), timeoutMs: 5000 });
+		expect((client as unknown as { timeoutMs: number }).timeoutMs).toBe(5000);
 		process.env.DIRECT_FETCH_TIMEOUT_MS = orig;
 	});
 });

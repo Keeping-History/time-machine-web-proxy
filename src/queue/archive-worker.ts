@@ -40,6 +40,7 @@ export interface StartArchiveWorkersOpts {
 		| "writeFile"
 		| "writeContentTypeSidecar"
 		| "writeNotFoundSentinel"
+		| "writeTentativeNotFoundSentinel"
 		| "writeResolvedTimeSidecar"
 		| "lookup"
 	>;
@@ -199,6 +200,12 @@ export function startArchiveWorkers(opts: StartArchiveWorkersOpts): ArchiveWorke
 						await cache.writeNotFoundSentinel(time, url);
 						notFound = true;
 						return;
+					}
+					// On the last attempt, write a tentative sentinel so the next
+					// request fast-fails via cache.lookup instead of re-queuing the
+					// full BullMQ retry chain while CDX is down.
+					if (job.attemptsMade >= (job.opts?.attempts ?? 3) - 1) {
+						await cache.writeTentativeNotFoundSentinel(time, url);
 					}
 					failOnFallback(result, url, time);
 				});
