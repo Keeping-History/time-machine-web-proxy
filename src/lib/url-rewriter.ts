@@ -488,3 +488,73 @@ export const stripWaybackToolbar = (html: string): string =>
 		.replace(RE_WAYBACK_JS_HEAD, "$1")
 		.replace(RE_WAYBACK_JS_HTML, "$1")
 		.replace(RE_WAYBACK_TOOLBAR, "");
+
+const isStylesheetLink = (node: Node): node is Element => {
+	if (!isElement(node) || node.tagName.toLowerCase() !== "link") return false;
+	const rel = node.attrs.find((a) => a.name === "rel")?.value ?? "";
+	const tokens = rel.trim().toLowerCase().split(/\s+/);
+	return tokens.length === 1 && tokens[0] === "stylesheet";
+};
+
+export const inlineCssLinks = async (
+	html: string,
+	fetchCss: (cssUrl: string, ts: string) => Promise<string | null>,
+	time: string,
+	lockTime: boolean,
+	proxyBase: string,
+): Promise<string> => {
+	const doc = parse(html);
+	const linkNodes: Element[] = [];
+
+	const collectLinks = (node: Node): void => {
+		if (isStylesheetLink(node)) {
+			linkNodes.push(node as Element);
+		}
+		if (hasChildNodes(node)) {
+			for (const child of node.childNodes) collectLinks(child);
+		}
+	};
+	collectLinks(doc);
+
+	for (const link of linkNodes) {
+		const hrefAttr = link.attrs.find((a) => a.name === "href");
+		if (!hrefAttr?.value) continue;
+
+		const rawHref = hrefAttr.value;
+		const path =
+			proxyBase && rawHref.startsWith(proxyBase) ? rawHref.slice(proxyBase.length) : rawHref;
+		const match = path.match(RE_WAYBACK_PATH);
+		if (!match) continue;
+
+		const [, ts, cssUrl] = match;
+		const resolvedTs = ts ?? time;
+
+		const cssContent = await fetchCss(cssUrl, resolvedTs);
+		if (!cssContent) continue;
+
+		const rewritten = rewriteCssUrls(cssContent, cssUrl, resolvedTs, lockTime, undefined, undefined, proxyBase);
+
+		const styleNode = defaultTreeAdapter.createElement(
+			"style",
+			"http://www.w3.org/1999/xhtml" as unknown as Parameters<
+				typeof defaultTreeAdapter.createElement
+			>[1],
+			[],
+		);
+
+		const mediaAttr = link.attrs.find((a) => a.name === "media");
+		if (mediaAttr) {
+			styleNode.attrs.push({ name: "media", value: mediaAttr.value });
+		}
+
+		const textNode = defaultTreeAdapter.createTextNode(rewritten);
+		defaultTreeAdapter.appendChild(styleNode, textNode);
+
+		const parent = link.parentNode as ParentNode;
+		const idx = parent.childNodes.indexOf(link);
+		parent.childNodes.splice(idx, 1, styleNode);
+		styleNode.parentNode = parent;
+	}
+
+	return serialize(doc);
+};
