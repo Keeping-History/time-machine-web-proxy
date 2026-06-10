@@ -1165,7 +1165,7 @@ describe("ProxyService.triggerDomainCrawl — explicit admin enqueue", () => {
 // --- CSS inlining -----------------------------------------------------------
 
 describe("ProxyService.fetch — CSS inlining", () => {
-	const CSS_URL = "http://www.example.com/style.css";
+	const INLINE_CSS_URL = "http://www.example.com/style.css";
 	const CSS_TS = TIME;
 	const CSS_CONTENT = "body { color: red; }";
 
@@ -1177,7 +1177,7 @@ describe("ProxyService.fetch — CSS inlining", () => {
 		`<html><head><link rel="stylesheet" href="${href}"></head><body>hello</body></html>`;
 
 	it("inlines a cached stylesheet as a <style> block", async () => {
-		const waybackHref = `/web/${CSS_TS}/${CSS_URL}`;
+		const waybackHref = `/web/${CSS_TS}/${INLINE_CSS_URL}`;
 		const html = htmlWithLink(waybackHref);
 
 		// HTML page: cache HIT
@@ -1189,7 +1189,7 @@ describe("ProxyService.fetch — CSS inlining", () => {
 			.fn()
 			.mockImplementation((url: string, _ts: string) => {
 				if (url === TARGET_HTML_URL) return Promise.resolve(htmlHitLocal);
-				if (url === CSS_URL) return Promise.resolve(cssHitLocal);
+				if (url === INLINE_CSS_URL) return Promise.resolve(cssHitLocal);
 				return Promise.resolve(null);
 			});
 
@@ -1209,7 +1209,7 @@ describe("ProxyService.fetch — CSS inlining", () => {
 	});
 
 	it("inlines a stylesheet fetched live (cache miss, directClient available)", async () => {
-		const waybackHref = `/web/${CSS_TS}/${CSS_URL}`;
+		const waybackHref = `/web/${CSS_TS}/${INLINE_CSS_URL}`;
 		const html = htmlWithLink(waybackHref);
 
 		// HTML page: cache HIT; CSS: cache MISS
@@ -1237,13 +1237,13 @@ describe("ProxyService.fetch — CSS inlining", () => {
 
 		expect(String(result.body)).toContain(`<style>${CSS_CONTENT}</style>`);
 		expect(String(result.body)).not.toContain('<link rel="stylesheet"');
-		expect(cache.writeFile).toHaveBeenCalledWith(CSS_URL, CSS_TS, expect.any(Buffer));
-		expect(cache.writeContentTypeSidecar).toHaveBeenCalledWith(CSS_URL, CSS_TS, "text/css");
+		expect(cache.writeFile).toHaveBeenCalledWith(INLINE_CSS_URL, CSS_TS, expect.any(Buffer));
+		expect(cache.writeContentTypeSidecar).toHaveBeenCalledWith(INLINE_CSS_URL, CSS_TS, "text/css");
 		expect(cache.writeResolvedTimeSidecar).not.toHaveBeenCalled();
 	});
 
 	it("leaves <link> intact when CSS fetch fails", async () => {
-		const waybackHref = `/web/${CSS_TS}/${CSS_URL}`;
+		const waybackHref = `/web/${CSS_TS}/${INLINE_CSS_URL}`;
 		const html = htmlWithLink(waybackHref);
 
 		const htmlHitLocal: CacheHit = { absPath: "/cache/page.html", contentType: "text/html" };
@@ -1266,5 +1266,6 @@ describe("ProxyService.fetch — CSS inlining", () => {
 
 		expect(String(result.body)).toContain('<link rel="stylesheet"');
 		expect(String(result.body)).not.toContain("<style>");
+		expect(directClient.fetchAtRequestedTime).toHaveBeenCalledWith(INLINE_CSS_URL, CSS_TS);
 	});
 });
