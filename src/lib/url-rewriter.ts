@@ -550,10 +550,11 @@ export const inlineCssLinks = async (
 		const textNode = defaultTreeAdapter.createTextNode(rewritten);
 		defaultTreeAdapter.appendChild(styleNode, textNode);
 
-		const parent = link.parentNode as ParentNode;
-		const idx = parent.childNodes.indexOf(link);
-		parent.childNodes.splice(idx, 1, styleNode);
-		styleNode.parentNode = parent;
+		const parent = link.parentNode;
+		if (!parent) continue;
+		const idx = (parent as ParentNode).childNodes.indexOf(link);
+		(parent as ParentNode).childNodes.splice(idx, 1, styleNode);
+		styleNode.parentNode = parent as ParentNode;
 	}
 
 	return serialize(doc);
