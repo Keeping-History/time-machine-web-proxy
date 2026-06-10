@@ -168,6 +168,7 @@ export class ProxyService {
 				this.config.lockTime,
 				this.config.proxyBase,
 			);
+			this.logger.debug({ targetUrl, time }, "[inline-css] stylesheet inlining complete");
 
 			// Tier 1 (prewarm): fire-and-forget prefetch of discovered assets.
 			// Errors are swallowed so prewarm failures never affect the foreground response.
@@ -229,7 +230,7 @@ export class ProxyService {
 				const result = await this.directClient.fetchAtRequestedTime(cssUrl, ts);
 				if (result.outcome !== "ok" || !result.body) return null;
 				await this.cache.writeFile(cssUrl, ts, result.body);
-				await this.cache.writeContentTypeSidecar(cssUrl, ts, "text/css");
+				await this.cache.writeContentTypeSidecar(cssUrl, ts, result.contentType ?? "text/css");
 				if (result.resolvedTime) {
 					await this.cache.writeResolvedTimeSidecar(ts, cssUrl, result.resolvedTime);
 				}
