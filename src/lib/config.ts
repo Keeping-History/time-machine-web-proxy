@@ -1,7 +1,14 @@
 import { mkdirSync } from "node:fs";
 import { parseDomainRemap } from "./hostname-normalizer";
-import { parseWhitelist } from "./url-validator";
 import type { Config, OutboundProxyChooser } from "../models/config";
+
+function parseWhitelist(raw: string): string[] {
+	if (raw.trim() === "*") return ["*"];
+	return raw
+		.split(",")
+		.map((h) => h.trim())
+		.filter(Boolean);
+}
 
 function parseOutboundProxyUrls(raw: string | undefined): string[] {
 	if (!raw) return [];
@@ -205,8 +212,3 @@ export function loadConfig(): Config {
 export function ensureCacheDir(cacheDir: string): void {
 	mkdirSync(cacheDir, { recursive: true });
 }
-
-/** Singleton parsed config. Evaluated once at module load; safe to import
- * anywhere except test files that need to override env vars (call loadConfig()
- * directly in those). */
-export const config: ReturnType<typeof loadConfig> = loadConfig();

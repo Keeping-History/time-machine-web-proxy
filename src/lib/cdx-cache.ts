@@ -13,6 +13,9 @@ const HISTORICAL_TTL_S = 7 * 24 * 60 * 60;
 const OPEN_EDGE_TTL_S = 5 * 60;
 const HISTORICAL_THRESHOLD_MS = 24 * 60 * 60 * 1000;
 
+// Module-level intentionally: deduplicates concurrent CDX fetches for the same URL
+// within a single process. Test isolation risk: this map persists across test cases
+// unless explicitly cleared. Tests that mock cachedCdxFetch avoid this issue.
 const inflight = new Map<string, Promise<Response>>();
 
 export interface CdxCacheDeps {

@@ -218,6 +218,51 @@ describe("loadConfig", () => {
 		expect(() => loadConfig()).toThrow(/CRAWL_MAX_CHUNK_FANOUT/);
 	});
 
+	it("LOCK_TIME defaults to false when unset", () => {
+		delete process.env.LOCK_TIME;
+		expect(loadConfig().lockTime).toBe(false);
+	});
+
+	it("LOCK_TIME=true enables lock time", () => {
+		process.env.LOCK_TIME = "true";
+		expect(loadConfig().lockTime).toBe(true);
+	});
+
+	it("LOCK_TIME=1 throws (only 'true'/'false' accepted)", () => {
+		process.env.LOCK_TIME = "1";
+		expect(() => loadConfig()).toThrow(/LOCK_TIME/);
+	});
+
+	it("LOCK_TIME=yes throws (only 'true'/'false' accepted)", () => {
+		process.env.LOCK_TIME = "yes";
+		expect(() => loadConfig()).toThrow(/LOCK_TIME/);
+	});
+
+	it("OUTBOUND_PROXY_COOLDOWN_SECONDS defaults to 60000ms when unset", () => {
+		delete process.env.OUTBOUND_PROXY_COOLDOWN_SECONDS;
+		expect(loadConfig().outboundProxyCooldownMs).toBe(60_000);
+	});
+
+	it("OUTBOUND_PROXY_COOLDOWN_SECONDS=30 parses to 30000ms", () => {
+		process.env.OUTBOUND_PROXY_COOLDOWN_SECONDS = "30";
+		expect(loadConfig().outboundProxyCooldownMs).toBe(30_000);
+	});
+
+	it("OUTBOUND_PROXY_COOLDOWN_SECONDS=0 is valid (disables cooldown)", () => {
+		process.env.OUTBOUND_PROXY_COOLDOWN_SECONDS = "0";
+		expect(loadConfig().outboundProxyCooldownMs).toBe(0);
+	});
+
+	it("OUTBOUND_PROXY_COOLDOWN_SECONDS=-1 throws (negative not allowed)", () => {
+		process.env.OUTBOUND_PROXY_COOLDOWN_SECONDS = "-1";
+		expect(() => loadConfig()).toThrow(/OUTBOUND_PROXY_COOLDOWN_SECONDS/);
+	});
+
+	it("OUTBOUND_PROXY_COOLDOWN_SECONDS=abc throws (non-numeric)", () => {
+		process.env.OUTBOUND_PROXY_COOLDOWN_SECONDS = "abc";
+		expect(() => loadConfig()).toThrow(/OUTBOUND_PROXY_COOLDOWN_SECONDS/);
+	});
+
 	it("reads outbound proxy env vars", () => {
 		process.env.OUTBOUND_PROXY_URLS = "http://proxymesh.example.com:31280";
 		process.env.OUTBOUND_PROXY_USERNAME = "user";

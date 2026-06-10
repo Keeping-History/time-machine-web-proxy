@@ -1,22 +1,4 @@
-import { isHostWhitelisted, parseWhitelist, validateTargetUrl } from "../../src/lib/url-validator";
-
-describe("parseWhitelist", () => {
-	it("splits comma-separated hosts", () => {
-		expect(parseWhitelist("example.com,foo.com")).toEqual(["example.com", "foo.com"]);
-	});
-
-	it("trims whitespace", () => {
-		expect(parseWhitelist(" example.com , foo.com ")).toEqual(["example.com", "foo.com"]);
-	});
-
-	it("filters empty entries", () => {
-		expect(parseWhitelist("example.com,,foo.com")).toEqual(["example.com", "foo.com"]);
-	});
-
-	it("returns empty array for empty string", () => {
-		expect(parseWhitelist("")).toEqual([]);
-	});
-});
+import { isHostWhitelisted, validateTargetUrl } from "../../src/lib/url-validator";
 
 describe("isHostWhitelisted", () => {
 	it("allows everything when whitelist is ['*']", () => {
@@ -56,21 +38,13 @@ describe("isHostWhitelisted", () => {
 	});
 });
 
-describe("parseWhitelist + isHostWhitelisted integration", () => {
-	it("empty string input → deny-all", () => {
-		expect(isHostWhitelisted("http://any.example.com/path", parseWhitelist(""))).toBe(false);
+describe("isHostWhitelisted — edge-case whitelist inputs", () => {
+	it("empty whitelist → deny-all", () => {
+		expect(isHostWhitelisted("http://any.example.com/path", [])).toBe(false);
 	});
 
-	it("whitespace-only input → deny-all", () => {
-		expect(isHostWhitelisted("http://any.example.com/path", parseWhitelist("   "))).toBe(false);
-	});
-
-	it("comma-only input → deny-all", () => {
-		expect(isHostWhitelisted("http://any.example.com/path", parseWhitelist(",,,"))).toBe(false);
-	});
-
-	it("explicit '*' → allow-all", () => {
-		expect(isHostWhitelisted("http://any.example.com/path", parseWhitelist("*"))).toBe(true);
+	it("wildcard-only whitelist → allow-all", () => {
+		expect(isHostWhitelisted("http://any.example.com/path", ["*"])).toBe(true);
 	});
 });
 

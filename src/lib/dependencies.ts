@@ -50,10 +50,6 @@ export function buildDirectClient(config: Config, logger: pino.Logger): DirectCl
 		logger.info("[direct] direct-fetch disabled — using passthrough stub");
 		return passthroughDirectClient;
 	}
-	// DEFERRED (2026-05-22) — prewarm discovered/queued log lines belong at the
-	// prewarm call site; stubs below ensure the required strings exist in source.
-	logger.debug("[prewarm] discovered"); // stub: emitted when assets are found
-	logger.debug("[prewarm] queued"); // stub: emitted when an asset is enqueued
 	const inner = new WaybackDirectClient({
 		ratePerSecond: config.directFetchRatePerSec,
 		burst: config.directFetchBurst,

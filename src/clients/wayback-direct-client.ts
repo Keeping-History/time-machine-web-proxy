@@ -154,11 +154,11 @@ class TokenBucket {
 	 * jest.advanceTimersByTime.
 	 */
 	async consume(): Promise<void> {
-		const waitMs = this.tryConsume();
-		if (waitMs > 0) {
+		while (true) {
+			const waitMs = this.tryConsume();
+			if (waitMs === 0) return;
 			await new Promise<void>((resolve) => setTimeout(resolve, waitMs));
 			// After waiting, try again (tokens may have been consumed by other waiters)
-			return this.consume();
 		}
 	}
 }

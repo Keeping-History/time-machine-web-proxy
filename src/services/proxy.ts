@@ -8,7 +8,7 @@ import type { DirectClient } from "../lib/dependencies";
 import { describeFetchError, errorHasStatus } from "../lib/errors";
 import { extractCdnEmbeddedUrl } from "../lib/redirect-unwrapper";
 import { inlineCssLinks, rewriteCssUrls, rewriteHtmlUrls, stripWaybackToolbar } from "../lib/url-rewriter";
-import { isHostWhitelisted } from "../lib/url-validator";
+import { isHostnameWhitelisted } from "../lib/url-validator";
 import type { Config } from "../models/config";
 import type { ProxyResult } from "../models/proxy";
 import type { CacheService } from "./cache";
@@ -272,7 +272,7 @@ export class ProxyService {
 	 */
 	private async maybeEnqueueDomainCrawl(host: string, time: string): Promise<void> {
 		try {
-			if (!isHostWhitelisted(`https://${host}`, this.config.whitelistHosts)) {
+			if (!isHostnameWhitelisted(host, this.config.whitelistHosts)) {
 				this.logger.debug({ host }, "[crawl-skip] not whitelisted");
 				return;
 			}
@@ -336,7 +336,7 @@ export class ProxyService {
 		if (!this.config.domainCrawlEnabled) {
 			throw statusError("Domain crawl is disabled (DOMAIN_CRAWL_ENABLED=false)", 503);
 		}
-		if (!isHostWhitelisted(`https://${host}`, this.config.whitelistHosts)) {
+		if (!isHostnameWhitelisted(host, this.config.whitelistHosts)) {
 			throw statusError("Host not whitelisted", 403);
 		}
 		if (opts.skipPreflight) {

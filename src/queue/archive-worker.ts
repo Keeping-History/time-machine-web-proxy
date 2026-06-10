@@ -157,7 +157,7 @@ export function startArchiveWorkers(opts: StartArchiveWorkersOpts): ArchiveWorke
 				// and example.com are stored as separate entries because they can
 				// legitimately serve different content. Must match CacheService.lookup,
 				// which also keys on u.hostname (not base.bareHost).
-				const { hostname } = new URL(url);
+				const { hostname, pathname } = new URL(url);
 				const directory = cache.cacheDirForJob(time, hostname);
 
 				await emitProgress(job, QUEUE_EXACT, "picked_up", logger, { url, time });
@@ -189,7 +189,7 @@ export function startArchiveWorkers(opts: StartArchiveWorkersOpts): ArchiveWorke
 							url,
 							time,
 							resolved: resolvedTime,
-							file: new URL(url).pathname,
+							file: pathname,
 							filesSeen: 1,
 						});
 						return;
@@ -295,7 +295,7 @@ export function startArchiveWorkers(opts: StartArchiveWorkersOpts): ArchiveWorke
 					await emitProgress(job, QUEUE_CRAWL, "download_file", logger, {
 						host,
 						time,
-						file: new URL(link.url).pathname,
+						file: link.url,
 						filesSeen,
 					});
 				}

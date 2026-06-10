@@ -132,12 +132,14 @@ export class CacheService {
 				/* fall through to sentinel check */
 			}
 		}
+		// Pre-compute both sentinel paths from a single URL parse + hash so the
+		// per-URL subpath is computed once regardless of which branch is taken.
+		const { tentativeSentinel, sentinel } = this.buildSentinelPaths(time, url);
 		// Tentative sentinel: short-lived (1h) marker written when the worker
 		// couldn't get a definitive answer from CDX (transport failures across
 		// all variants × retries). Avoids re-grinding the BullMQ retry chain
 		// for the same URL within the hour, while still letting the URL retry
 		// after expiry in case CDX has recovered.
-		const tentativeSentinel = this.tentativeSentinelPath(time, url);
 		try {
 			const stat = await fs.stat(tentativeSentinel);
 			const ageMs = Date.now() - stat.mtimeMs;
@@ -159,7 +161,6 @@ export class CacheService {
 		// Lookup throws 404 instead of returning null so the proxy stops re-queuing.
 		// Sentinels older than notFoundTtlDays are deleted so Wayback backfills
 		// become visible on the next request.
-		const sentinel = this.sentinelPath(time, url);
 		try {
 			const stat = await fs.stat(sentinel);
 			const ageMs = Date.now() - stat.mtimeMs;
@@ -334,6 +335,24 @@ export class CacheService {
 
 	private tentativeSentinelPath(time: string, url: string): string {
 		return this.buildPerUrlSubpath(time, url, ".notfound-tentative");
+	}
+
+	/** Computes both sentinel paths in one URL parse + hash. */
+	private buildSentinelPaths(time: string, url: string): { sentinel: string; tentativeSentinel: string } {
+		const u = new URL(url);
+		const root = this.cacheDirForJob(time, u.hostname);
+		const key = createHash("sha256")
+			.update(`${u.protocol}//${u.host}${u.pathname}${u.search}`)
+			.digest("hex")
+			.slice(0, 16);
+		const make = (subdir: string): string => {
+			const abs = resolve(root, subdir, key);
+			if (!abs.startsWith(root + sep)) {
+				throw Object.assign(new Error("Per-URL subpath traversal rejected"), { status: 400 });
+			}
+			return abs;
+		};
+		return { sentinel: make(".notfound"), tentativeSentinel: make(".notfound-tentative") };
 	}
 
 	/**

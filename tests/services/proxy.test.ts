@@ -1164,6 +1164,51 @@ describe("ProxyService.triggerDomainCrawl — explicit admin enqueue", () => {
 	});
 });
 
+// --- onProgress forwarding --------------------------------------------------
+
+describe("ProxyService.fetch — onProgress forwarding to enqueueExactAndWait", () => {
+	it("passes onProgress as the third argument when provided", async () => {
+		const lookup = jest
+			.fn<Promise<CacheHit | null>, [string, string]>()
+			.mockResolvedValueOnce(null)
+			.mockResolvedValueOnce(htmlHit);
+		const cache = makeCache(lookup);
+		const client = makeClient();
+		mockedReadFile.mockResolvedValue(Buffer.from(PLAIN_HTML_BODY));
+		const svc = new ProxyService(cache, client, logger, {
+			...baseConfig,
+			whitelistHosts: ["other.com"],
+		});
+		const onProgress = jest.fn();
+
+		await svc.fetch(TARGET_HTML_URL, TIME, onProgress);
+
+		expect(client.enqueueExactAndWait).toHaveBeenCalledTimes(1);
+		expect(client.enqueueExactAndWait).toHaveBeenCalledWith(TARGET_HTML_URL, TIME, onProgress);
+		expect(client.enqueueExactAndWait.mock.calls[0]).toHaveLength(3);
+	});
+
+	it("calls enqueueExactAndWait with only 2 args when onProgress is not provided", async () => {
+		const lookup = jest
+			.fn<Promise<CacheHit | null>, [string, string]>()
+			.mockResolvedValueOnce(null)
+			.mockResolvedValueOnce(htmlHit);
+		const cache = makeCache(lookup);
+		const client = makeClient();
+		mockedReadFile.mockResolvedValue(Buffer.from(PLAIN_HTML_BODY));
+		const svc = new ProxyService(cache, client, logger, {
+			...baseConfig,
+			whitelistHosts: ["other.com"],
+		});
+
+		await svc.fetch(TARGET_HTML_URL, TIME);
+
+		expect(client.enqueueExactAndWait).toHaveBeenCalledTimes(1);
+		expect(client.enqueueExactAndWait).toHaveBeenCalledWith(TARGET_HTML_URL, TIME);
+		expect(client.enqueueExactAndWait.mock.calls[0]).toHaveLength(2);
+	});
+});
+
 // --- CSS inlining -----------------------------------------------------------
 
 describe("ProxyService.fetch — CSS inlining", () => {

@@ -919,6 +919,73 @@ describe("TimeMachineService HTTP handler — DELETE /cache (token auth)", () =>
 	});
 });
 
+describe("TimeMachineService HTTP handler — CORS / OPTIONS", () => {
+	it("OPTIONS / returns 204", async () => {
+		const { svc } = makeService();
+		const port = await startAndAwaitListening(svc);
+		try {
+			const r = await fetch(`http://127.0.0.1:${port}/`, { method: "OPTIONS" });
+			expect(r.status).toBe(204);
+		} finally {
+			await svc.stop();
+		}
+	});
+
+	it("Access-Control-Allow-Origin matches allowedOrigins wildcard", async () => {
+		// config has allowedOrigins: ["*"] — so the header must be "*"
+		const { svc } = makeService();
+		const port = await startAndAwaitListening(svc);
+		try {
+			const r = await fetch(`http://127.0.0.1:${port}/web/20020401000000/http://example.com/`, {
+				method: "OPTIONS",
+				headers: { Origin: "http://some-origin.example.com" },
+			});
+			expect(r.headers.get("access-control-allow-origin")).toBe("*");
+		} finally {
+			await svc.stop();
+		}
+	});
+
+	it("Access-Control-Allow-Origin echoes matching specific origin", async () => {
+		const origin = "https://allowed.example.com";
+		const { svc } = makeService(undefined, {
+			config: { allowedOrigins: [origin] },
+		});
+		const port = await startAndAwaitListening(svc);
+		try {
+			const r = await fetch(`http://127.0.0.1:${port}/`, {
+				method: "OPTIONS",
+				headers: { Origin: origin },
+			});
+			expect(r.headers.get("access-control-allow-origin")).toBe(origin);
+		} finally {
+			await svc.stop();
+		}
+	});
+
+	it("Access-Control-Expose-Headers is set on GET responses", async () => {
+		const fetchMock = jest.fn().mockResolvedValue({
+			contentType: "text/html",
+			archiveUrl: "http://example.com/page",
+			originalUrl: "http://example.com/page",
+			archiveTime: "20020401000000",
+			body: "<html>ok</html>",
+			cache: "HIT" as const,
+		});
+		const { svc } = makeService(fetchMock);
+		const port = await startAndAwaitListening(svc);
+		try {
+			const r = await fetch(`http://127.0.0.1:${port}/web/20020401000000/http://example.com/page`);
+			expect(r.status).toBe(200);
+			const exposeHeaders = r.headers.get("access-control-expose-headers");
+			expect(exposeHeaders).not.toBeNull();
+			expect(exposeHeaders).toContain("X-Cache");
+		} finally {
+			await svc.stop();
+		}
+	});
+});
+
 describe("TimeMachineService WebSocket handler — /ws", () => {
 	const okResult = {
 		contentType: "text/html",
