@@ -6,9 +6,15 @@
 
 import { ensureCacheDir, loadConfig } from "./lib/config";
 import { Dependencies } from "./lib/dependencies";
-import { createLogger } from "./lib/logger";
+import { createLogger, logger as bootErrorLogger } from "./lib/logger";
 import { installOutboundProxy } from "./lib/outbound-proxy";
+import { installProcessErrorHandlers } from "./lib/process-error-handlers";
 import { TimeMachineService } from "./services/time-machine";
+
+// Install before main() so escaped rejections during async startup (prewarm,
+// ws events, timer callbacks) produce a fatal log line and exit 1 instead of
+// crashing Node silently on Cloud Run.
+installProcessErrorHandlers(bootErrorLogger);
 
 async function main(): Promise<void> {
 	const config = loadConfig();
