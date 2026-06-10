@@ -371,58 +371,78 @@ describe("rewriteHtmlUrls — schemes left alone", () => {
 	});
 });
 
-describe("rewriteHtmlUrls — CDN URLs with embedded origin", () => {
-	it("unwraps an Akamai URL on <img src> and points the proxy URL at the origin", () => {
+// Wayback indexed CDN-fronted assets under the CDN URL (the key the original
+// page used). Rewriting must preserve that key so the browser asks Wayback for
+// the URL Wayback actually has. ProxyService.fetch handles the rare inverse
+// case — CDN URL not in archive but bare origin is — via a 404 retry with
+// extractCdnEmbeddedUrl. These tests pin the rewriter to the recoverable
+// order: CDN URL first, origin only when needed.
+describe("rewriteHtmlUrls — CDN URLs preserved (Wayback indexed under CDN key)", () => {
+	it("preserves an Akamai URL on <img src> so the browser requests the indexed CDN key", () => {
 		const html = `<img src="http://a388.g.akamai.net/f/388/21/1d/www.cnn.com/images/newmain/top.main.special.report.gif">`;
 		const { html: r } = rewriteHtmlUrls(html, TARGET, TIME);
 		expect(r).toContain(
-			`/web/${TIME}/http://www.cnn.com/images/newmain/top.main.special.report.gif`,
+			`/web/${TIME}/http://a388.g.akamai.net/f/388/21/1d/www.cnn.com/images/newmain/top.main.special.report.gif`,
 		);
-		expect(r).not.toContain("a388.g.akamai.net");
+		expect(r).not.toContain(`/web/${TIME}/http://www.cnn.com/images/`);
 	});
 
-	it("unwraps an Akamai URL inside a wayback-prefixed wrapper and preserves the wrapper's TS", () => {
+	it("preserves an Akamai URL inside a wayback-prefixed wrapper and the wrapper's TS", () => {
 		const ts = "20011201213912";
 		const html = `<img src="https://web.archive.org/web/${ts}im_/http://a388.g.akamai.net/f/388/21/1d/www.cnn.com/images/newmain/top.main.special.report.gif">`;
 		const { html: r, discoveredAssets } = rewriteHtmlUrls(html, TARGET, TIME);
 		expect(r).toContain(
-			`/web/${ts}/http://www.cnn.com/images/newmain/top.main.special.report.gif`,
+			`/web/${ts}/http://a388.g.akamai.net/f/388/21/1d/www.cnn.com/images/newmain/top.main.special.report.gif`,
 		);
-		expect(r).not.toContain("a388.g.akamai.net");
 		expect(discoveredAssets).toContainEqual<DiscoveredAsset>({
-			url: "http://www.cnn.com/images/newmain/top.main.special.report.gif",
+			url: "http://a388.g.akamai.net/f/388/21/1d/www.cnn.com/images/newmain/top.main.special.report.gif",
 			embeddedTs: ts,
 		});
 	});
 
-	it("unwraps Akamai URLs inside srcset entries", () => {
+	it("preserves Akamai URLs inside srcset entries", () => {
 		const html = `<img srcset="http://a388.g.akamai.net/f/388/21/1d/www.cnn.com/a.png 1x, http://a388.g.akamai.net/f/388/21/1d/www.cnn.com/b.png 2x">`;
 		const { html: r } = rewriteHtmlUrls(html, TARGET, TIME);
-		expect(r).toContain(`/web/${TIME}/http://www.cnn.com/a.png`);
-		expect(r).toContain(`/web/${TIME}/http://www.cnn.com/b.png`);
-		expect(r).not.toContain("a388.g.akamai.net");
+		expect(r).toContain(`/web/${TIME}/http://a388.g.akamai.net/f/388/21/1d/www.cnn.com/a.png`);
+		expect(r).toContain(`/web/${TIME}/http://a388.g.akamai.net/f/388/21/1d/www.cnn.com/b.png`);
 	});
 
-	it("unwraps an Akamai URL inside an inline style url()", () => {
+	it("preserves an Akamai URL inside an inline style url()", () => {
 		const html = `<div style="background: url('http://a388.g.akamai.net/f/388/21/1d/www.cnn.com/bg.png')">x</div>`;
 		const { html: r } = rewriteHtmlUrls(html, TARGET, TIME);
-		expect(r).toContain(`/web/${TIME}/http://www.cnn.com/bg.png`);
-		expect(r).not.toContain("a388.g.akamai.net");
+		expect(r).toContain(`/web/${TIME}/http://a388.g.akamai.net/f/388/21/1d/www.cnn.com/bg.png`);
 	});
 
-	it("preserves a non-CDN absolute URL unchanged through the unwrap path", () => {
+	it("preserves a non-CDN absolute URL unchanged through the rewrite path", () => {
 		const html = `<a href="http://images.example.com/photo.jpg">x</a>`;
 		const { html: r } = rewriteHtmlUrls(html, TARGET, TIME);
 		expect(r).toContain(`/web/${TIME}/http://images.example.com/photo.jpg`);
 	});
+
+	// Regression: 2001 apple.com homepage served every t/2001/us/en/i/*.gif from
+	// a772.g.akamai.net. The bare http://www.apple.com/t/... URL was never
+	// archived; stripping the CDN wrapper here previously caused every nav-bar
+	// image to 404 against Wayback.
+	it("preserves Akamai-wrapped apple.com nav images so they resolve against Wayback", () => {
+		const ts = "20010917011416";
+		const html = `<img src="https://web.archive.org/web/${ts}im_/http://a772.g.akamai.net/7/772/51/822294b0908aa4/www.apple.com/t/2001/us/en/i/1c.gif">`;
+		const { html: r, discoveredAssets } = rewriteHtmlUrls(html, TARGET, TIME);
+		expect(r).toContain(
+			`/web/${ts}/http://a772.g.akamai.net/7/772/51/822294b0908aa4/www.apple.com/t/2001/us/en/i/1c.gif`,
+		);
+		expect(r).not.toContain(`http://www.apple.com/t/2001/us/en/i/1c.gif`);
+		expect(discoveredAssets).toContainEqual<DiscoveredAsset>({
+			url: "http://a772.g.akamai.net/7/772/51/822294b0908aa4/www.apple.com/t/2001/us/en/i/1c.gif",
+			embeddedTs: ts,
+		});
+	});
 });
 
-describe("rewriteCssUrls — CDN URLs with embedded origin", () => {
-	it("unwraps an Akamai URL in a CSS url() reference", () => {
+describe("rewriteCssUrls — CDN URLs preserved (Wayback indexed under CDN key)", () => {
+	it("preserves an Akamai URL in a CSS url() reference", () => {
 		const css = `body { background: url(http://a388.g.akamai.net/f/388/21/1d/www.cnn.com/bg.png); }`;
 		const r = rewriteCssUrls(css, TARGET, TIME);
-		expect(r).toContain(`/web/${TIME}/http://www.cnn.com/bg.png`);
-		expect(r).not.toContain("a388.g.akamai.net");
+		expect(r).toContain(`/web/${TIME}/http://a388.g.akamai.net/f/388/21/1d/www.cnn.com/bg.png`);
 	});
 });
 

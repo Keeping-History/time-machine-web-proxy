@@ -1,5 +1,5 @@
 import { type DefaultTreeAdapterTypes, defaultTreeAdapter, parse, serialize } from "parse5";
-import { extractCdnEmbeddedUrl, unwrapRedirectUrl } from "./redirect-unwrapper";
+import { unwrapRedirectUrl } from "./redirect-unwrapper";
 import { generateShimScript } from "./runtime-shim";
 
 type Node = DefaultTreeAdapterTypes.Node;
@@ -225,13 +225,14 @@ const rewriteOneUrl = (
 
 	const archive = trimmed.match(RE_ARCHIVE_URL);
 	if (archive) {
-		const [, ts, rawOriginal] = archive;
-		// Akamai-style CDN URLs embed the origin in their path
-		// (`a388.g.akamai.net/f/.../www.cnn.com/img.gif`). Unwrap here so the
-		// emitted proxy URL — and the prewarm asset record — point at the origin
-		// the browser actually wants, not the CDN address that's unlikely to be
-		// archived under that exact form.
-		const originalUrl = extractCdnEmbeddedUrl(rawOriginal) ?? rawOriginal;
+		const [, ts, originalUrl] = archive;
+		// Keep CDN-fronted URLs (e.g. `a388.g.akamai.net/f/.../www.cnn.com/img.gif`)
+		// as-is: Wayback often captured these assets under the CDN key, not the
+		// bare origin (2001 apple.com is a worked example — every image lives at
+		// an Akamai URL in the archive and 404s at the origin). ProxyService.fetch
+		// retries with the embedded origin when the CDN URL 404s, so this is the
+		// strictly more recoverable order: try what Wayback indexed first, fall
+		// back to the origin only when needed.
 		// Only record when the embedded timestamp is a valid 14-digit string.
 		// Prewarm discovery still uses the embedded ts even when lockTime drops
 		// it from the emitted URL — the source-of-truth capture time is needed
@@ -249,8 +250,7 @@ const rewriteOneUrl = (
 
 	try {
 		const unwrapped = unwrapRedirectUrl(trimmed);
-		const cdnUnwrapped = extractCdnEmbeddedUrl(unwrapped) ?? unwrapped;
-		const resolved = new URL(cdnUnwrapped, targetUrl);
+		const resolved = new URL(unwrapped, targetUrl);
 		if (resolved.protocol !== "http:" && resolved.protocol !== "https:") return raw;
 		return buildProxyUrl(resolved.toString(), fallbackTime, lockTime, proxyBase);
 	} catch {
