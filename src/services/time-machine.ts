@@ -102,7 +102,9 @@ export class TimeMachineService {
 		this.shutdown.abort();
 		for (const client of this.wss.clients) client.terminate();
 		await new Promise<void>((resolve) => {
-			this.wss.close();
+			this.wss.close((err) => {
+				if (err) this.logger.warn({ err }, "[TimeMachine] wss.close error");
+			});
 			this.server.close(() => resolve());
 		});
 		// Hand off to the Dependencies graph (workers → queues → redis).

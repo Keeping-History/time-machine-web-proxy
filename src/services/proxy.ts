@@ -48,6 +48,8 @@ const statusError = (message: string, status: number): StatusError =>
  * BEFORE the URL reaches ProxyService.
  */
 export class ProxyService {
+	private readonly activePrewarms = new Set<Promise<void>>();
+
 	constructor(
 		private readonly cache: CacheService,
 		private readonly archiveJobClient: ArchiveJobClientPort,
@@ -69,6 +71,10 @@ export class ProxyService {
 		private readonly redis: IORedis | null = null,
 		private readonly directClient: DirectClient | null = null,
 	) {}
+
+	async drainPrewarms(): Promise<void> {
+		await Promise.allSettled([...this.activePrewarms]);
+	}
 
 	async fetch(
 		targetUrl: string,
@@ -177,7 +183,7 @@ export class ProxyService {
 			if (this.config.prewarmEnabled && this.directClient && discoveredAssets.length > 0) {
 				const assetsToPrewarm = discoveredAssets.slice(0, this.config.prewarmMaxAssetsPerPage);
 				for (const asset of assetsToPrewarm) {
-					void this.directClient
+					const p = this.directClient
 						.fetchAtResolvedTime(asset.url, asset.embeddedTs)
 						.then(async (result) => {
 							if (result.outcome === "ok" && result.body) {
@@ -201,6 +207,8 @@ export class ProxyService {
 								"[prewarm] asset prefetch error",
 							);
 						});
+					this.activePrewarms.add(p);
+					void p.finally(() => this.activePrewarms.delete(p));
 				}
 			}
 

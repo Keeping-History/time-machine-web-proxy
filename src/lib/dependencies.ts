@@ -216,7 +216,7 @@ export class Dependencies {
 	}
 
 	async close(): Promise<void> {
-		const { workers, exactQueue, crawlQueue, chunkQueue, exactEvents, crawlEvents, chunkEvents, redis } =
+		const { workers, exactQueue, crawlQueue, chunkQueue, exactEvents, crawlEvents, chunkEvents, redis, proxy } =
 			this.deps;
 		// 1. Drain workers first so in-flight jobs complete
 		await Promise.all([workers.exact.close(), workers.crawl.close(), workers.chunk.close()]);
@@ -229,8 +229,14 @@ export class Dependencies {
 			crawlEvents.close(),
 			chunkEvents.close(),
 		]);
-		// 3. Quit Redis last (graceful QUIT after all subscribers disconnect)
-		await redis.quit();
+		// 3. Await any in-flight prewarm promises before closing Redis
+		await proxy.drainPrewarms();
+		// 4. Quit Redis last (graceful QUIT after all subscribers disconnect)
+		try {
+			await redis.quit();
+		} catch (err) {
+			this.deps.logger.warn({ err }, "[deps] redis.quit error during shutdown");
+		}
 	}
 }
 
