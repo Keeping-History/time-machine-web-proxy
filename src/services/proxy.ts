@@ -320,11 +320,24 @@ export class ProxyService {
 
 	private async cdxPageCount(host: string, time: string): Promise<number> {
 		const { from, to } = windowAround(time, this.config.crawlWindowDays);
+		// output=json is required so showNumPages counts pages in the same
+		// pagination scheme the chunk worker uses. Without it, text-mode and
+		// JSON-mode use different page sizes, causing too many chunk jobs to be
+		// enqueued. CDX returns [["numpages"],["N"]] in this mode.
 		const u =
 			`https://web.archive.org/cdx/search/cdx?url=${encodeURIComponent(`${host}/*`)}` +
-			`&from=${from}&to=${to}&showNumPages=true`;
-		const isValidPageCount = (body: string): boolean =>
-			Number.isFinite(Number.parseInt(body.trim(), 10));
+			`&from=${from}&to=${to}&output=json&showNumPages=true`;
+		const parsePageCount = (body: string): number => {
+			const rows = JSON.parse(body) as unknown[][];
+			return Number.parseInt(rows[1]?.[0] as string, 10);
+		};
+		const isValidPageCount = (body: string): boolean => {
+			try {
+				return Number.isFinite(parsePageCount(body));
+			} catch {
+				return false;
+			}
+		};
 		let r: Response;
 		try {
 			r = await cachedCdxFetch(
@@ -350,7 +363,12 @@ export class ProxyService {
 		}
 		if (!r.ok) throw new Error(`CDX preflight ${r.status}`);
 		const txt = (await r.text()).trim();
-		const n = Number.parseInt(txt, 10);
+		let n: number;
+		try {
+			n = parsePageCount(txt);
+		} catch {
+			n = Number.NaN;
+		}
 		if (!Number.isFinite(n)) {
 			this.logger.warn(
 				{ host, body: txt.slice(0, 80) },

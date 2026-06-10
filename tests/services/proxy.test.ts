@@ -668,7 +668,7 @@ describe("ProxyResult.cache values", () => {
 
 describe("ProxyService.fetch — domain crawl fire-and-forget", () => {
 	const cdxOk = (count = 10) =>
-		Promise.resolve({ ok: true, text: () => Promise.resolve(String(count)) });
+		Promise.resolve({ ok: true, text: () => Promise.resolve(JSON.stringify([["numpages"], [String(count)]])) });
 
 	it("fires enqueueDomainCrawl on HTML MISS_WORKER when whitelist passes + CDX ok + budget free", async () => {
 		const lookup = jest
@@ -864,6 +864,7 @@ describe("ProxyService.fetch — domain crawl fire-and-forget", () => {
 		expect(calledUrl.searchParams.get("from")).toBe("20191202000000");
 		expect(calledUrl.searchParams.get("to")).toBe("20200131235959");
 		expect(calledUrl.searchParams.get("url")).toBe("example.com/*");
+		expect(calledUrl.searchParams.get("output")).toBe("json");
 	});
 
 	it("works with no Redis (redis arg defaults to null) — budget check is skipped, CDX still runs", async () => {
@@ -962,7 +963,7 @@ describe("ProxyService.fetch — domain crawl fire-and-forget", () => {
 
 describe("ProxyService.triggerDomainCrawl — explicit admin enqueue", () => {
 	const cdxOk = (count = 10) =>
-		Promise.resolve({ ok: true, text: () => Promise.resolve(String(count)) });
+		Promise.resolve({ ok: true, text: () => Promise.resolve(JSON.stringify([["numpages"], [String(count)]])) });
 
 	it("enqueues both HTML-follow crawl and CDX chunk crawl when whitelist passes", async () => {
 		// Happy path. Both paths fire: HTML-link-follow (enqueueDomainCrawl) and
