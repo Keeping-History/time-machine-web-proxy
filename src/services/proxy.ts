@@ -3,11 +3,16 @@ import type IORedis from "ioredis";
 import type pino from "pino";
 import type { ArchiveJobClientPort, JobProgressListener } from "../clients/archive-job-client";
 import { windowAround } from "../lib/archive-time";
+import { candidateFallbackUrls } from "../lib/asset-fallbacks";
 import { cachedCdxFetch } from "../lib/cdx-cache";
 import type { DirectClient } from "../lib/dependencies";
 import { describeFetchError, errorHasStatus } from "../lib/errors";
-import { extractCdnEmbeddedUrl } from "../lib/redirect-unwrapper";
-import { inlineCssLinksOnAst, rewriteCssUrls, rewriteHtmlUrlsToAst, stripWaybackToolbar } from "../lib/url-rewriter";
+import {
+	inlineCssLinksOnAst,
+	rewriteCssUrls,
+	rewriteHtmlUrlsToAst,
+	stripWaybackToolbar,
+} from "../lib/url-rewriter";
 import { isHostnameWhitelisted } from "../lib/url-validator";
 import type { Config } from "../models/config";
 import type { ProxyResult } from "../models/proxy";
@@ -85,13 +90,22 @@ export class ProxyService {
 			return await this.fetchCore(targetUrl, time, onProgress);
 		} catch (e) {
 			if (errorHasStatus(e) && e.status === 404) {
-				const fallback = extractCdnEmbeddedUrl(targetUrl);
-				if (fallback) {
+				// Asset not in the archive under its requested URL. Try each
+				// fallback rule (CDN-path unwrap, configured replacements, …) in
+				// order; the first transformed URL that resolves wins. A 404 from
+				// a candidate just advances to the next rule; any other error is
+				// real and propagates immediately.
+				for (const { rule, url } of candidateFallbackUrls(targetUrl)) {
 					this.logger.info(
-						{ targetUrl, fallback, time },
-						"[cdn-fallback] CDN URL not in archive, retrying with embedded origin URL",
+						{ targetUrl, fallback: url, rule, time },
+						"[url-fallback] asset not in archive, retrying with transformed URL",
 					);
-					return this.fetchCore(fallback, time, onProgress);
+					try {
+						return await this.fetchCore(url, time, onProgress);
+					} catch (inner) {
+						if (errorHasStatus(inner) && inner.status === 404) continue;
+						throw inner;
+					}
 				}
 			}
 			throw e;
@@ -228,7 +242,15 @@ export class ProxyService {
 				void this.maybeEnqueueDomainCrawl(u.hostname, time);
 			}
 		} else if (isCss) {
-			body = rewriteCssUrls(raw.toString("utf-8"), targetUrl, time, this.config.lockTime, undefined, undefined, this.config.proxyBase);
+			body = rewriteCssUrls(
+				raw.toString("utf-8"),
+				targetUrl,
+				time,
+				this.config.lockTime,
+				undefined,
+				undefined,
+				this.config.proxyBase,
+			);
 		}
 
 		return {

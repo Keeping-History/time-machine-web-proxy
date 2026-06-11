@@ -1,4 +1,8 @@
-import { CDN_SUFFIXES, normalizeHostname, parseDomainRemap } from "../../src/lib/hostname-normalizer";
+import {
+	CDN_SUFFIXES,
+	normalizeHostname,
+	parseDomainRemap,
+} from "../../src/lib/hostname-normalizer";
 
 describe("parseDomainRemap", () => {
 	it("returns empty object for undefined", () => {
@@ -64,9 +68,9 @@ describe("normalizeHostname", () => {
 
 	it("remap preserves path, query, and fragment", () => {
 		const remap = { "cdn.foo.com.edgesuite.net": "cdn.foo.com" };
-		expect(
-			normalizeHostname("http://cdn.foo.com.edgesuite.net/file.js?v=2&x=3#sec", remap),
-		).toBe("http://cdn.foo.com/file.js?v=2&x=3#sec");
+		expect(normalizeHostname("http://cdn.foo.com.edgesuite.net/file.js?v=2&x=3#sec", remap)).toBe(
+			"http://cdn.foo.com/file.js?v=2&x=3#sec",
+		);
 	});
 
 	it("explicit remap takes precedence over CDN suffix stripping", () => {
@@ -88,8 +92,27 @@ describe("normalizeHostname", () => {
 	});
 
 	it("does not strip when suffix match would leave empty hostname", () => {
-		expect(normalizeHostname("http://edgesuite.net/path", {})).toBe(
-			"http://edgesuite.net/path",
+		expect(normalizeHostname("http://edgesuite.net/path", {})).toBe("http://edgesuite.net/path");
+	});
+
+	it("does not strip when the remaining prefix is an edge-node name (path-embedded origin)", () => {
+		// a772.g.akamai.net embeds the origin in the PATH, not the hostname.
+		// Stripping .akamai.net would leave "a772.g" — a bogus host. Left intact
+		// so extractCdnEmbeddedUrl can unwrap the path downstream.
+		const url =
+			"http://a772.g.akamai.net/7/772/51/7648437e551b56/www.apple.com/t/2001/us/en/i/2.gif";
+		expect(normalizeHostname(url, {})).toBe(url);
+	});
+
+	it("does not strip when the remaining prefix has a one-letter final label", () => {
+		expect(normalizeHostname("http://foo.x.akamai.net/bar.gif", {})).toBe(
+			"http://foo.x.akamai.net/bar.gif",
+		);
+	});
+
+	it("still strips when the remaining prefix is a plausible origin host", () => {
+		expect(normalizeHostname("http://www.cnn.com.akamai.net/img.png", {})).toBe(
+			"http://www.cnn.com/img.png",
 		);
 	});
 

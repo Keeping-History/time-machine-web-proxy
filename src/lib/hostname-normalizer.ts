@@ -6,6 +6,16 @@ export const CDN_SUFFIXES = [
 	".akamai.net",
 ];
 
+// After stripping a CDN suffix, the remaining prefix must look like a real
+// origin host — at least one dot and a final label of 2+ letters (a plausible
+// TLD). This is what distinguishes the two Akamai URL shapes:
+//   - hostname-prefix:  www.msnbc.com.edgesuite.net → strip → "www.msnbc.com" ✓
+//   - path-embedded:    a772.g.akamai.net/.../www.apple.com/x.gif → "a772.g" ✗
+// The path-embedded kind leaves an edge-node name like "a772.g" once the suffix
+// is gone; that is not the origin (which lives in the URL path). We leave such
+// URLs untouched here so extractCdnEmbeddedUrl can unwrap the path downstream.
+const RE_PLAUSIBLE_ORIGIN_HOST = /\.[a-z]{2,63}$/i;
+
 export function parseDomainRemap(raw: string | undefined): Record<string, string> {
 	if (!raw) return {};
 	const result: Record<string, string> = {};
@@ -46,7 +56,7 @@ export function normalizeHostname(rawUrl: string, domainRemap: Record<string, st
 	for (const suffix of CDN_SUFFIXES) {
 		if (hostname.endsWith(suffix)) {
 			const stripped = hostname.slice(0, -suffix.length);
-			if (stripped) {
+			if (stripped && RE_PLAUSIBLE_ORIGIN_HOST.test(stripped)) {
 				parsed.hostname = stripped;
 				return parsed.toString();
 			}
