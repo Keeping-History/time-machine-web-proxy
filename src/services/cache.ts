@@ -103,10 +103,21 @@ export class CacheService {
 		}
 		const isDirStyle = decoded === "/" || decoded.endsWith("/");
 		try {
-			await fs.access(primaryAbs);
-			const contentType = await this.resolveContentType(primaryAbs, url, time);
-			const archiveTime = await this.readResolvedTime(time, u.hostname);
-			return { absPath: primaryAbs, contentType, archiveTime };
+			const stat = await fs.stat(primaryAbs);
+			// Zero-byte body = poison entry (e.g. a writer that piped an empty or
+			// already-consumed stream then atomically renamed it into place). It
+			// would otherwise serve as 200 + correct content-type + empty body —
+			// a permanently broken asset. Treat it as a miss so the worker
+			// re-fetches and overwrites it; the atomic rename is the only safe
+			// way to replace it, so we deliberately do NOT unlink here (a stale
+			// unlink could race ahead of a concurrent good rewrite and delete it).
+			if (stat.size === 0) {
+				this.logger.warn({ path: primaryAbs }, "[cache] zero-byte entry — treating as miss");
+			} else {
+				const contentType = await this.resolveContentType(primaryAbs, url, time);
+				const archiveTime = await this.readResolvedTime(time, u.hostname);
+				return { absPath: primaryAbs, contentType, archiveTime };
+			}
 		} catch (e) {
 			if ((e as NodeJS.ErrnoException).code !== "ENOENT") {
 				this.logger.warn({ err: e, path: primaryAbs }, "[cache] unexpected stat error");
@@ -122,9 +133,14 @@ export class CacheService {
 				throw Object.assign(new Error("Path traversal rejected"), { status: 400 });
 			}
 			try {
-				await fs.access(fallbackAbs);
-				const archiveTime = await this.readResolvedTime(time, u.hostname);
-				return { absPath: fallbackAbs, contentType: "text/html", archiveTime };
+				const stat = await fs.stat(fallbackAbs);
+				// Same zero-byte poison guard as the primary path above.
+				if (stat.size === 0) {
+					this.logger.warn({ path: fallbackAbs }, "[cache] zero-byte entry — treating as miss");
+				} else {
+					const archiveTime = await this.readResolvedTime(time, u.hostname);
+					return { absPath: fallbackAbs, contentType: "text/html", archiveTime };
+				}
 			} catch (e) {
 				if ((e as NodeJS.ErrnoException).code !== "ENOENT") {
 					this.logger.warn({ err: e, path: fallbackAbs }, "[cache] unexpected stat error");

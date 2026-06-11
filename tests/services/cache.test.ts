@@ -30,6 +30,20 @@ const makeService = (cacheEnabled = true, notFoundTtlDays = 30) =>
 
 const mockFs = fs as jest.Mocked<typeof fs>;
 
+const enoent = () => Object.assign(new Error("ENOENT"), { code: "ENOENT" });
+
+// Make the primary/fallback asset file "exist" with `size` bytes while keeping
+// sentinel paths (.notfound / .notfound-tentative) absent, so negative-cache
+// branches don't fire. Mirrors the size-aware lookup, which treats a zero-byte
+// file as a miss. lookup() probes existence via fs.stat (not fs.access), so the
+// asset's presence is expressed through the stat mock.
+const presentFile = (size = 11) =>
+	(mockFs.stat as jest.Mock).mockImplementation((p: string) =>
+		p.includes("/.notfound")
+			? Promise.reject(enoent())
+			: Promise.resolve({ size, mtimeMs: Date.now() }),
+	);
+
 function fakeFileHandle(data: Buffer) {
 	return {
 		read: jest.fn().mockImplementation((buf: Buffer, _off: number, len: number) => {
@@ -72,31 +86,44 @@ describe("CacheService.lookup (v2)", () => {
 		const svc = makeService(false);
 		const result = await svc.lookup("https://example.com/about", TIME);
 		expect(result).toBeNull();
-		expect(mockFs.access).not.toHaveBeenCalled();
+		expect(mockFs.stat).not.toHaveBeenCalled();
 	});
 
 	it("HIT: returns { absPath, contentType } when file exists", async () => {
-		(mockFs.access as jest.Mock).mockResolvedValue(undefined);
+		presentFile();
 		const svc = makeService();
 		const result = await svc.lookup("https://example.com/about.html", TIME);
 		expect(result).toEqual({
 			absPath: "/tmp/cache/v2/20200101000000/example.com/about.html",
 			contentType: "text/html",
 		});
-		expect(mockFs.access).toHaveBeenCalledTimes(1);
+		expect(mockFs.stat).toHaveBeenCalledTimes(1);
 	});
 
-	it("MISS: returns null when fs.access rejects", async () => {
-		(mockFs.access as jest.Mock).mockRejectedValue(
-			Object.assign(new Error("ENOENT"), { code: "ENOENT" }),
-		);
+	it("MISS: returns null when the file does not exist", async () => {
+		// Default stat mock rejects ENOENT for every path (see beforeEach).
 		const svc = makeService();
 		const result = await svc.lookup("https://example.com/missing.html", TIME);
 		expect(result).toBeNull();
 	});
 
+	it("MISS: treats a zero-byte file as absent so the worker re-fetches it", async () => {
+		// Poison entry: file exists but is empty (e.g. a writer that piped an
+		// already-consumed stream then renamed it into place). Serving it would
+		// return 200 + correct content-type + an empty body — a permanently
+		// broken asset. lookup must report a miss so the caller re-fetches.
+		(mockFs.stat as jest.Mock).mockImplementation((p: string) =>
+			p.includes("/.notfound")
+				? Promise.reject(enoent())
+				: Promise.resolve({ size: 0, mtimeMs: Date.now() }),
+		);
+		const svc = makeService();
+		const result = await svc.lookup("https://example.com/empty.gif", TIME);
+		expect(result).toBeNull();
+	});
+
 	it("directory URL ending with / resolves to <root>/index.html", async () => {
-		(mockFs.access as jest.Mock).mockResolvedValue(undefined);
+		presentFile();
 		const svc = makeService();
 		const result = await svc.lookup("https://example.com/about/", TIME);
 		expect(result?.absPath).toBe("/tmp/cache/v2/20200101000000/example.com/about/index.html");
@@ -104,7 +131,7 @@ describe("CacheService.lookup (v2)", () => {
 	});
 
 	it("root path / resolves to <root>/index.html", async () => {
-		(mockFs.access as jest.Mock).mockResolvedValue(undefined);
+		presentFile();
 		const svc = makeService();
 		const result = await svc.lookup("https://example.com/", TIME);
 		expect(result?.absPath).toBe("/tmp/cache/v2/20200101000000/example.com/index.html");
@@ -118,11 +145,11 @@ describe("CacheService.lookup (v2)", () => {
 		await expect(
 			svc.lookup("https://example.com/%2e%2e%2f%2e%2e%2fetc%2fpasswd", TIME),
 		).rejects.toMatchObject({ status: 400 });
-		expect(mockFs.access).not.toHaveBeenCalled();
+		expect(mockFs.stat).not.toHaveBeenCalled();
 	});
 
 	it("derives content-type from file extension via mime-types", async () => {
-		(mockFs.access as jest.Mock).mockResolvedValue(undefined);
+		presentFile();
 		const svc = makeService();
 		const cssResult = await svc.lookup("https://example.com/style.css", TIME);
 		expect(cssResult?.contentType).toBe("text/css");
@@ -131,7 +158,7 @@ describe("CacheService.lookup (v2)", () => {
 	});
 
 	it("preserves 'www.' in host so the cache key matches the worker write path", async () => {
-		(mockFs.access as jest.Mock).mockResolvedValue(undefined);
+		presentFile();
 		const svc = makeService();
 		const result = await svc.lookup("https://www.example.com/about.html", TIME);
 		// www.example.com and example.com are stored separately — they can
@@ -140,7 +167,7 @@ describe("CacheService.lookup (v2)", () => {
 	});
 
 	it("returns application/octet-stream for unknown extension", async () => {
-		(mockFs.access as jest.Mock).mockResolvedValue(undefined);
+		presentFile();
 		const svc = makeService();
 		const result = await svc.lookup("https://example.com/file.unknownext", TIME);
 		expect(result?.contentType).toBe("application/octet-stream");
@@ -151,7 +178,7 @@ describe("CacheService.lookup (v2)", () => {
 		// path. It takes precedence over mime-types extension lookup so a
 		// charset hint or a non-default type (e.g. application/xhtml+xml) is
 		// preserved across reads.
-		(mockFs.access as jest.Mock).mockResolvedValue(undefined);
+		presentFile();
 		(mockFs.readFile as jest.Mock).mockImplementation((p: string) => {
 			if (p.includes("/.content-types/")) return Promise.resolve("text/html; charset=utf-8");
 			if (p.endsWith(".resolved-time"))
@@ -169,23 +196,20 @@ describe("CacheService.lookup (v2)", () => {
 		["application/x-pointplus", "https://www.sun.com/template/sunstyle.css", "text/css"],
 		["text/html", "https://example.com/app.js", "text/javascript"],
 		["text/html", "https://example.com/logo.png", "image/png"],
-	])(
-		"overrides sidecar '%s' with extension MIME type for %s",
-		async (sidecarType, url, expected) => {
-			(mockFs.access as jest.Mock).mockResolvedValue(undefined);
-			(mockFs.readFile as jest.Mock).mockImplementation((p: string) => {
-				if (p.includes("/.content-types/")) return Promise.resolve(sidecarType);
-				if (p.endsWith(".resolved-time"))
-					return Promise.reject(Object.assign(new Error("ENOENT"), { code: "ENOENT" }));
-				return Promise.resolve(Buffer.from(""));
-			});
-			const result = await makeService().lookup(url, TIME);
-			expect(result?.contentType).toBe(expected);
-		},
-	);
+	])("overrides sidecar '%s' with extension MIME type for %s", async (sidecarType, url, expected) => {
+		presentFile();
+		(mockFs.readFile as jest.Mock).mockImplementation((p: string) => {
+			if (p.includes("/.content-types/")) return Promise.resolve(sidecarType);
+			if (p.endsWith(".resolved-time"))
+				return Promise.reject(Object.assign(new Error("ENOENT"), { code: "ENOENT" }));
+			return Promise.resolve(Buffer.from(""));
+		});
+		const result = await makeService().lookup(url, TIME);
+		expect(result?.contentType).toBe(expected);
+	});
 
 	it("preserves sidecar charset for CSS when sidecar type is correct", async () => {
-		(mockFs.access as jest.Mock).mockResolvedValue(undefined);
+		presentFile();
 		(mockFs.readFile as jest.Mock).mockImplementation((p: string) => {
 			if (p.includes("/.content-types/")) return Promise.resolve("text/css; charset=utf-8");
 			if (p.endsWith(".resolved-time"))
@@ -200,7 +224,7 @@ describe("CacheService.lookup (v2)", () => {
 	});
 
 	it("does not override sidecar when extension is .html and sidecar is text/html", async () => {
-		(mockFs.access as jest.Mock).mockResolvedValue(undefined);
+		presentFile();
 		(mockFs.readFile as jest.Mock).mockImplementation((p: string) => {
 			if (p.includes("/.content-types/")) return Promise.resolve("text/html; charset=utf-8");
 			if (p.endsWith(".resolved-time"))
@@ -217,7 +241,7 @@ describe("CacheService.lookup (v2)", () => {
 		// application/octet-stream — the browser downloaded it. Sniffing the
 		// cached body for an HTML signature serves it correctly without a
 		// cache wipe.
-		(mockFs.access as jest.Mock).mockResolvedValue(undefined);
+		presentFile();
 		(mockFs.readFile as jest.Mock).mockRejectedValue(
 			Object.assign(new Error("ENOENT"), { code: "ENOENT" }),
 		);
@@ -232,7 +256,7 @@ describe("CacheService.lookup (v2)", () => {
 	});
 
 	it("sniff recognises an XML prolog", async () => {
-		(mockFs.access as jest.Mock).mockResolvedValue(undefined);
+		presentFile();
 		(mockFs.readFile as jest.Mock).mockRejectedValue(
 			Object.assign(new Error("ENOENT"), { code: "ENOENT" }),
 		);
@@ -249,7 +273,7 @@ describe("CacheService.lookup (v2)", () => {
 		// NOT sniff: an extension was specified, so the user/server intended
 		// a particular type. Falsely promoting binary blobs to text/html based
 		// on a stray "<html" byte sequence would corrupt downloads.
-		(mockFs.access as jest.Mock).mockResolvedValue(undefined);
+		presentFile();
 		(mockFs.readFile as jest.Mock).mockRejectedValue(
 			Object.assign(new Error("ENOENT"), { code: "ENOENT" }),
 		);
@@ -264,7 +288,7 @@ describe("CacheService.lookup (v2)", () => {
 	it("sniff returns octet-stream for non-HTML/XML extensionless content", async () => {
 		// Random binary bytes should NOT be promoted to text/html. The
 		// sniffer's allowlist of signatures is intentionally narrow.
-		(mockFs.access as jest.Mock).mockResolvedValue(undefined);
+		presentFile();
 		(mockFs.readFile as jest.Mock).mockRejectedValue(
 			Object.assign(new Error("ENOENT"), { code: "ENOENT" }),
 		);
@@ -281,7 +305,7 @@ describe("CacheService.lookup (v2)", () => {
 	// that distinction so a hit on one form never returns content from the
 	// other.
 	it("www. and apex hosts resolve to DISTINCT cache entries", async () => {
-		(mockFs.access as jest.Mock).mockResolvedValue(undefined);
+		presentFile();
 		const svc = makeService();
 		const a = await svc.lookup("https://www.example.com/about.html", TIME);
 		const b = await svc.lookup("https://example.com/about.html", TIME);
@@ -291,7 +315,7 @@ describe("CacheService.lookup (v2)", () => {
 	});
 
 	it("lookup for a www. URL uses the www. hostname verbatim in the cache path", async () => {
-		(mockFs.access as jest.Mock).mockResolvedValue(undefined);
+		presentFile();
 		const svc = makeService();
 		const result = await svc.lookup("https://www.apple.com/", TIME);
 		expect(result?.absPath).toBe("/tmp/cache/v2/20200101000000/www.apple.com/index.html");
@@ -303,9 +327,10 @@ describe("CacheService.lookup (v2)", () => {
 	// directory-index file when no literal file exists at that path. Without
 	// this, the user gets a 502 even though the content is cached.
 	it("MISS at <root>/<path> falls back to <root>/<path>/index.html (directory-index convention)", async () => {
-		(mockFs.access as jest.Mock)
-			.mockRejectedValueOnce(Object.assign(new Error("ENOENT"), { code: "ENOENT" }))
-			.mockResolvedValueOnce(undefined);
+		// Primary path stat misses; the directory-index fallback stat succeeds.
+		(mockFs.stat as jest.Mock)
+			.mockRejectedValueOnce(enoent())
+			.mockResolvedValueOnce({ size: 11, mtimeMs: Date.now() });
 		const svc = makeService();
 		const result = await svc.lookup("https://example.com/mac", TIME);
 		expect(result?.absPath).toBe("/tmp/cache/v2/20200101000000/example.com/mac/index.html");
@@ -313,17 +338,14 @@ describe("CacheService.lookup (v2)", () => {
 	});
 
 	it("prefers the exact file when it exists; does not probe the index fallback", async () => {
-		(mockFs.access as jest.Mock).mockResolvedValueOnce(undefined);
+		presentFile();
 		const svc = makeService();
 		const result = await svc.lookup("https://example.com/mac.html", TIME);
 		expect(result?.absPath).toBe("/tmp/cache/v2/20200101000000/example.com/mac.html");
-		expect(mockFs.access).toHaveBeenCalledTimes(1);
+		expect(mockFs.stat).toHaveBeenCalledTimes(1);
 	});
 
 	it("returns null when neither <root>/<path> nor <root>/<path>/index.html exists", async () => {
-		(mockFs.access as jest.Mock).mockRejectedValue(
-			Object.assign(new Error("ENOENT"), { code: "ENOENT" }),
-		);
 		const svc = makeService();
 		const result = await svc.lookup("https://example.com/nope", TIME);
 		expect(result).toBeNull();
@@ -362,11 +384,13 @@ describe("CacheService.writeNotFoundSentinel + sentinel-aware lookup", () => {
 	});
 
 	it("lookup throws {status: 404} when sentinel exists for the URL", async () => {
-		// file access fails for the content file; sentinel stat succeeds with a recent mtime.
-		(mockFs.access as jest.Mock).mockRejectedValue(
-			Object.assign(new Error("ENOENT"), { code: "ENOENT" }),
+		// Content file misses (stat rejects for non-sentinel paths); a sentinel
+		// stat succeeds with a recent mtime.
+		(mockFs.stat as jest.Mock).mockImplementation((p: string) =>
+			p.includes("/.notfound")
+				? Promise.resolve({ mtimeMs: Date.now() })
+				: Promise.reject(enoent()),
 		);
-		(mockFs.stat as jest.Mock).mockResolvedValue({ mtimeMs: Date.now() });
 		const svc = makeService();
 		await expect(svc.lookup(URL, TIME)).rejects.toMatchObject({
 			status: 404,
@@ -374,25 +398,20 @@ describe("CacheService.writeNotFoundSentinel + sentinel-aware lookup", () => {
 	});
 
 	it("lookup returns null when neither file nor sentinel exists (unchanged miss path)", async () => {
-		(mockFs.access as jest.Mock).mockRejectedValue(
-			Object.assign(new Error("ENOENT"), { code: "ENOENT" }),
-		);
-		(mockFs.stat as jest.Mock).mockRejectedValue(
-			Object.assign(new Error("ENOENT"), { code: "ENOENT" }),
-		);
+		// Default stat mock rejects ENOENT for every path (see beforeEach).
 		const svc = makeService();
 		const result = await svc.lookup(URL, TIME);
 		expect(result).toBeNull();
 	});
 
 	it("lookup returns HIT when file exists, even if sentinel could exist (file wins)", async () => {
-		// File access succeeds — sentinel check should not be reached.
-		(mockFs.access as jest.Mock).mockResolvedValue(undefined);
+		// File stat succeeds — sentinel check should not be reached.
+		presentFile();
 		const svc = makeService();
 		const result = await svc.lookup("https://example.com/about.html", TIME);
 		expect(result?.absPath).toBe("/tmp/cache/v2/20200101000000/example.com/about.html");
-		// Exactly one fs.access call (for the file) — sentinel not consulted.
-		expect(mockFs.access).toHaveBeenCalledTimes(1);
+		// Exactly one fs.stat call (for the file) — sentinel not consulted.
+		expect(mockFs.stat).toHaveBeenCalledTimes(1);
 	});
 
 	it("sentinel root dir preserves 'www.' to match the worker write path", async () => {
@@ -422,7 +441,7 @@ describe("CacheService.writeNotFoundSentinel + sentinel-aware lookup", () => {
 	});
 
 	it("lookup populates CacheHit.archiveTime from the sidecar when present", async () => {
-		(mockFs.access as jest.Mock).mockResolvedValue(undefined);
+		presentFile();
 		(mockFs.readFile as jest.Mock).mockImplementation((p: string) => {
 			if (p.endsWith(".resolved-time")) return Promise.resolve("20010822231227");
 			return Promise.resolve(Buffer.from(""));
@@ -433,7 +452,7 @@ describe("CacheService.writeNotFoundSentinel + sentinel-aware lookup", () => {
 	});
 
 	it("lookup omits archiveTime when no sidecar exists (legacy cache HIT)", async () => {
-		(mockFs.access as jest.Mock).mockResolvedValue(undefined);
+		presentFile();
 		(mockFs.readFile as jest.Mock).mockRejectedValue(
 			Object.assign(new Error("ENOENT"), { code: "ENOENT" }),
 		);
@@ -445,7 +464,7 @@ describe("CacheService.writeNotFoundSentinel + sentinel-aware lookup", () => {
 	it("ignores malformed .resolved-time sidecar contents and leaves archiveTime undefined", async () => {
 		// Guards the 14-digit validation in readResolvedTime against accidentally
 		// propagating bad sidecar data (e.g. a partial write or hand-edited file).
-		(mockFs.access as jest.Mock).mockResolvedValue(undefined);
+		presentFile();
 		(mockFs.readFile as jest.Mock).mockImplementation((p: string) => {
 			if (p.endsWith(".resolved-time")) return Promise.resolve("not-a-timestamp");
 			return Promise.resolve(Buffer.from(""));
@@ -467,18 +486,14 @@ describe("CacheService.writeNotFoundSentinel + sentinel-aware lookup", () => {
 	});
 
 	it("lookup deletes an expired sentinel and returns null", async () => {
-		// Content file misses; permanent sentinel exists but is older than TTL.
-		// Tentative sentinel does NOT exist (path-aware mock).
-		(mockFs.access as jest.Mock).mockRejectedValue(
-			Object.assign(new Error("ENOENT"), { code: "ENOENT" }),
-		);
+		// Content file misses (non-sentinel stat rejects); permanent sentinel
+		// exists but is older than TTL; tentative sentinel does NOT exist.
 		const ttlDays = 7;
 		const oldMtimeMs = Date.now() - (ttlDays + 1) * 24 * 60 * 60 * 1000;
 		(mockFs.stat as jest.Mock).mockImplementation((p: string) => {
-			if (p.includes(".notfound-tentative/")) {
-				return Promise.reject(Object.assign(new Error("ENOENT"), { code: "ENOENT" }));
-			}
-			return Promise.resolve({ mtimeMs: oldMtimeMs });
+			if (p.includes("/.notfound-tentative/")) return Promise.reject(enoent());
+			if (p.includes("/.notfound/")) return Promise.resolve({ mtimeMs: oldMtimeMs });
+			return Promise.reject(enoent());
 		});
 		(mockFs.unlink as jest.Mock).mockResolvedValue(undefined);
 
@@ -490,18 +505,14 @@ describe("CacheService.writeNotFoundSentinel + sentinel-aware lookup", () => {
 	});
 
 	it("lookup throws 404 for a fresh sentinel within TTL", async () => {
-		// Content file misses; permanent sentinel is recent (within TTL).
-		// Tentative sentinel does NOT exist (path-aware mock).
-		(mockFs.access as jest.Mock).mockRejectedValue(
-			Object.assign(new Error("ENOENT"), { code: "ENOENT" }),
-		);
+		// Content file misses; permanent sentinel is recent (within TTL);
+		// tentative sentinel does NOT exist.
 		const ttlDays = 7;
 		const freshMtimeMs = Date.now() - 1 * 24 * 60 * 60 * 1000; // 1 day old
 		(mockFs.stat as jest.Mock).mockImplementation((p: string) => {
-			if (p.includes(".notfound-tentative/")) {
-				return Promise.reject(Object.assign(new Error("ENOENT"), { code: "ENOENT" }));
-			}
-			return Promise.resolve({ mtimeMs: freshMtimeMs });
+			if (p.includes("/.notfound-tentative/")) return Promise.reject(enoent());
+			if (p.includes("/.notfound/")) return Promise.resolve({ mtimeMs: freshMtimeMs });
+			return Promise.reject(enoent());
 		});
 
 		const svc = makeService(true, ttlDays);
@@ -510,16 +521,12 @@ describe("CacheService.writeNotFoundSentinel + sentinel-aware lookup", () => {
 	});
 
 	it("expired sentinel unlink is logged with [cache] sentinel-expired", async () => {
-		(mockFs.access as jest.Mock).mockRejectedValue(
-			Object.assign(new Error("ENOENT"), { code: "ENOENT" }),
-		);
 		const ttlDays = 30;
 		const oldMtimeMs = Date.now() - 60 * 24 * 60 * 60 * 1000; // 60 days old
 		(mockFs.stat as jest.Mock).mockImplementation((p: string) => {
-			if (p.includes(".notfound-tentative/")) {
-				return Promise.reject(Object.assign(new Error("ENOENT"), { code: "ENOENT" }));
-			}
-			return Promise.resolve({ mtimeMs: oldMtimeMs });
+			if (p.includes("/.notfound-tentative/")) return Promise.reject(enoent());
+			if (p.includes("/.notfound/")) return Promise.resolve({ mtimeMs: oldMtimeMs });
+			return Promise.reject(enoent());
 		});
 		(mockFs.unlink as jest.Mock).mockResolvedValue(undefined);
 
@@ -572,9 +579,6 @@ describe("CacheService.writeTentativeNotFoundSentinel + tentative-aware lookup",
 	});
 
 	it("lookup throws 404 when only the tentative sentinel exists and is within 1h TTL", async () => {
-		(mockFs.access as jest.Mock).mockRejectedValue(
-			Object.assign(new Error("ENOENT"), { code: "ENOENT" }),
-		);
 		const freshMtimeMs = Date.now() - 30 * 60 * 1000; // 30 minutes old
 		(mockFs.stat as jest.Mock).mockImplementation((p: string) => {
 			if (p.includes(".notfound-tentative/")) {
@@ -588,9 +592,6 @@ describe("CacheService.writeTentativeNotFoundSentinel + tentative-aware lookup",
 	});
 
 	it("lookup unlinks an expired tentative sentinel and falls through to permanent check", async () => {
-		(mockFs.access as jest.Mock).mockRejectedValue(
-			Object.assign(new Error("ENOENT"), { code: "ENOENT" }),
-		);
 		const expiredMtimeMs = Date.now() - 2 * 60 * 60 * 1000; // 2 hours old (TTL is 1h)
 		(mockFs.stat as jest.Mock).mockImplementation((p: string) => {
 			if (p.includes(".notfound-tentative/")) {
@@ -608,17 +609,21 @@ describe("CacheService.writeTentativeNotFoundSentinel + tentative-aware lookup",
 	});
 
 	it("tentative sentinel takes precedence over a stale fresh-looking permanent sentinel", async () => {
-		// Both sentinels exist; tentative is fresh (within 1h), permanent would
-		// also count as fresh. Lookup must short-circuit on the tentative without
-		// touching the permanent (one stat call, not two).
-		(mockFs.access as jest.Mock).mockRejectedValue(
-			Object.assign(new Error("ENOENT"), { code: "ENOENT" }),
-		);
+		// Both sentinels exist and would count as fresh. Lookup must short-circuit
+		// on the tentative without ever consulting the permanent sentinel. The
+		// content-file probes (now fs.stat) miss for non-sentinel paths.
 		const freshMtimeMs = Date.now() - 10 * 60 * 1000; // 10 minutes old
-		(mockFs.stat as jest.Mock).mockResolvedValue({ mtimeMs: freshMtimeMs });
+		(mockFs.stat as jest.Mock).mockImplementation((p: string) =>
+			p.includes("/.notfound")
+				? Promise.resolve({ mtimeMs: freshMtimeMs })
+				: Promise.reject(enoent()),
+		);
 		const svc = makeService();
 		await expect(svc.lookup(URL, TIME)).rejects.toMatchObject({ status: 404 });
-		expect(mockFs.stat).toHaveBeenCalledTimes(1);
+		// The permanent sentinel (.notfound/<key>, not -tentative) is never statted.
+		const statPaths = (mockFs.stat as jest.Mock).mock.calls.map((c) => c[0] as string);
+		expect(statPaths.some((p) => p.includes("/.notfound-tentative/"))).toBe(true);
+		expect(statPaths.some((p) => /\/\.notfound\/[0-9a-f]{16}$/.test(p))).toBe(false);
 	});
 });
 
