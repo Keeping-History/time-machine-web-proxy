@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { createWriteStream, promises as fs } from "node:fs";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { dirname, extname, join, resolve, sep } from "node:path";
@@ -36,9 +36,21 @@ export interface CacheHit {
 }
 
 async function atomicWrite(path: string, data: string): Promise<void> {
-	const tmp = `${path}${TMP_SUFFIX}`;
+	// Unique tmp per call. Concurrent atomicWrite() calls to the SAME dest are
+	// common — every asset of a host refreshes the per-host `.resolved-time`
+	// sidecar — and a shared tmp path makes them race: the first rename consumes
+	// the tmp and the rest fail with ENOENT (observed in prod during cold-cache
+	// bursts). A random segment kept in the destination's directory keeps the
+	// rename atomic on the same mount while giving each writer its own tmp;
+	// rename is last-writer-wins, which is fine for these sidecars.
+	const tmp = `${path}.${randomBytes(6).toString("hex")}${TMP_SUFFIX}`;
 	await fs.writeFile(tmp, data);
-	await fs.rename(tmp, path);
+	try {
+		await fs.rename(tmp, path);
+	} catch (e) {
+		await fs.unlink(tmp).catch(() => undefined);
+		throw e;
+	}
 }
 
 export class CacheService {
@@ -119,7 +131,10 @@ export class CacheService {
 				return { absPath: primaryAbs, contentType, archiveTime };
 			}
 		} catch (e) {
-			if ((e as NodeJS.ErrnoException).code !== "ENOENT") {
+			// ENOENT = absent; ENOTDIR = a parent path segment is a file (so this
+			// path can't be cached here) — both are ordinary misses, not errors.
+			const code = (e as NodeJS.ErrnoException).code;
+			if (code !== "ENOENT" && code !== "ENOTDIR") {
 				this.logger.warn({ err: e, path: primaryAbs }, "[cache] unexpected stat error");
 			}
 			/* fall through to directory-index fallback */
@@ -142,7 +157,8 @@ export class CacheService {
 					return { absPath: fallbackAbs, contentType: "text/html", archiveTime };
 				}
 			} catch (e) {
-				if ((e as NodeJS.ErrnoException).code !== "ENOENT") {
+				const code = (e as NodeJS.ErrnoException).code;
+				if (code !== "ENOENT" && code !== "ENOTDIR") {
 					this.logger.warn({ err: e, path: fallbackAbs }, "[cache] unexpected stat error");
 				}
 				/* fall through to sentinel check */

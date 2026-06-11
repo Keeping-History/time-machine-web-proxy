@@ -127,11 +127,28 @@ export class ProxyService {
 				const direct = await this.directClient.fetchAtRequestedTime(targetUrl, time);
 				if (direct.outcome === "ok" && direct.body) {
 					await this.cache.writeStream(targetUrl, time, direct.body);
+					// Sidecars are best-effort metadata: the body is already cached,
+					// so a sidecar write failure (e.g. a transient rename race on the
+					// shared GCS mount) must not fail the asset response.
 					if (direct.resolvedTime) {
-						await this.cache.writeResolvedTimeSidecar(time, targetUrl, direct.resolvedTime);
+						await this.cache
+							.writeResolvedTimeSidecar(time, targetUrl, direct.resolvedTime)
+							.catch((err) =>
+								this.logger.warn(
+									{ err, targetUrl, time },
+									"[cache] resolved-time sidecar write failed",
+								),
+							);
 					}
 					if (direct.contentType) {
-						await this.cache.writeContentTypeSidecar(targetUrl, time, direct.contentType);
+						await this.cache
+							.writeContentTypeSidecar(targetUrl, time, direct.contentType)
+							.catch((err) =>
+								this.logger.warn(
+									{ err, targetUrl, time },
+									"[cache] content-type sidecar write failed",
+								),
+							);
 					}
 					hit = await this.cache.lookup(targetUrl, time);
 					cacheStatus = "MISS_DIRECT";

@@ -381,6 +381,45 @@ describe("ProxyService.fetch — Tier 2 direct fetch", () => {
 		expect(cache.writeResolvedTimeSidecar).not.toHaveBeenCalled();
 	});
 
+	it("MISS_DIRECT: a sidecar write failure does NOT fail the asset response (best-effort)", async () => {
+		// Regression: the body is already cached via writeStream, so a sidecar
+		// metadata write that rejects (e.g. a transient rename race on the shared
+		// GCS mount) must not propagate and 502 the asset.
+		const lookup = jest
+			.fn<Promise<CacheHit | null>, [string, string]>()
+			.mockResolvedValueOnce(null)
+			.mockResolvedValueOnce(htmlHit);
+		const cache = makeCache(lookup);
+		cache.writeResolvedTimeSidecar.mockRejectedValue(
+			Object.assign(new Error("ENOENT"), { code: "ENOENT" }),
+		);
+		cache.writeContentTypeSidecar.mockRejectedValue(
+			Object.assign(new Error("ENOENT"), { code: "ENOENT" }),
+		);
+		const client = makeClient();
+		const directClient = makeDirectClient();
+		directClient.fetchAtRequestedTime.mockResolvedValue({
+			outcome: "ok",
+			body: Readable.from([Buffer.from(PLAIN_HTML_BODY)]),
+			contentType: "text/html",
+			resolvedTime: "20200101010000",
+		});
+		mockedReadFile.mockResolvedValue(Buffer.from(PLAIN_HTML_BODY));
+		const svc = new ProxyService(
+			cache,
+			client,
+			logger,
+			{ ...baseConfig, whitelistHosts: ["other.com"] },
+			null,
+			directClient,
+		);
+
+		const result = await svc.fetch(TARGET_HTML_URL, TIME);
+
+		expect(result.cache).toBe("MISS_DIRECT");
+		expect(cache.writeStream).toHaveBeenCalled();
+	});
+
 	it("Tier 2 not_found → writeNotFoundSentinel invoked, throws 404, no worker call", async () => {
 		const lookup = jest.fn().mockResolvedValueOnce(null);
 		const cache = makeCache(lookup);

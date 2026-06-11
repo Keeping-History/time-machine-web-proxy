@@ -425,19 +425,51 @@ describe("CacheService.writeNotFoundSentinel + sentinel-aware lookup", () => {
 		);
 	});
 
-	it("writeResolvedTimeSidecar writes <root>/.resolved-time with the timestamp", async () => {
+	it("writeResolvedTimeSidecar writes <root>/.resolved-time via a unique tmp then renames", async () => {
 		(mockFs.mkdir as jest.Mock).mockResolvedValue(undefined);
 		(mockFs.writeFile as jest.Mock).mockResolvedValue(undefined);
 		(mockFs.rename as jest.Mock).mockResolvedValue(undefined);
 		const svc = makeService();
 		await svc.writeResolvedTimeSidecar(TIME, "https://www.example.com/", "20010822231227");
 		const finalPath = "/tmp/cache/v2/20200101000000/www.example.com/.resolved-time";
-		const tmpPath = `${finalPath}.tmp`;
-		const path = (mockFs.writeFile as jest.Mock).mock.calls[0][0] as string;
+		const tmpPath = (mockFs.writeFile as jest.Mock).mock.calls[0][0] as string;
 		const content = (mockFs.writeFile as jest.Mock).mock.calls[0][1] as string;
-		expect(path).toBe(tmpPath);
+		// Unique tmp: <finalPath>.<hex>.tmp, in the same directory as the dest so
+		// the rename stays atomic on the mount. Must NOT be the shared "<dest>.tmp"
+		// that caused concurrent writers to race on rename.
+		expect(tmpPath).toMatch(/^\/tmp\/cache\/v2\/20200101000000\/www\.example\.com\/\.resolved-time\.[0-9a-f]+\.tmp$/);
 		expect(content).toBe("20010822231227");
 		expect(mockFs.rename).toHaveBeenCalledWith(tmpPath, finalPath);
+	});
+
+	it("writeResolvedTimeSidecar gives concurrent writers distinct tmp paths (no shared-tmp race)", async () => {
+		(mockFs.mkdir as jest.Mock).mockResolvedValue(undefined);
+		(mockFs.writeFile as jest.Mock).mockResolvedValue(undefined);
+		(mockFs.rename as jest.Mock).mockResolvedValue(undefined);
+		const svc = makeService();
+		// Two assets of the same host racing the same per-host .resolved-time.
+		await Promise.all([
+			svc.writeResolvedTimeSidecar(TIME, "https://www.example.com/a.gif", "20010822231227"),
+			svc.writeResolvedTimeSidecar(TIME, "https://www.example.com/b.gif", "20010822231227"),
+		]);
+		const tmps = (mockFs.writeFile as jest.Mock).mock.calls.map((c) => c[0] as string);
+		expect(tmps).toHaveLength(2);
+		expect(tmps[0]).not.toBe(tmps[1]);
+	});
+
+	it("writeResolvedTimeSidecar cleans up its tmp when the rename fails", async () => {
+		(mockFs.mkdir as jest.Mock).mockResolvedValue(undefined);
+		(mockFs.writeFile as jest.Mock).mockResolvedValue(undefined);
+		(mockFs.rename as jest.Mock).mockRejectedValue(
+			Object.assign(new Error("ENOENT"), { code: "ENOENT" }),
+		);
+		(mockFs.unlink as jest.Mock).mockResolvedValue(undefined);
+		const svc = makeService();
+		await expect(
+			svc.writeResolvedTimeSidecar(TIME, "https://www.example.com/", "20010822231227"),
+		).rejects.toMatchObject({ code: "ENOENT" });
+		const tmpPath = (mockFs.writeFile as jest.Mock).mock.calls[0][0] as string;
+		expect(mockFs.unlink).toHaveBeenCalledWith(tmpPath);
 	});
 
 	it("lookup populates CacheHit.archiveTime from the sidecar when present", async () => {
@@ -716,14 +748,14 @@ describe("CacheService.writeFile", () => {
 
 		expect(mockFs.writeFile).toHaveBeenCalledTimes(1);
 		const [path, contents] = (mockFs.writeFile as jest.Mock).mock.calls[0] as [string, string];
-		// atomicWrite writes to a .tmp sibling first…
+		// atomicWrite writes to a unique <key>.<rand>.tmp sibling first…
 		expect(path).toMatch(
-			/^\/tmp\/cache\/v2\/20200101000000\/www\.yahoo\.com\/\.content-types\/[0-9a-f]{16}\.tmp$/,
+			/^\/tmp\/cache\/v2\/20200101000000\/www\.yahoo\.com\/\.content-types\/[0-9a-f]{16}\.[0-9a-f]+\.tmp$/,
 		);
 		expect(contents).toBe("text/html; charset=utf-8");
-		// …then renames to the final path so readers never see a partial file.
+		// …then renames to the final (keyed) path so readers never see a partial file.
 		expect(mockFs.rename).toHaveBeenCalledWith(
-			expect.stringMatching(/\/\.content-types\/[0-9a-f]{16}\.tmp$/),
+			expect.stringMatching(/\/\.content-types\/[0-9a-f]{16}\.[0-9a-f]+\.tmp$/),
 			expect.stringMatching(/\/\.content-types\/[0-9a-f]{16}$/),
 		);
 		// Parent dir is created before the write to match the existing sentinel
@@ -740,8 +772,10 @@ describe("CacheService.writeFile", () => {
 		const svc = makeService();
 		await svc.writeContentTypeSidecar("https://example.com/r/ci", TIME, "text/html");
 		await svc.writeContentTypeSidecar("https://example.com/r/ci", TIME, "text/html");
-		const first = (mockFs.writeFile as jest.Mock).mock.calls[0][0] as string;
-		const second = (mockFs.writeFile as jest.Mock).mock.calls[1][0] as string;
+		// Compare the rename DESTINATIONS — the tmp sources now carry a per-write
+		// random suffix, so the stable keyed path is the rename target.
+		const first = (mockFs.rename as jest.Mock).mock.calls[0][1] as string;
+		const second = (mockFs.rename as jest.Mock).mock.calls[1][1] as string;
 		expect(first).toBe(second);
 	});
 
