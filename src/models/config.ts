@@ -76,10 +76,13 @@ export interface Config {
 	notFoundTtlDays: number;
 
 	// — URL rewriter behaviour —
-	/** Strip the timestamp segment from rewritten URLs in HTML/CSS responses
-	 *  and from the runtime shim. Rewritten links become `/web/{url}` rather
-	 *  than `/web/{ts}/{url}`, so navigation always falls back to the
-	 *  configured default time. Env: LOCK_TIME (default false). */
+	/** Hide the date from navigation links so browsing stays pinned to the
+	 *  configured default era (ARCHIVE_TIME). Anchor/area href, form action,
+	 *  frame/iframe src and meta-refresh become `/web/{url}` rather than
+	 *  `/web/{ts}/{url}`, so they fall back to the default time. Asset URLs
+	 *  (img/script/css/object/srcset/…) ALWAYS keep their timestamp so they
+	 *  resolve to the exact captured snapshot. Applies to HTML responses and
+	 *  the runtime shim. Env: LOCK_TIME (default false). */
 	lockTime: boolean;
 
 	// — Hostname normalizer —

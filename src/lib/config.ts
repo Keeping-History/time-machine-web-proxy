@@ -201,7 +201,8 @@ export function loadConfig(): Config {
 			3650,
 		),
 
-		// URL rewriter — omit timestamp segment from rewritten links
+		// URL rewriter — hide the date from navigation links only (assets keep
+		// their timestamp). See Config.lockTime for the full contract.
 		lockTime: parseBool(process.env.LOCK_TIME, "LOCK_TIME", false),
 
 		// Hostname normalizer

@@ -199,7 +199,9 @@ export class ProxyService {
 				document,
 				this.buildCssFetcher(),
 				time,
-				this.config.lockTime,
+				// CSS references assets → always keep the timestamp, even when
+				// lockTime hides the date from navigation links.
+				false,
 				this.config.proxyBase,
 			);
 			this.logger.debug({ targetUrl, time }, "[inline-css] stylesheet inlining complete");
@@ -246,7 +248,8 @@ export class ProxyService {
 				raw.toString("utf-8"),
 				targetUrl,
 				time,
-				this.config.lockTime,
+				// A standalone stylesheet is an asset → keep the timestamp.
+				false,
 				undefined,
 				undefined,
 				this.config.proxyBase,

@@ -751,23 +751,62 @@ describe("rewriteHtmlUrls — lockTime", () => {
 		expect(r).toContain(`/web/${TIME}/http://www.apple.com/foo`);
 	});
 
-	it("still records discovered assets with their embedded TS even when lockTime is true", () => {
+	it("keeps an image's embedded TS even when lockTime is true (asset, not a link)", () => {
 		const html = `<img src="/web/20010913100802/http://www.ibm.com/img.png">`;
 		const { html: r, discoveredAssets } = rewriteHtmlUrls(html, "http://www.ibm.com", TIME, true);
-		expect(r).toContain("/web/http://www.ibm.com/img.png");
-		expect(r).not.toContain("/web/20010913100802/");
+		// img is an asset → keep the snapshot timestamp so it resolves exactly.
+		expect(r).toContain("/web/20010913100802/http://www.ibm.com/img.png");
 		expect(discoveredAssets).toContainEqual<DiscoveredAsset>({
 			url: "http://www.ibm.com/img.png",
 			embeddedTs: "20010913100802",
 		});
 	});
 
-	it("strips the timestamp from srcset entries when lockTime is true", () => {
+	it("keeps the timestamp on srcset entries when lockTime is true (asset)", () => {
 		const html = `<img srcset="/a.png 1x, /b.png 2x">`;
 		const { html: r } = rewriteHtmlUrls(html, TARGET, TIME, true);
-		expect(r).toContain("/web/http://www.apple.com/a.png 1x");
-		expect(r).toContain("/web/http://www.apple.com/b.png 2x");
-		expect(r).not.toContain(`/web/${TIME}/`);
+		expect(r).toContain(`/web/${TIME}/http://www.apple.com/a.png 1x`);
+		expect(r).toContain(`/web/${TIME}/http://www.apple.com/b.png 2x`);
+	});
+
+	it.each([
+		["form", "action", `<form action="/login">`, "http://www.apple.com/login"],
+		["iframe", "src", `<iframe src="/embed">`, "http://www.apple.com/embed"],
+		["frame", "src", `<frameset><frame src="/embed"></frameset>`, "http://www.apple.com/embed"],
+	])("strips the timestamp from <%s %s> navigation when lockTime is true", (_tag, _attr, html, url) => {
+		const { html: r } = rewriteHtmlUrls(html, TARGET, TIME, true);
+		expect(r).toContain(`/web/${url}`);
+		expect(r).not.toContain(`/web/${TIME}/${url}`);
+	});
+
+	it.each([
+		["img", `<img src="/logo.png">`, "http://www.apple.com/logo.png"],
+		["script", `<script src="/app.js"></script>`, "http://www.apple.com/app.js"],
+		["link", `<link rel="icon" href="/favicon.ico">`, "http://www.apple.com/favicon.ico"],
+		["object", `<object data="/movie.swf"></object>`, "http://www.apple.com/movie.swf"],
+		["video-poster", `<video poster="/thumb.jpg"></video>`, "http://www.apple.com/thumb.jpg"],
+	])("keeps the timestamp on <%s> asset URLs when lockTime is true", (_label, html, url) => {
+		const { html: r } = rewriteHtmlUrls(html, TARGET, TIME, true);
+		expect(r).toContain(`/web/${TIME}/${url}`);
+	});
+
+	it("strips the timestamp from a meta-refresh redirect (navigation) when lockTime is true", () => {
+		const html = `<meta http-equiv="refresh" content="5;url=/next">`;
+		const { html: r } = rewriteHtmlUrls(html, TARGET, TIME, true);
+		expect(r).toContain("url=/web/http://www.apple.com/next");
+		expect(r).not.toContain(`/web/${TIME}/http://www.apple.com/next`);
+	});
+
+	it("keeps the timestamp on CSS url() inside <style> when lockTime is true (asset)", () => {
+		const html = `<style>.a{background:url('/bg.png')}</style>`;
+		const { html: r } = rewriteHtmlUrls(html, TARGET, TIME, true);
+		expect(r).toContain(`/web/${TIME}/http://www.apple.com/bg.png`);
+	});
+
+	it("keeps the timestamp on a style-attribute url() when lockTime is true (asset)", () => {
+		const html = `<div style="background:url('/bg.png')"></div>`;
+		const { html: r } = rewriteHtmlUrls(html, TARGET, TIME, true);
+		expect(r).toContain(`/web/${TIME}/http://www.apple.com/bg.png`);
 	});
 });
 

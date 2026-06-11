@@ -18,8 +18,10 @@
  *   - MutationObserver on document.documentElement (catches dynamic inserts)
  *
  * When `lockTime` is true, generated proxy paths omit the timestamp segment
- * (`/web/<url>`), matching the server-side url-rewriter behaviour so all
- * navigation falls through to the configured default time.
+ * (`/web/<url>`) ONLY for navigation links (anchor href, iframe/frame src),
+ * matching the server-side url-rewriter so navigation falls through to the
+ * configured default time. Asset URLs (img/script/css/fetch/XHR) always keep
+ * their timestamp so they resolve to the exact captured snapshot.
  */
 export const generateShimScript = (
 	ts: string,
@@ -42,16 +44,27 @@ export const generateShimScript = (
   //   /web/<page-ts>im_/<archive-host>/web/<inner-ts>/<url>
   var WAYBACK_ABS_RE = /^(?:https?:)?\\/\\/web\\.archive\\.org\\/web\\/(\\d{1,14})(?:[a-z]{1,3}_)?\\/(https?:\\/\\/.+)$/i;
 
-  function rewrite(url) {
+  // isLink marks a navigation target (anchor href, iframe/frame src). lockTime
+  // strips the timestamp from those only; assets (the default, isLink falsey)
+  // always keep their snapshot timestamp.
+  function isNavTag(tag, attr) {
+    tag = (tag || '').toLowerCase();
+    if (attr === 'href') return tag === 'a' || tag === 'area';
+    if (attr === 'src') return tag === 'iframe' || tag === 'frame';
+    return false;
+  }
+
+  function rewrite(url, isLink) {
     if (!url || typeof url !== 'string') return url;
     var trimmed = url.trim();
     if (!trimmed) return url;
     // Opaque schemes: pass through unchanged.
     if (SKIP_RE.test(trimmed)) return url;
+    var lock = _lock && !!isLink;
     // Wayback-wrapped (absolute or protocol-relative): unwrap to the embedded
     // (ts, url) and emit a clean path-form URL the proxy understands.
     var wm = trimmed.match(WAYBACK_ABS_RE);
-    if (wm) return _lock ? '/web/' + wm[2] : '/web/' + wm[1] + '/' + wm[2];
+    if (wm) return lock ? '/web/' + wm[2] : '/web/' + wm[1] + '/' + wm[2];
     // Absolute URL pointing at the proxy's own origin (emitted by the server-side
     // url-rewriter when proxyBase is set): strip the base so the result is a
     // root-relative /web/... path. Without this, the URL falls through to the
@@ -68,16 +81,17 @@ export const generateShimScript = (
     }
     // Only rewrite http/https.
     if (absolute.indexOf('http://') !== 0 && absolute.indexOf('https://') !== 0) return url;
-    return _lock ? '/web/' + absolute : '/web/' + _ts + 'im_/' + absolute;
+    return lock ? '/web/' + absolute : '/web/' + _ts + 'im_/' + absolute;
   }
 
   // --- window.fetch ---
   var _origFetch = window.fetch;
   window.fetch = function (input, init) {
+    // fetch targets are subresources/APIs → assets, keep the timestamp.
     if (typeof input === 'string') {
-      input = rewrite(input);
+      input = rewrite(input, false);
     } else if (input && typeof input === 'object' && typeof input.url === 'string') {
-      input = new Request(rewrite(input.url), input);
+      input = new Request(rewrite(input.url, false), input);
     }
     return _origFetch.call(this, input, init);
   };
@@ -85,7 +99,8 @@ export const generateShimScript = (
   // --- XMLHttpRequest.prototype.open ---
   var _origXhrOpen = XMLHttpRequest.prototype.open;
   XMLHttpRequest.prototype.open = function (method, url, async, user, password) {
-    var rewritten = rewrite(typeof url === 'string' ? url : String(url));
+    // XHR targets are assets/APIs → keep the timestamp.
+    var rewritten = rewrite(typeof url === 'string' ? url : String(url), false);
     if (arguments.length <= 2) {
       return _origXhrOpen.call(this, method, rewritten);
     }
@@ -93,17 +108,20 @@ export const generateShimScript = (
   };
 
   // --- Element src/href setters ---
+  // Third element marks navigation targets (anchor href, iframe src) whose date
+  // is hidden under lockTime; img/script src and link href are assets (false).
   var PATCHES = [
-    [HTMLImageElement.prototype, 'src'],
-    [HTMLScriptElement.prototype, 'src'],
-    [HTMLIFrameElement.prototype, 'src'],
-    [HTMLLinkElement.prototype, 'href'],
-    [HTMLAnchorElement.prototype, 'href'],
+    [HTMLImageElement.prototype, 'src', false],
+    [HTMLScriptElement.prototype, 'src', false],
+    [HTMLIFrameElement.prototype, 'src', true],
+    [HTMLLinkElement.prototype, 'href', false],
+    [HTMLAnchorElement.prototype, 'href', true],
   ];
 
   PATCHES.forEach(function (pair) {
     var proto = pair[0];
     var prop = pair[1];
+    var isLink = pair[2];
     var desc = Object.getOwnPropertyDescriptor(proto, prop);
     if (!desc || !desc.set) return;
     var origSetter = desc.set;
@@ -112,7 +130,7 @@ export const generateShimScript = (
       enumerable: desc.enumerable,
       get: desc.get,
       set: function (val) {
-        origSetter.call(this, rewrite(val));
+        origSetter.call(this, rewrite(val, isLink));
       },
     });
   });
@@ -121,8 +139,12 @@ export const generateShimScript = (
   var ATTR_RE = /((?:src|href)\\s*=\\s*)(["'])([^"']+)\\2/gi;
 
   function rewriteHtmlString(html) {
+    // The regex sees the attribute but not its element, so we can't tell an
+    // <a href> from a <link href>. Treat document.write URLs as assets (keep
+    // the timestamp); statically-authored links are handled server-side and
+    // .href assignments by the setter patch above.
     return html.replace(ATTR_RE, function (match, prefix, quote, url) {
-      return prefix + quote + rewrite(url) + quote;
+      return prefix + quote + rewrite(url, false) + quote;
     });
   }
 
@@ -143,7 +165,7 @@ export const generateShimScript = (
     URL_ATTRS.forEach(function (attr) {
       var val = node.getAttribute && node.getAttribute(attr);
       if (val) {
-        var rw = rewrite(val);
+        var rw = rewrite(val, isNavTag(node.tagName, attr));
         if (rw !== val) node.setAttribute(attr, rw);
       }
     });

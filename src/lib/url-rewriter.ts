@@ -94,6 +94,20 @@ const TAG_URL_ATTRS: Record<string, readonly string[]> = {
 
 const SRCSET_ATTRS = new Set(["srcset"]);
 
+// Tag → attributes that navigate a document (vs. fetch a subresource). When
+// lockTime is on, ONLY these have their timestamp stripped so the link
+// resolves to the configured default era (ARCHIVE_TIME); every other URL —
+// img/script/css/object/srcset/poster/… — keeps its captured timestamp so the
+// asset resolves to the exact snapshot it was archived at. Meta-refresh is
+// also navigation and is handled in visit() via isMetaRefresh.
+const NAV_LINK_ATTRS: Record<string, readonly string[]> = {
+	a: ["href"],
+	area: ["href"],
+	form: ["action"],
+	frame: ["src"],
+	iframe: ["src"],
+};
+
 // `<meta http-equiv="refresh" content="<delay>;url=<url>">`. The URL portion
 // may be absent (refresh same page) — return unchanged then. Case-insensitive
 // on the `url=` separator; tolerates surrounding single/double quotes.
@@ -334,22 +348,28 @@ const visit = (
 	if (isElement(node)) {
 		const tag = node.tagName.toLowerCase();
 		const urlAttrs = TAG_URL_ATTRS[tag];
+		const navAttrs = NAV_LINK_ATTRS[tag];
 		const metaRefresh = isMetaRefresh(node);
 		for (const attr of node.attrs) {
 			if (urlAttrs?.includes(attr.name)) {
+				// lockTime hides the date from navigation links only. Asset URLs
+				// (img/script/object/srcset/…) always keep their timestamp.
+				const attrLock = lockTime && (navAttrs?.includes(attr.name) ?? false);
 				attr.value = SRCSET_ATTRS.has(attr.name)
-					? rewriteSrcsetValue(attr.value, targetUrl, time, lockTime, collect, assets, proxyBase)
-					: rewriteOneUrl(attr.value, targetUrl, time, lockTime, collect, assets, proxyBase);
+					? rewriteSrcsetValue(attr.value, targetUrl, time, attrLock, collect, assets, proxyBase)
+					: rewriteOneUrl(attr.value, targetUrl, time, attrLock, collect, assets, proxyBase);
 			} else if (metaRefresh && attr.name === "content") {
+				// meta-refresh navigates the document → honor lockTime.
 				attr.value = rewriteMetaRefresh(attr.value, targetUrl, time, lockTime, collect, assets, proxyBase);
 			} else if (attr.name === "style") {
-				attr.value = rewriteCssUrls(attr.value, targetUrl, time, lockTime, collect, assets, proxyBase);
+				// Inline CSS references assets → always keep the timestamp.
+				attr.value = rewriteCssUrls(attr.value, targetUrl, time, false, collect, assets, proxyBase);
 			}
 		}
 		if (tag === "style") {
 			for (const child of node.childNodes) {
 				if (isTextNode(child)) {
-					child.value = rewriteCssUrls(child.value, targetUrl, time, lockTime, collect, assets, proxyBase);
+					child.value = rewriteCssUrls(child.value, targetUrl, time, false, collect, assets, proxyBase);
 				}
 			}
 		}

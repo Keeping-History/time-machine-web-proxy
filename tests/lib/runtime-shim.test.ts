@@ -550,11 +550,13 @@ describe("rewrite() — wayback-wrapped URL unwrap preserves the embedded timest
 
 // ─── lockTime=true mode ───────────────────────────────────────────────────────
 //
-// When lockTime=true the shim must emit /web/<url> paths — without any
-// timestamp segment — so all navigation falls through to the server's default
-// configured time.  If the timestamp leaks into the rewritten URL, requests
-// will resolve to a pinned snapshot instead of the server-default, breaking the
-// "lock the era, not the snapshot" contract.
+// When lockTime=true the shim strips the timestamp ONLY from navigation links
+// (anchor href, iframe/frame src) so browsing falls through to the server's
+// default configured time. Asset URLs (fetch/XHR, img/script src, link href,
+// document.write) ALWAYS keep their timestamp so they resolve to the exact
+// captured snapshot — i.e. assets behave the same as in non-lock mode
+// (/web/<ts>im_/<url>). This is the "lock the era for navigation, pin the
+// snapshot for assets" contract.
 
 function installShimLocked(
 	ts: string = TS,
@@ -577,8 +579,8 @@ function installShimLocked(
 	new Function(script)();
 }
 
-describe("lockTime=true — fetch rewrites omit the timestamp segment", () => {
-	it("produces /web/<absolute-url> (no timestamp) for a relative path", async () => {
+describe("lockTime=true — fetch targets are assets and keep the timestamp", () => {
+	it("keeps the timestamp for a relative path", async () => {
 		const captured: string[] = [];
 
 		const realFetch = window.fetch;
@@ -593,13 +595,12 @@ describe("lockTime=true — fetch rewrites omit the timestamp segment", () => {
 		installShim();
 		window.fetch = realFetch;
 
-		// Timestamp must be absent — if it were present the page would pin to a
-		// specific snapshot rather than the server-configured default time.
-		expect(captured[0]).toBe("/web/http://www.example.com/img/logo.png");
-		expect(captured[0]).not.toContain(TS);
+		// fetch is a subresource → asset → keeps its snapshot timestamp even
+		// under lockTime (same as non-lock mode).
+		expect(captured[0]).toBe(`/web/${TS}im_/http://www.example.com/img/logo.png`);
 	});
 
-	it("produces /web/<absolute-url> for an absolute http URL", async () => {
+	it("keeps the timestamp for an absolute http URL", async () => {
 		const captured: string[] = [];
 
 		const realFetch = window.fetch;
@@ -614,13 +615,12 @@ describe("lockTime=true — fetch rewrites omit the timestamp segment", () => {
 		installShim();
 		window.fetch = realFetch;
 
-		expect(captured[0]).toBe("/web/http://other.com/asset.js");
-		expect(captured[0]).not.toContain(TS);
+		expect(captured[0]).toBe(`/web/${TS}im_/http://other.com/asset.js`);
 	});
 });
 
-describe("lockTime=true — src setter rewrites omit the timestamp segment", () => {
-	it("HTMLImageElement.src produces /web/<url> path (no timestamp)", () => {
+describe("lockTime=true — element src setters: assets keep, frames drop the timestamp", () => {
+	it("HTMLImageElement.src keeps the timestamp (asset)", () => {
 		installShimLocked();
 
 		const img = document.createElement("img");
@@ -632,12 +632,11 @@ describe("lockTime=true — src setter rewrites omit the timestamp segment", () 
 		// The browser resolves .src against document.baseURI; check via URL parse.
 		const resolved = new URL(img.src);
 		expect(resolved.pathname + resolved.search).toBe(
-			"/web/http://www.example.com/img/photo.png",
+			`/web/${TS}im_/http://www.example.com/img/photo.png`,
 		);
-		expect(img.src).not.toContain(TS);
 	});
 
-	it("HTMLScriptElement.src produces /web/<url> path (no timestamp)", () => {
+	it("HTMLScriptElement.src keeps the timestamp (asset)", () => {
 		installShimLocked();
 
 		const el = document.createElement("script");
@@ -648,9 +647,8 @@ describe("lockTime=true — src setter rewrites omit the timestamp segment", () 
 
 		const resolved = new URL(el.src);
 		expect(resolved.pathname + resolved.search).toBe(
-			"/web/http://www.example.com/js/app.js",
+			`/web/${TS}im_/http://www.example.com/js/app.js`,
 		);
-		expect(el.src).not.toContain(TS);
 	});
 
 	it("HTMLIFrameElement.src produces /web/<url> path (no timestamp)", () => {
@@ -670,8 +668,8 @@ describe("lockTime=true — src setter rewrites omit the timestamp segment", () 
 	});
 });
 
-describe("lockTime=true — href setter rewrites omit the timestamp segment", () => {
-	it("HTMLLinkElement.href produces /web/<url> path (no timestamp)", () => {
+describe("lockTime=true — element href setters: assets keep, anchors drop the timestamp", () => {
+	it("HTMLLinkElement.href keeps the timestamp (asset/css)", () => {
 		installShimLocked();
 
 		const el = document.createElement("link");
@@ -682,9 +680,8 @@ describe("lockTime=true — href setter rewrites omit the timestamp segment", ()
 
 		const resolved = new URL(el.href);
 		expect(resolved.pathname + resolved.search).toBe(
-			"/web/http://www.example.com/css/style.css",
+			`/web/${TS}im_/http://www.example.com/css/style.css`,
 		);
-		expect(el.href).not.toContain(TS);
 	});
 
 	it("HTMLAnchorElement.href produces /web/<url> path (no timestamp)", () => {
@@ -704,8 +701,8 @@ describe("lockTime=true — href setter rewrites omit the timestamp segment", ()
 	});
 });
 
-describe("lockTime=true — document.write rewrites omit the timestamp segment", () => {
-	it("document.write rewrites src= without a timestamp", () => {
+describe("lockTime=true — document.write keeps the timestamp (no element context)", () => {
+	it("document.write rewrites src= keeping the timestamp", () => {
 		const captured: string[] = [];
 
 		const realWrite = document.write.bind(document);
@@ -719,11 +716,14 @@ describe("lockTime=true — document.write rewrites omit the timestamp segment",
 		document.write = realWrite;
 		installShim();
 
-		expect(captured[0]).toContain("/web/http://www.example.com/img/banner.gif");
-		expect(captured[0]).not.toContain(TS);
+		expect(captured[0]).toContain(`/web/${TS}im_/http://www.example.com/img/banner.gif`);
 	});
 
-	it("document.write rewrites href= without a timestamp", () => {
+	it("document.write rewrites href= keeping the timestamp (treated as asset)", () => {
+		// The document.write regex sees the attribute but not its element, so it
+		// can't distinguish <a href> from <link href>; it conservatively keeps
+		// the timestamp. Statically-authored links are stripped server-side and
+		// .href assignments by the setter patch.
 		const captured: string[] = [];
 
 		const realWrite = document.write.bind(document);
@@ -737,13 +737,12 @@ describe("lockTime=true — document.write rewrites omit the timestamp segment",
 		document.write = realWrite;
 		installShim();
 
-		expect(captured[0]).toContain("/web/http://www.example.com/contact");
-		expect(captured[0]).not.toContain(TS);
+		expect(captured[0]).toContain(`/web/${TS}im_/http://www.example.com/contact`);
 	});
 });
 
-describe("lockTime=true — wayback-wrapped URL unwrap drops the embedded timestamp", () => {
-	it("unwraps http://web.archive.org/web/<ts>/<url> to /web/<url> (no ts) via fetch", async () => {
+describe("lockTime=true — wayback-wrapped asset URLs keep the embedded timestamp via fetch", () => {
+	it("unwraps http://web.archive.org/web/<ts>/<url> to /web/<ts>/<url> (asset keeps ts)", async () => {
 		const captured: string[] = [];
 
 		const realFetch = window.fetch;
@@ -758,13 +757,11 @@ describe("lockTime=true — wayback-wrapped URL unwrap drops the embedded timest
 		installShim();
 		window.fetch = realFetch;
 
-		// lockTime strips the embedded ts — requests must not pin to a snapshot.
-		expect(captured[0]).toBe("/web/http://other.com/asset.js");
-		expect(captured[0]).not.toContain(INNER_TS);
-		expect(captured[0]).not.toContain(TS);
+		// fetch is an asset → the embedded snapshot ts is preserved.
+		expect(captured[0]).toBe(`/web/${INNER_TS}/http://other.com/asset.js`);
 	});
 
-	it("unwraps https://web.archive.org/web/<ts>im_/<url> to /web/<url> (no ts) via fetch", async () => {
+	it("unwraps https://web.archive.org/web/<ts>im_/<url> keeping the embedded ts", async () => {
 		const captured: string[] = [];
 
 		const realFetch = window.fetch;
@@ -779,8 +776,7 @@ describe("lockTime=true — wayback-wrapped URL unwrap drops the embedded timest
 		installShim();
 		window.fetch = realFetch;
 
-		expect(captured[0]).toBe("/web/https://cdn.example.com/r.css");
-		expect(captured[0]).not.toContain(INNER_TS);
+		expect(captured[0]).toBe(`/web/${INNER_TS}/https://cdn.example.com/r.css`);
 	});
 });
 
