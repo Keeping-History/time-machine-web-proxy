@@ -2,19 +2,12 @@
 //
 // The exact worker calls `directClient.fetchAtRequestedTime(url, time)` and
 // lets Wayback's `im_` endpoint pick the nearest capture server-side — the
-// CDX snapshot-resolver is no longer involved. The crawl worker reads cached
-// root HTML, extracts same-domain links via rewriteHtmlUrls, and fans out to
-// archive-exact BullMQ jobs — zero CDX calls.
-//
-// The chunk worker fetches one CDX page per job, deduplicates captures to
-// one-per-URL (closest timestamp), and enqueues archive-exact jobs.
+// CDX snapshot-resolver is no longer involved. When an exact job carries crawl
+// provenance and the fetched page is HTML, the worker discovers same-host
+// links (discoverNavLinks) and enqueues them at depth+1 (recursive BFS crawl),
+// bounded by depth and a Redis page budget. The crawl queue just seeds depth 0.
 
 // --- Module mocks (hoisted before imports) -----------------------------------
-
-const cachedCdxFetchMock = jest.fn();
-jest.mock("../../src/lib/cdx-cache", () => ({
-	cachedCdxFetch: (...args: unknown[]) => cachedCdxFetchMock(...args),
-}));
 
 jest.mock("node:fs", () => ({
 	promises: {
@@ -23,7 +16,7 @@ jest.mock("node:fs", () => ({
 }));
 
 jest.mock("../../src/lib/url-rewriter", () => ({
-	rewriteHtmlUrls: jest.fn(),
+	discoverNavLinks: jest.fn(() => []),
 	stripWaybackToolbar: jest.fn((html: string) => html),
 }));
 
@@ -73,13 +66,42 @@ import { promises as fsPromises } from "node:fs";
 import { Readable } from "node:stream";
 import type pino from "pino";
 import type { RequestedResult, ResolvedResult } from "../../src/clients/wayback-direct-client";
-import { rewriteHtmlUrls, stripWaybackToolbar } from "../../src/lib/url-rewriter";
+import { discoverNavLinks, stripWaybackToolbar } from "../../src/lib/url-rewriter";
 import {
 	type ArchiveDirectClient,
 	attachQueueLogger,
 	startArchiveWorkers,
 } from "../../src/queue/archive-worker";
-import { QUEUE_CRAWL, QUEUE_CRAWL_CHUNK, QUEUE_EXACT } from "../../src/queue/jobs";
+import { QUEUE_CRAWL, QUEUE_EXACT } from "../../src/queue/jobs";
+
+// Minimal in-memory Redis stub for crawl seen-set + page-budget. Only the
+// commands the worker uses (sadd, incr, expire) are implemented.
+interface RedisStub {
+	sadd: jest.Mock;
+	incr: jest.Mock;
+	expire: jest.Mock;
+	_seen: Set<string>;
+	_count: number;
+}
+
+function makeRedis(): RedisStub {
+	const seen = new Set<string>();
+	const stub: RedisStub = {
+		_seen: seen,
+		_count: 0,
+		sadd: jest.fn(async (_key: string, member: string) => {
+			if (seen.has(member)) return 0;
+			seen.add(member);
+			return 1;
+		}),
+		incr: jest.fn(async () => {
+			stub._count += 1;
+			return stub._count;
+		}),
+		expire: jest.fn().mockResolvedValue(1),
+	};
+	return stub;
+}
 
 // --- Helpers -----------------------------------------------------------------
 
@@ -201,8 +223,8 @@ function baseOpts(
 		workerConcurrency: 2,
 		workerRateLimitPerSec: 1,
 		redis: null,
-		cdxCacheEnabled: false,
-		crawlWindowDays: 30,
+		crawlMaxDepth: 3,
+		crawlMaxPages: 1000,
 		...overrides,
 	};
 }
@@ -217,37 +239,35 @@ beforeEach(() => {
 	WorkerMock.mockClear();
 	rateLimitErrorMock.mockClear();
 	workerInstances.length = 0;
-	cachedCdxFetchMock.mockClear();
+	(discoverNavLinks as jest.Mock).mockReset().mockReturnValue([]);
+	(stripWaybackToolbar as jest.Mock).mockReset().mockImplementation((html: string) => html);
 });
 
 // --- startArchiveWorkers: returned shape + Worker construction ---------------
 
 describe("startArchiveWorkers", () => {
-	it("returns an object with `exact`, `crawl`, and `chunk` Worker instances", () => {
+	it("returns an object with `exact` and `crawl` Worker instances", () => {
 		const result = startArchiveWorkers(baseOpts());
 		expect(result.exact).toBeDefined();
 		expect(result.crawl).toBeDefined();
-		expect(result.chunk).toBeDefined();
 	});
 
-	it("constructs three Workers, one per queue, in the correct order", () => {
+	it("constructs two Workers, one per queue, in the correct order", () => {
 		startArchiveWorkers(baseOpts());
-		expect(WorkerMock).toHaveBeenCalledTimes(3);
-		expect(workerInstances.map((w) => w.name)).toEqual([QUEUE_EXACT, QUEUE_CRAWL, QUEUE_CRAWL_CHUNK]);
+		expect(WorkerMock).toHaveBeenCalledTimes(2);
+		expect(workerInstances.map((w) => w.name)).toEqual([QUEUE_EXACT, QUEUE_CRAWL]);
 	});
 
-	it("passes the BullMQ prefix to ALL THREE Workers (critical — default 'bull' breaks dispatch)", () => {
+	it("passes the BullMQ prefix to both Workers (critical — default 'bull' breaks dispatch)", () => {
 		startArchiveWorkers(baseOpts({ bullmqPrefix: "tm" }));
 		expect(findWorker(QUEUE_EXACT).opts.prefix).toBe("tm");
 		expect(findWorker(QUEUE_CRAWL).opts.prefix).toBe("tm");
-		expect(findWorker(QUEUE_CRAWL_CHUNK).opts.prefix).toBe("tm");
 	});
 
 	it("threads a non-default prefix through unchanged", () => {
 		startArchiveWorkers(baseOpts({ bullmqPrefix: "custom-ns" }));
 		expect(findWorker(QUEUE_EXACT).opts.prefix).toBe("custom-ns");
 		expect(findWorker(QUEUE_CRAWL).opts.prefix).toBe("custom-ns");
-		expect(findWorker(QUEUE_CRAWL_CHUNK).opts.prefix).toBe("custom-ns");
 	});
 
 	it("exact worker uses configured concurrency, crawl worker is concurrency: 1", () => {
@@ -256,11 +276,10 @@ describe("startArchiveWorkers", () => {
 		expect(findWorker(QUEUE_CRAWL).opts.concurrency).toBe(1);
 	});
 
-	it("applies the rate limiter to ALL THREE workers with duration: 1000ms", () => {
+	it("applies the rate limiter to both workers with duration: 1000ms", () => {
 		startArchiveWorkers(baseOpts({ workerRateLimitPerSec: 1 }));
 		expect(findWorker(QUEUE_EXACT).opts.limiter).toEqual({ max: 1, duration: 1000 });
 		expect(findWorker(QUEUE_CRAWL).opts.limiter).toEqual({ max: 1, duration: 1000 });
-		expect(findWorker(QUEUE_CRAWL_CHUNK).opts.limiter).toEqual({ max: 1, duration: 1000 });
 	});
 
 	it("crawl worker sets lockDuration / stalledInterval / maxStalledCount for long crawls", () => {
@@ -275,13 +294,11 @@ describe("startArchiveWorkers", () => {
 		startArchiveWorkers(baseOpts());
 		expect(findWorker(QUEUE_EXACT).on).toHaveBeenCalledWith("failed", expect.any(Function));
 		expect(findWorker(QUEUE_CRAWL).on).toHaveBeenCalledWith("failed", expect.any(Function));
-		expect(findWorker(QUEUE_CRAWL_CHUNK).on).toHaveBeenCalledWith("failed", expect.any(Function));
 	});
 
-	it("opts includes enqueueExactJob callback and does not include cdxFetch", () => {
+	it("opts includes enqueueExactJob callback", () => {
 		const opts = baseOpts();
 		expect(typeof opts.enqueueExactJob).toBe("function");
-		expect("cdxFetch" in opts).toBe(false);
 	});
 });
 
@@ -776,16 +793,9 @@ describe("exact worker processor", () => {
 	});
 });
 
-// --- Crawl processor ---------------------------------------------------------
+// --- Crawl processor (BFS seed) ----------------------------------------------
 
-describe("crawl worker processor", () => {
-	beforeEach(() => {
-		(fsPromises.readFile as jest.Mock).mockReset();
-		(rewriteHtmlUrls as jest.Mock).mockReset();
-		// Default: stripWaybackToolbar is a pass-through
-		(stripWaybackToolbar as jest.Mock).mockImplementation((html: string) => html);
-	});
-
+describe("crawl worker processor (BFS seed)", () => {
 	it("rejects invalid DomainCrawlJob payloads via the asserter", async () => {
 		startArchiveWorkers(baseOpts());
 		const worker = findWorker(QUEUE_CRAWL);
@@ -794,12 +804,68 @@ describe("crawl worker processor", () => {
 				id: "bad",
 				data: { host: "", time: "20200101000000" },
 				token: "tk",
-				extendLock: jest.fn(),
+				updateProgress: jest.fn().mockResolvedValue(undefined),
 			}),
 		).rejects.toThrow(/Invalid job/);
 	});
 
-	it("'failed' event listener on crawl worker logs jobId, attemptsMade, data, err.message", async () => {
+	it("seeds the homepage as a crawl-flagged exact job at depth 0", async () => {
+		const enqueueExactJob = jest.fn().mockResolvedValue(undefined);
+		startArchiveWorkers(baseOpts({ enqueueExactJob }));
+		const worker = findWorker(QUEUE_CRAWL);
+		await worker.processor(makeCrawlJob("c-seed", { host: "example.com", time: "20200101000000" }));
+		expect(enqueueExactJob).toHaveBeenCalledTimes(1);
+		expect(enqueueExactJob).toHaveBeenCalledWith("http://example.com/", "20200101000000", {
+			rootHost: "example.com",
+			rootTime: "20200101000000",
+			depth: 0,
+		});
+	});
+
+	it("records the homepage in the Redis seen-set when redis is present", async () => {
+		const redis = makeRedis();
+		const enqueueExactJob = jest.fn().mockResolvedValue(undefined);
+		startArchiveWorkers(baseOpts({ redis, enqueueExactJob }));
+		const worker = findWorker(QUEUE_CRAWL);
+		await worker.processor(makeCrawlJob("c-seed-seen", { host: "example.com", time: "20200101000000" }));
+		expect(redis.sadd).toHaveBeenCalledWith(
+			"tm-crawl:seen:example.com:20200101000000",
+			"http://example.com/",
+		);
+		expect(redis.expire).toHaveBeenCalled();
+	});
+
+	it("seeds even without redis (recursion just won't dedup)", async () => {
+		const enqueueExactJob = jest.fn().mockResolvedValue(undefined);
+		startArchiveWorkers(baseOpts({ redis: null, enqueueExactJob }));
+		const worker = findWorker(QUEUE_CRAWL);
+		await worker.processor(makeCrawlJob("c-seed-noredis", { host: "example.com", time: "20200101000000" }));
+		expect(enqueueExactJob).toHaveBeenCalledWith("http://example.com/", "20200101000000", {
+			rootHost: "example.com",
+			rootTime: "20200101000000",
+			depth: 0,
+		});
+	});
+
+	it("emits picked_up then download_done", async () => {
+		const enqueueExactJob = jest.fn().mockResolvedValue(undefined);
+		startArchiveWorkers(baseOpts({ enqueueExactJob }));
+		const worker = findWorker(QUEUE_CRAWL);
+		const job = makeCrawlJob("c-seed-stages", { host: "example.com", time: "20200101000000" });
+		await worker.processor(job);
+		const stages = job.updateProgress.mock.calls.map((c) => (c[0] as { stage: string }).stage);
+		expect(stages).toEqual(["picked_up", "download_done"]);
+	});
+
+	it("does not call directClient", async () => {
+		const directClient = defaultDirectClient();
+		startArchiveWorkers(baseOpts({ directClient, enqueueExactJob: jest.fn().mockResolvedValue(undefined) }));
+		const worker = findWorker(QUEUE_CRAWL);
+		await worker.processor(makeCrawlJob("c-seed-nodirect", { host: "example.com", time: "20200101000000" }));
+		expect(directClient.fetchAtRequestedTime).not.toHaveBeenCalled();
+	});
+
+	it("'failed' event listener on crawl worker logs jobId, attemptsMade, err", async () => {
 		const logger = makeLogger();
 		startArchiveWorkers(baseOpts({ logger }));
 		const worker = findWorker(QUEUE_CRAWL);
@@ -813,251 +879,160 @@ describe("crawl worker processor", () => {
 			new Error("crawl boom"),
 		);
 		expect(logger.error).toHaveBeenCalledWith(
-			expect.objectContaining({
-				jobId: "crawl-fail-1",
-				attemptsMade: 2,
-				err: expect.any(Error),
-			}),
+			expect.objectContaining({ jobId: "crawl-fail-1", attemptsMade: 2, err: expect.any(Error) }),
 			expect.stringContaining("failed"),
 		);
 	});
+});
 
-	// --- MISS path ---
+// --- Exact worker: recursive crawl (BFS walk) --------------------------------
 
-	it("calls cache.lookup for http://{host}/ then https://{host}/ before concluding MISS", async () => {
+describe("exact worker recursive crawl", () => {
+	const CRAWL = { rootHost: "example.com", rootTime: "20200101000000", depth: 0 };
+
+	function htmlDirect(): ArchiveDirectClient {
+		return {
+			fetchAtRequestedTime: jest.fn(async () => ({
+				outcome: "ok" as const,
+				body: Readable.from([Buffer.from("<html></html>")]),
+				contentType: "text/html",
+				resolvedTime: "20200115000000",
+			})),
+			fetchAtResolvedTime: jest.fn(),
+		};
+	}
+
+	it("discovers same-host links from a fetched HTML page and enqueues them at depth+1", async () => {
 		const cache = makeCache();
-		cache.lookup.mockResolvedValue(null);
-		const enqueueExactJob = jest.fn().mockResolvedValue(undefined);
-		startArchiveWorkers(baseOpts({ cache, enqueueExactJob }));
-		const worker = findWorker(QUEUE_CRAWL);
-		await worker.processor(makeCrawlJob("c-miss-probe", { host: "example.com", time: "20200101000000" }));
-		expect(cache.lookup).toHaveBeenCalledTimes(2);
-		expect(cache.lookup).toHaveBeenNthCalledWith(1, "http://example.com/", "20200101000000");
-		expect(cache.lookup).toHaveBeenNthCalledWith(2, "https://example.com/", "20200101000000");
-	});
-
-	it("MISS: enqueues exact job for http://{host}/ and emits download_done with filesSeen:0", async () => {
-		const cache = makeCache();
-		cache.lookup.mockResolvedValue(null);
-		const enqueueExactJob = jest.fn().mockResolvedValue(undefined);
-		startArchiveWorkers(baseOpts({ cache, enqueueExactJob }));
-		const worker = findWorker(QUEUE_CRAWL);
-		const job = makeCrawlJob("c-miss-enqueue", { host: "example.com", time: "20200101000000" });
-		await worker.processor(job);
-		expect(enqueueExactJob).toHaveBeenCalledTimes(1);
-		expect(enqueueExactJob).toHaveBeenCalledWith("http://example.com/", "20200101000000");
-		const doneCall = job.updateProgress.mock.calls.find(
-			(c) => (c[0] as { stage: string }).stage === "download_done",
-		);
-		expect(doneCall?.[0]).toMatchObject({ stage: "download_done", filesSeen: 0 });
-	});
-
-	it("MISS: emits picked_up then download_done — no download_start", async () => {
-		const cache = makeCache();
-		cache.lookup.mockResolvedValue(null);
-		const enqueueExactJob = jest.fn().mockResolvedValue(undefined);
-		startArchiveWorkers(baseOpts({ cache, enqueueExactJob }));
-		const worker = findWorker(QUEUE_CRAWL);
-		const job = makeCrawlJob("c-miss-stages", { host: "example.com", time: "20200101000000" });
-		await worker.processor(job);
-		const stages = job.updateProgress.mock.calls.map((c) => (c[0] as { stage: string }).stage);
-		expect(stages).toEqual(["picked_up", "download_done"]);
-	});
-
-	it("MISS: does not call directClient", async () => {
-		const cache = makeCache();
-		cache.lookup.mockResolvedValue(null);
-		const directClient = defaultDirectClient();
-		const enqueueExactJob = jest.fn().mockResolvedValue(undefined);
-		startArchiveWorkers(baseOpts({ cache, directClient, enqueueExactJob }));
-		const worker = findWorker(QUEUE_CRAWL);
-		await worker.processor(makeCrawlJob("c-miss-direct", { host: "example.com", time: "20200101000000" }));
-		expect(directClient.fetchAtRequestedTime).not.toHaveBeenCalled();
-		expect(directClient.fetchAtResolvedTime).not.toHaveBeenCalled();
-	});
-
-	// --- HIT path ---
-
-	it("HIT on http://: breaks out of candidate loop, does not probe https://", async () => {
-		const cache = makeCache();
-		cache.lookup.mockResolvedValue({ absPath: "/cache/root.html", contentType: "text/html" });
+		cache.lookup.mockResolvedValue({ absPath: "/c/index.html", contentType: "text/html" });
 		(fsPromises.readFile as jest.Mock).mockResolvedValue(Buffer.from("<html></html>"));
-		(rewriteHtmlUrls as jest.Mock).mockReturnValue({ html: "", discoveredAssets: [] });
-		startArchiveWorkers(baseOpts({ cache }));
-		const worker = findWorker(QUEUE_CRAWL);
-		await worker.processor(makeCrawlJob("c-hit-http", { host: "example.com", time: "20200101000000" }));
-		expect(cache.lookup).toHaveBeenCalledTimes(1);
-		expect(cache.lookup).toHaveBeenCalledWith("http://example.com/", "20200101000000");
-	});
-
-	it("HIT on https://: uses https:// rootUrl when http:// misses", async () => {
-		const cache = makeCache();
-		cache.lookup
-			.mockResolvedValueOnce(null)
-			.mockResolvedValueOnce({ absPath: "/cache/root.html", contentType: "text/html" });
-		(fsPromises.readFile as jest.Mock).mockResolvedValue(Buffer.from("<html></html>"));
-		(rewriteHtmlUrls as jest.Mock).mockReturnValue({ html: "", discoveredAssets: [] });
+		(discoverNavLinks as jest.Mock).mockReturnValue([
+			"http://example.com/US/",
+			"http://example.com/WORLD/",
+		]);
+		const redis = makeRedis();
 		const enqueueExactJob = jest.fn().mockResolvedValue(undefined);
-		startArchiveWorkers(baseOpts({ cache, enqueueExactJob }));
-		const worker = findWorker(QUEUE_CRAWL);
-		await worker.processor(makeCrawlJob("c-hit-https", { host: "example.com", time: "20200101000000" }));
-		expect(cache.lookup).toHaveBeenCalledTimes(2);
-		// rewriteHtmlUrls receives https:// as the base URL
-		expect(rewriteHtmlUrls as jest.Mock).toHaveBeenCalledWith(
-			expect.any(String),
-			"https://example.com/",
-			"20200101000000",
-			false,
-		);
-	});
-
-	it("HIT: reads file at hit.absPath via fs.readFile", async () => {
-		const cache = makeCache();
-		cache.lookup.mockResolvedValue({ absPath: "/cache/v2/20200101/example.com/index.html", contentType: "text/html" });
-		(fsPromises.readFile as jest.Mock).mockResolvedValue(Buffer.from("<html></html>"));
-		(rewriteHtmlUrls as jest.Mock).mockReturnValue({ html: "", discoveredAssets: [] });
-		startArchiveWorkers(baseOpts({ cache }));
-		const worker = findWorker(QUEUE_CRAWL);
-		await worker.processor(makeCrawlJob("c-readfile", { host: "example.com", time: "20200101000000" }));
-		expect(fsPromises.readFile).toHaveBeenCalledWith("/cache/v2/20200101/example.com/index.html");
-	});
-
-	it("HIT: calls stripWaybackToolbar then passes result to rewriteHtmlUrls with rootUrl + time + false", async () => {
-		const cache = makeCache();
-		cache.lookup.mockResolvedValue({ absPath: "/cache/root.html", contentType: "text/html" });
-		(fsPromises.readFile as jest.Mock).mockResolvedValue(Buffer.from("raw-html-content"));
-		(stripWaybackToolbar as jest.Mock).mockReturnValue("stripped-html");
-		(rewriteHtmlUrls as jest.Mock).mockReturnValue({ html: "", discoveredAssets: [] });
-		startArchiveWorkers(baseOpts({ cache }));
-		const worker = findWorker(QUEUE_CRAWL);
-		await worker.processor(makeCrawlJob("c-strip", { host: "example.com", time: "20200101000000" }));
-		expect(stripWaybackToolbar).toHaveBeenCalledWith("raw-html-content");
-		expect(rewriteHtmlUrls).toHaveBeenCalledWith("stripped-html", "http://example.com/", "20200101000000", false);
-	});
-
-	it("HIT: enqueues exact jobs only for same-host links, external domains skipped", async () => {
-		const cache = makeCache();
-		cache.lookup.mockResolvedValue({ absPath: "/cache/root.html", contentType: "text/html" });
-		(fsPromises.readFile as jest.Mock).mockResolvedValue(Buffer.from("<html></html>"));
-		(rewriteHtmlUrls as jest.Mock).mockReturnValue({
-			html: "",
-			discoveredAssets: [
-				{ url: "http://example.com/page1", embeddedTs: "20200101120000" },
-				{ url: "http://example.com/page2", embeddedTs: "20200101130000" },
-				{ url: "http://other.com/nope", embeddedTs: "20200101140000" },
-				{ url: "https://cdn.example.net/lib.js", embeddedTs: "20200101150000" },
-			],
+		startArchiveWorkers(baseOpts({ cache, redis, directClient: htmlDirect(), enqueueExactJob }));
+		const worker = findWorker(QUEUE_EXACT);
+		await worker.processor(makeJob("e-recurse", {
+			url: "http://example.com/",
+			time: "20200101000000",
+			crawl: CRAWL,
+		}));
+		expect(enqueueExactJob).toHaveBeenCalledWith("http://example.com/US/", "20200101000000", {
+			rootHost: "example.com",
+			rootTime: "20200101000000",
+			depth: 1,
 		});
-		const enqueueExactJob = jest.fn().mockResolvedValue(undefined);
-		startArchiveWorkers(baseOpts({ cache, enqueueExactJob }));
-		const worker = findWorker(QUEUE_CRAWL);
-		await worker.processor(makeCrawlJob("c-filter", { host: "example.com", time: "20200101000000" }));
-		expect(enqueueExactJob).toHaveBeenCalledTimes(2);
-		expect(enqueueExactJob).toHaveBeenCalledWith("http://example.com/page1", "20200101120000");
-		expect(enqueueExactJob).toHaveBeenCalledWith("http://example.com/page2", "20200101130000");
-	});
-
-	it("HIT: passes link.embeddedTs to enqueueExactJob — NOT the crawl job time", async () => {
-		const cache = makeCache();
-		cache.lookup.mockResolvedValue({ absPath: "/cache/root.html", contentType: "text/html" });
-		(fsPromises.readFile as jest.Mock).mockResolvedValue(Buffer.from("<html></html>"));
-		(rewriteHtmlUrls as jest.Mock).mockReturnValue({
-			html: "",
-			discoveredAssets: [
-				{ url: "http://example.com/about", embeddedTs: "19991231235959" },
-			],
+		expect(enqueueExactJob).toHaveBeenCalledWith("http://example.com/WORLD/", "20200101000000", {
+			rootHost: "example.com",
+			rootTime: "20200101000000",
+			depth: 1,
 		});
-		const enqueueExactJob = jest.fn().mockResolvedValue(undefined);
-		startArchiveWorkers(baseOpts({ cache, enqueueExactJob }));
-		const worker = findWorker(QUEUE_CRAWL);
-		// Crawl job time is different from embeddedTs
-		await worker.processor(makeCrawlJob("c-embeddedts", { host: "example.com", time: "20200101000000" }));
-		expect(enqueueExactJob).toHaveBeenCalledWith("http://example.com/about", "19991231235959");
-		expect(enqueueExactJob).not.toHaveBeenCalledWith(expect.any(String), "20200101000000");
 	});
 
-	it("HIT: emits download_file per enqueued job; download_done.filesSeen equals enqueued count", async () => {
+	it("does NOT recurse on a non-HTML asset", async () => {
 		const cache = makeCache();
-		cache.lookup.mockResolvedValue({ absPath: "/cache/root.html", contentType: "text/html" });
-		(fsPromises.readFile as jest.Mock).mockResolvedValue(Buffer.from("<html></html>"));
-		(rewriteHtmlUrls as jest.Mock).mockReturnValue({
-			html: "",
-			discoveredAssets: [
-				{ url: "http://example.com/a", embeddedTs: "20200101120000" },
-				{ url: "http://example.com/b", embeddedTs: "20200101130000" },
-				{ url: "http://example.com/c", embeddedTs: "20200101140000" },
-			],
-		});
-		startArchiveWorkers(baseOpts({ cache }));
-		const worker = findWorker(QUEUE_CRAWL);
-		const job = makeCrawlJob("c-progress", { host: "example.com", time: "20200101000000" });
-		await worker.processor(job);
-		const stages = job.updateProgress.mock.calls.map((c) => (c[0] as { stage: string }).stage);
-		expect(stages.filter((s) => s === "download_file")).toHaveLength(3);
-		const doneCall = job.updateProgress.mock.calls.find(
-			(c) => (c[0] as { stage: string }).stage === "download_done",
-		);
-		expect(doneCall?.[0]).toMatchObject({ stage: "download_done", filesSeen: 3 });
-	});
-
-	it("HIT: no same-host links → emits download_done with filesSeen:0", async () => {
-		const cache = makeCache();
-		cache.lookup.mockResolvedValue({ absPath: "/cache/root.html", contentType: "text/html" });
-		(fsPromises.readFile as jest.Mock).mockResolvedValue(Buffer.from("<html></html>"));
-		(rewriteHtmlUrls as jest.Mock).mockReturnValue({ html: "", discoveredAssets: [] });
+		cache.lookup.mockResolvedValue({ absPath: "/c/logo.gif", contentType: "image/gif" });
+		const redis = makeRedis();
 		const enqueueExactJob = jest.fn().mockResolvedValue(undefined);
-		startArchiveWorkers(baseOpts({ cache, enqueueExactJob }));
-		const worker = findWorker(QUEUE_CRAWL);
-		const job = makeCrawlJob("c-empty", { host: "example.com", time: "20200101000000" });
-		await worker.processor(job);
+		startArchiveWorkers(baseOpts({ cache, redis, directClient: htmlDirect(), enqueueExactJob }));
+		const worker = findWorker(QUEUE_EXACT);
+		await worker.processor(makeJob("e-asset", {
+			url: "http://example.com/logo.gif",
+			time: "20200101000000",
+			crawl: { ...CRAWL, depth: 1 },
+		}));
+		expect(discoverNavLinks as jest.Mock).not.toHaveBeenCalled();
 		expect(enqueueExactJob).not.toHaveBeenCalled();
-		const doneCall = job.updateProgress.mock.calls.find(
-			(c) => (c[0] as { stage: string }).stage === "download_done",
-		);
-		expect(doneCall?.[0]).toMatchObject({ stage: "download_done", filesSeen: 0 });
 	});
 
-	it("HIT: does not call directClient", async () => {
+	it("does NOT recurse once depth reaches crawlMaxDepth", async () => {
 		const cache = makeCache();
-		cache.lookup.mockResolvedValue({ absPath: "/cache/root.html", contentType: "text/html" });
-		(fsPromises.readFile as jest.Mock).mockResolvedValue(Buffer.from("<html></html>"));
-		(rewriteHtmlUrls as jest.Mock).mockReturnValue({ html: "", discoveredAssets: [] });
-		const directClient = defaultDirectClient();
-		startArchiveWorkers(baseOpts({ cache, directClient }));
-		const worker = findWorker(QUEUE_CRAWL);
-		await worker.processor(makeCrawlJob("c-nodirect", { host: "example.com", time: "20200101000000" }));
-		expect(directClient.fetchAtRequestedTime).not.toHaveBeenCalled();
-		expect(directClient.fetchAtResolvedTime).not.toHaveBeenCalled();
-	});
-
-	// --- Lock extender ---
-
-	it("setInterval lock-extender is absent — extendLock never called even after 200s", async () => {
-		jest.useFakeTimers();
-		const cache = makeCache();
-		cache.lookup.mockResolvedValue(null);
+		cache.lookup.mockResolvedValue({ absPath: "/c/index.html", contentType: "text/html" });
+		const redis = makeRedis();
 		const enqueueExactJob = jest.fn().mockResolvedValue(undefined);
-		startArchiveWorkers(baseOpts({ cache, enqueueExactJob }));
-		const worker = findWorker(QUEUE_CRAWL);
-		const job = makeCrawlJob("c-nolock", { host: "example.com", time: "20200101000000" });
-		await worker.processor(job);
-		jest.advanceTimersByTime(200_000);
-		expect(job.extendLock).not.toHaveBeenCalled();
-		jest.useRealTimers();
+		startArchiveWorkers(baseOpts({ cache, redis, directClient: htmlDirect(), enqueueExactJob, crawlMaxDepth: 2 }));
+		const worker = findWorker(QUEUE_EXACT);
+		await worker.processor(makeJob("e-maxdepth", {
+			url: "http://example.com/deep",
+			time: "20200101000000",
+			crawl: { ...CRAWL, depth: 2 },
+		}));
+		expect(discoverNavLinks as jest.Mock).not.toHaveBeenCalled();
+		expect(enqueueExactJob).not.toHaveBeenCalled();
 	});
 
-	// --- Error path ---
-
-	it("emits error stage and re-throws when fs.readFile throws", async () => {
+	it("skips links already in the seen-set (BFS dedup)", async () => {
 		const cache = makeCache();
-		cache.lookup.mockResolvedValue({ absPath: "/cache/root.html", contentType: "text/html" });
-		(fsPromises.readFile as jest.Mock).mockRejectedValue(new Error("disk error"));
-		startArchiveWorkers(baseOpts({ cache }));
-		const worker = findWorker(QUEUE_CRAWL);
-		const job = makeCrawlJob("c-fserr", { host: "example.com", time: "20200101000000" });
-		await expect(worker.processor(job)).rejects.toThrow(/disk error/);
-		const stages = job.updateProgress.mock.calls.map((c) => (c[0] as { stage: string }).stage);
-		expect(stages[stages.length - 1]).toBe("error");
+		cache.lookup.mockResolvedValue({ absPath: "/c/index.html", contentType: "text/html" });
+		(fsPromises.readFile as jest.Mock).mockResolvedValue(Buffer.from("<html></html>"));
+		(discoverNavLinks as jest.Mock).mockReturnValue([
+			"http://example.com/seen",
+			"http://example.com/fresh",
+		]);
+		const redis = makeRedis();
+		redis._seen.add("http://example.com/seen"); // pre-seed one
+		const enqueueExactJob = jest.fn().mockResolvedValue(undefined);
+		startArchiveWorkers(baseOpts({ cache, redis, directClient: htmlDirect(), enqueueExactJob }));
+		const worker = findWorker(QUEUE_EXACT);
+		await worker.processor(makeJob("e-dedup", {
+			url: "http://example.com/",
+			time: "20200101000000",
+			crawl: CRAWL,
+		}));
+		expect(enqueueExactJob).toHaveBeenCalledTimes(1);
+		expect(enqueueExactJob).toHaveBeenCalledWith(
+			"http://example.com/fresh",
+			"20200101000000",
+			expect.objectContaining({ depth: 1 }),
+		);
+	});
+
+	it("stops discovery once the page budget is exhausted", async () => {
+		const cache = makeCache();
+		cache.lookup.mockResolvedValue({ absPath: "/c/index.html", contentType: "text/html" });
+		(fsPromises.readFile as jest.Mock).mockResolvedValue(Buffer.from("<html></html>"));
+		(discoverNavLinks as jest.Mock).mockReturnValue(["http://example.com/x"]);
+		const redis = makeRedis();
+		redis._count = 5; // already at budget
+		const enqueueExactJob = jest.fn().mockResolvedValue(undefined);
+		startArchiveWorkers(baseOpts({ cache, redis, directClient: htmlDirect(), enqueueExactJob, crawlMaxPages: 5 }));
+		const worker = findWorker(QUEUE_EXACT);
+		await worker.processor(makeJob("e-budget", {
+			url: "http://example.com/over",
+			time: "20200101000000",
+			crawl: { ...CRAWL, depth: 1 },
+		}));
+		// incr → 6 > budget 5 → no discovery
+		expect(discoverNavLinks as jest.Mock).not.toHaveBeenCalled();
+		expect(enqueueExactJob).not.toHaveBeenCalled();
+	});
+
+	it("a non-crawl (foreground) exact job never recurses", async () => {
+		const cache = makeCache();
+		cache.lookup.mockResolvedValue({ absPath: "/c/index.html", contentType: "text/html" });
+		const redis = makeRedis();
+		const enqueueExactJob = jest.fn().mockResolvedValue(undefined);
+		startArchiveWorkers(baseOpts({ cache, redis, directClient: htmlDirect(), enqueueExactJob }));
+		const worker = findWorker(QUEUE_EXACT);
+		await worker.processor(makeJob("e-fg", { url: "http://example.com/", time: "20200101000000" }));
+		expect(discoverNavLinks as jest.Mock).not.toHaveBeenCalled();
+		expect(enqueueExactJob).not.toHaveBeenCalled();
+	});
+
+	it("does not recurse when redis is absent", async () => {
+		const cache = makeCache();
+		cache.lookup.mockResolvedValue({ absPath: "/c/index.html", contentType: "text/html" });
+		const enqueueExactJob = jest.fn().mockResolvedValue(undefined);
+		startArchiveWorkers(baseOpts({ cache, redis: null, directClient: htmlDirect(), enqueueExactJob }));
+		const worker = findWorker(QUEUE_EXACT);
+		await worker.processor(makeJob("e-noredis", {
+			url: "http://example.com/",
+			time: "20200101000000",
+			crawl: CRAWL,
+		}));
+		expect(enqueueExactJob).not.toHaveBeenCalled();
 	});
 });
 
@@ -1156,148 +1131,3 @@ describe("attachQueueLogger", () => {
 	});
 });
 
-// --- Chunk worker processor --------------------------------------------------
-
-describe("chunk worker processor", () => {
-	const CDX_HEADER = [
-		"urlkey", "timestamp", "original", "mimetype", "statuscode", "digest", "length",
-	];
-	// Two rows for the same URL — dedup must pick the one closest to the target time.
-	// Target: 19980101000000. Diff for 130000 < diff for 150000, so /about → 19980101130000.
-	const CDX_DATA_DEDUP = [
-		CDX_HEADER,
-		["com,apple)/", "19980101120000", "http://apple.com/", "text/html", "200", "SHA1:aaa", "1000"],
-		["com,apple)/about", "19980101130000", "http://apple.com/about", "text/html", "200", "SHA1:bbb", "500"],
-		["com,apple)/about", "19980101150000", "http://apple.com/about", "text/html", "200", "SHA1:ccc", "500"],
-	];
-
-	function makeCdxResponse(data: unknown[][]): { ok: boolean; status: number; json: jest.Mock } {
-		return { ok: true, status: 200, json: jest.fn().mockResolvedValue(data) };
-	}
-
-	beforeEach(() => {
-		cachedCdxFetchMock.mockResolvedValue(makeCdxResponse([CDX_HEADER]));
-	});
-
-	it("rejects invalid DomainCrawlChunkJob payloads via the asserter", async () => {
-		startArchiveWorkers(baseOpts());
-		const worker = findWorker(QUEUE_CRAWL_CHUNK);
-		await expect(
-			worker.processor({ id: "bad", data: { host: "", time: "19980101000000", page: 0 }, token: "tk" }),
-		).rejects.toThrow(/Invalid job/);
-	});
-
-	it("calls cachedCdxFetch with URL containing &page=0 and from/to matching windowAround(time, 30)", async () => {
-		const enqueueExactJob = jest.fn().mockResolvedValue(undefined);
-		startArchiveWorkers(baseOpts({ enqueueExactJob }));
-		const worker = findWorker(QUEUE_CRAWL_CHUNK);
-		await worker.processor({ id: "cc-1", data: { host: "apple.com", time: "19980101000000", page: 0 }, token: "tk" });
-		expect(cachedCdxFetchMock).toHaveBeenCalledTimes(1);
-		const [url] = cachedCdxFetchMock.mock.calls[0] as [string, ...unknown[]];
-		expect(url).toContain("apple.com%2F*");
-		expect(url).toContain("from=19971202000000");
-		expect(url).toContain("to=19980131235959");
-		expect(url).toContain("output=json");
-		expect(url).toContain("page=0");
-	});
-
-	it("uses the correct page number for page=3", async () => {
-		startArchiveWorkers(baseOpts());
-		const worker = findWorker(QUEUE_CRAWL_CHUNK);
-		await worker.processor({ id: "cc-3", data: { host: "apple.com", time: "19980101000000", page: 3 }, token: "tk" });
-		const [url] = cachedCdxFetchMock.mock.calls[0] as [string, ...unknown[]];
-		expect(url).toContain("page=3");
-	});
-
-	it("applies per-URL dedup: enqueueExactJob called once per unique URL with closest timestamp", async () => {
-		cachedCdxFetchMock.mockResolvedValue(makeCdxResponse(CDX_DATA_DEDUP));
-		const enqueueExactJob = jest.fn().mockResolvedValue(undefined);
-		startArchiveWorkers(baseOpts({ enqueueExactJob }));
-		const worker = findWorker(QUEUE_CRAWL_CHUNK);
-		await worker.processor({ id: "cc-dedup", data: { host: "apple.com", time: "19980101000000", page: 0 }, token: "tk" });
-		expect(enqueueExactJob).toHaveBeenCalledTimes(2);
-		expect(enqueueExactJob).toHaveBeenCalledWith("http://apple.com/", "19980101120000");
-		// /about has two snapshots — closest to 19980101000000 wins
-		expect(enqueueExactJob).toHaveBeenCalledWith("http://apple.com/about", "19980101130000");
-	});
-
-	it("empty CDX page: enqueueExactJob not called", async () => {
-		const enqueueExactJob = jest.fn().mockResolvedValue(undefined);
-		startArchiveWorkers(baseOpts({ enqueueExactJob }));
-		const worker = findWorker(QUEUE_CRAWL_CHUNK);
-		await worker.processor({ id: "cc-empty", data: { host: "apple.com", time: "19980101000000", page: 0 }, token: "tk" });
-		expect(enqueueExactJob).not.toHaveBeenCalled();
-	});
-
-	it("non-ok CDX response throws an error containing the status code", async () => {
-		cachedCdxFetchMock.mockResolvedValue({ ok: false, status: 503, json: jest.fn() });
-		startArchiveWorkers(baseOpts());
-		const worker = findWorker(QUEUE_CRAWL_CHUNK);
-		await expect(
-			worker.processor({ id: "cc-503", data: { host: "apple.com", time: "19980101000000", page: 0 }, token: "tk" }),
-		).rejects.toThrow(/503/);
-	});
-
-	it("429-class CDX error triggers worker.rateLimit(60000) and re-throws Worker.RateLimitError", async () => {
-		cachedCdxFetchMock.mockRejectedValue(new Error("http-429 rate limit exceeded"));
-		startArchiveWorkers(baseOpts());
-		const worker = findWorker(QUEUE_CRAWL_CHUNK);
-		await expect(
-			worker.processor({ id: "cc-429", data: { host: "apple.com", time: "19980101000000", page: 0 }, token: "tk" }),
-		).rejects.toThrow("RateLimitError");
-		expect(worker.rateLimit).toHaveBeenCalledWith(60_000);
-		expect(rateLimitErrorMock).toHaveBeenCalledTimes(1);
-	});
-
-	it("emits picked_up progress at job start", async () => {
-		startArchiveWorkers(baseOpts());
-		const worker = findWorker(QUEUE_CRAWL_CHUNK);
-		const job = makeJob("cc-pu", { host: "apple.com", time: "19980101000000", page: 2 });
-		await worker.processor(job);
-		expect(job.updateProgress).toHaveBeenCalledWith(
-			expect.objectContaining({ stage: "picked_up", queue: QUEUE_CRAWL_CHUNK, page: 2 }),
-		);
-	});
-
-	it("emits download_done with filesSeen=captures.length on success", async () => {
-		cachedCdxFetchMock.mockResolvedValue(makeCdxResponse(CDX_DATA_DEDUP));
-		const enqueueExactJob = jest.fn().mockResolvedValue(undefined);
-		startArchiveWorkers(baseOpts({ enqueueExactJob }));
-		const worker = findWorker(QUEUE_CRAWL_CHUNK);
-		const job = makeJob("cc-done", { host: "apple.com", time: "19980101000000", page: 0 });
-		await worker.processor(job);
-		expect(job.updateProgress).toHaveBeenCalledWith(
-			expect.objectContaining({ stage: "download_done", queue: QUEUE_CRAWL_CHUNK, filesSeen: 2 }),
-		);
-	});
-
-	it("emits error progress and rethrows on CDX failure", async () => {
-		cachedCdxFetchMock.mockRejectedValue(new Error("CDX exploded"));
-		startArchiveWorkers(baseOpts());
-		const worker = findWorker(QUEUE_CRAWL_CHUNK);
-		const job = makeJob("cc-err", { host: "apple.com", time: "19980101000000", page: 0 });
-		await expect(worker.processor(job)).rejects.toThrow("CDX exploded");
-		expect(job.updateProgress).toHaveBeenCalledWith(
-			expect.objectContaining({ stage: "error", queue: QUEUE_CRAWL_CHUNK, error: "CDX exploded" }),
-		);
-	});
-
-	it("'failed' event listener on chunk worker logs jobId, attemptsMade, data, err.message", async () => {
-		const logger = makeLogger();
-		startArchiveWorkers(baseOpts({ logger }));
-		const worker = findWorker(QUEUE_CRAWL_CHUNK);
-		const failedHandler = worker.on.mock.calls.find((c) => c[0] === "failed")?.[1] as (
-			job: unknown,
-			err: Error,
-		) => void;
-		expect(failedHandler).toBeDefined();
-		failedHandler(
-			{ id: "cc-fail-1", attemptsMade: 1, data: { host: "apple.com", time: "x", page: 0 } },
-			new Error("chunk boom"),
-		);
-		expect(logger.error).toHaveBeenCalledWith(
-			expect.objectContaining({ jobId: "cc-fail-1", attemptsMade: 1, err: expect.any(Error) }),
-			expect.stringContaining("failed"),
-		);
-	});
-});

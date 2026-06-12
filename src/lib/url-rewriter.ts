@@ -478,6 +478,67 @@ export const rewriteHtmlUrlsToAst = (
 	return { document: doc, discoveredAssets: assets };
 };
 
+/**
+ * Extract distinct same-host navigation links (anchor/area href, form action,
+ * frame/iframe src) from an archived HTML page, resolved to absolute URLs and
+ * de-duplicated. Honors a `<base href>` if present.
+ *
+ * Used by the recursive crawl worker to enumerate a domain's page graph. Unlike
+ * DiscoveredAsset collection — which only captures already-`/web/`-wrapped URLs
+ * — this resolves the page's ORIGINAL links, which is what `id_`-fetched
+ * archived HTML actually contains. Any archive-wrapped URL encountered is
+ * unwrapped to its original before resolution.
+ */
+export const discoverNavLinks = (html: string, pageUrl: string, host: string): string[] => {
+	let doc: Document;
+	try {
+		doc = parse(html);
+	} catch {
+		return [];
+	}
+	const base = consumeBaseTag(doc, pageUrl);
+	const seen = new Set<string>();
+	const out: string[] = [];
+
+	const consider = (raw: string | undefined): void => {
+		if (!raw) return;
+		const trimmed = raw.trim();
+		if (!trimmed || RE_SKIP_PREFIX.test(trimmed)) return;
+		// Unwrap any /web/<ts>/<url> wrapper so we resolve the original target.
+		const archive = trimmed.match(RE_ARCHIVE_URL);
+		const candidate = archive ? archive[2] : trimmed;
+		let resolved: URL;
+		try {
+			resolved = new URL(unwrapRedirectUrl(candidate), base);
+		} catch {
+			return;
+		}
+		if (resolved.protocol !== "http:" && resolved.protocol !== "https:") return;
+		if (resolved.hostname !== host) return;
+		const href = resolved.toString();
+		if (!seen.has(href)) {
+			seen.add(href);
+			out.push(href);
+		}
+	};
+
+	const walk = (node: Node): void => {
+		if (isElement(node)) {
+			const navAttrs = NAV_LINK_ATTRS[node.tagName.toLowerCase()];
+			if (navAttrs) {
+				for (const attr of node.attrs) {
+					if (navAttrs.includes(attr.name)) consider(attr.value);
+				}
+			}
+		}
+		if (hasChildNodes(node)) {
+			for (const child of node.childNodes) walk(child);
+		}
+	};
+	walk(doc);
+	return out;
+};
+
 export const stripWaybackToolbar = (html: string): string =>
 	html
 		.replace(RE_LEADING_WHITESPACE, "<")

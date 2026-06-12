@@ -15,15 +15,12 @@
 
 const workerExactClose = jest.fn().mockResolvedValue(undefined);
 const workerCrawlClose = jest.fn().mockResolvedValue(undefined);
-const workerChunkClose = jest.fn().mockResolvedValue(undefined);
 
 const queueExactClose = jest.fn().mockResolvedValue(undefined);
 const queueCrawlClose = jest.fn().mockResolvedValue(undefined);
-const queueChunkClose = jest.fn().mockResolvedValue(undefined);
 
 const queueEventsExactClose = jest.fn().mockResolvedValue(undefined);
 const queueEventsCrawlClose = jest.fn().mockResolvedValue(undefined);
-const queueEventsChunkClose = jest.fn().mockResolvedValue(undefined);
 
 const redisQuit = jest.fn().mockResolvedValue(undefined);
 
@@ -33,29 +30,18 @@ const queueEventsCtor = jest.fn();
 jest.mock("../../src/queue/jobs", () => ({
 	QUEUE_EXACT: "archive-exact",
 	QUEUE_CRAWL: "archive-crawl",
-	QUEUE_CRAWL_CHUNK: "archive-crawl-chunk",
 }));
 
 jest.mock("bullmq", () => ({
 	Queue: jest.fn().mockImplementation((name: string, opts: unknown) => {
 		queueCtor(name, opts);
 		// Disambiguate by queue name (resilient across tests/restarts).
-		const close =
-			name === "archive-exact"
-				? queueExactClose
-				: name === "archive-crawl-chunk"
-					? queueChunkClose
-					: queueCrawlClose;
+		const close = name === "archive-exact" ? queueExactClose : queueCrawlClose;
 		return { close, add: jest.fn().mockResolvedValue({ id: "test" }) };
 	}),
 	QueueEvents: jest.fn().mockImplementation((name: string, opts: unknown) => {
 		queueEventsCtor(name, opts);
-		const close =
-			name === "archive-exact"
-				? queueEventsExactClose
-				: name === "archive-crawl-chunk"
-					? queueEventsChunkClose
-					: queueEventsCrawlClose;
+		const close = name === "archive-exact" ? queueEventsExactClose : queueEventsCrawlClose;
 		return { close, on: jest.fn() };
 	}),
 	Worker: jest.fn(),
@@ -64,7 +50,6 @@ jest.mock("bullmq", () => ({
 const startArchiveWorkersMock = jest.fn().mockReturnValue({
 	exact: { close: workerExactClose },
 	crawl: { close: workerCrawlClose },
-	chunk: { close: workerChunkClose },
 });
 
 jest.mock("../../src/queue/archive-worker", () => ({
@@ -100,7 +85,8 @@ const baseConfig: Config = {
 	domainCrawlEnabled: true,
 	workerConcurrency: 2,
 	workerRateLimitPerSec: 1,
-	crawlMaxCdxPages: 50,
+	crawlMaxDepth: 3,
+	crawlMaxPages: 1000,
 	outboundProxyUrls: [],
 	outboundProxyChooser: "sequential",
 	outboundProxyUsername: "",
@@ -122,8 +108,6 @@ const baseConfig: Config = {
 	notFoundTtlDays: 30,
 	cdxCacheEnabled: true,
 	lockTime: false,
-	crawlWindowDays: 30,
-	crawlMaxChunkFanout: 1000,
 	domainRemap: {},
 };
 
@@ -131,13 +115,10 @@ describe("Dependencies (TASK-010)", () => {
 	beforeEach(() => {
 		workerExactClose.mockClear();
 		workerCrawlClose.mockClear();
-		workerChunkClose.mockClear();
 		queueExactClose.mockClear();
 		queueCrawlClose.mockClear();
-		queueChunkClose.mockClear();
 		queueEventsExactClose.mockClear();
 		queueEventsCrawlClose.mockClear();
-		queueEventsChunkClose.mockClear();
 		redisQuit.mockClear();
 		queueCtor.mockClear();
 		queueEventsCtor.mockClear();
@@ -151,13 +132,11 @@ describe("Dependencies (TASK-010)", () => {
 		expect(deps.redis).toBeDefined();
 		expect(deps.exactQueue).toBeDefined();
 		expect(deps.crawlQueue).toBeDefined();
-		expect(deps.chunkQueue).toBeDefined();
 		expect(deps.exactEvents).toBeDefined();
 		expect(deps.crawlEvents).toBeDefined();
 		expect(deps.workers).toBeDefined();
 		expect(deps.workers.exact).toBeDefined();
 		expect(deps.workers.crawl).toBeDefined();
-		expect(deps.workers.chunk).toBeDefined();
 		expect(deps.cache).toBeDefined();
 		expect(deps.archiveJobClient).toBeDefined();
 		expect(deps.proxy).toBeDefined();
@@ -168,9 +147,9 @@ describe("Dependencies (TASK-010)", () => {
 
 	it("constructs Queue and QueueEvents with the configured bullmqPrefix", () => {
 		new Dependencies(baseConfig);
-		// Three Queues (exact + crawl + chunk) + three QueueEvents (exact + crawl + chunk)
-		expect(queueCtor).toHaveBeenCalledTimes(3);
-		expect(queueEventsCtor).toHaveBeenCalledTimes(3);
+		// Two Queues (exact + crawl) + two QueueEvents (exact + crawl)
+		expect(queueCtor).toHaveBeenCalledTimes(2);
+		expect(queueEventsCtor).toHaveBeenCalledTimes(2);
 		// All were given prefix "tm"
 		for (const call of queueCtor.mock.calls) {
 			expect(call[1]).toEqual(expect.objectContaining({ prefix: "tm" }));
@@ -187,42 +166,32 @@ describe("Dependencies (TASK-010)", () => {
 		// All shutdown calls fired exactly once
 		expect(workerExactClose).toHaveBeenCalledTimes(1);
 		expect(workerCrawlClose).toHaveBeenCalledTimes(1);
-		expect(workerChunkClose).toHaveBeenCalledTimes(1);
 		expect(queueExactClose).toHaveBeenCalledTimes(1);
 		expect(queueCrawlClose).toHaveBeenCalledTimes(1);
-		expect(queueChunkClose).toHaveBeenCalledTimes(1);
 		expect(queueEventsExactClose).toHaveBeenCalledTimes(1);
 		expect(queueEventsCrawlClose).toHaveBeenCalledTimes(1);
-		expect(queueEventsChunkClose).toHaveBeenCalledTimes(1);
 		expect(redisQuit).toHaveBeenCalledTimes(1);
 
 		const workerExactOrder = workerExactClose.mock.invocationCallOrder[0] as number;
 		const workerCrawlOrder = workerCrawlClose.mock.invocationCallOrder[0] as number;
-		const workerChunkOrder = workerChunkClose.mock.invocationCallOrder[0] as number;
 		const queueExactOrder = queueExactClose.mock.invocationCallOrder[0] as number;
 		const queueCrawlOrder = queueCrawlClose.mock.invocationCallOrder[0] as number;
-		const queueChunkOrder = queueChunkClose.mock.invocationCallOrder[0] as number;
 		const eventsExactOrder = queueEventsExactClose.mock.invocationCallOrder[0] as number;
 		const eventsCrawlOrder = queueEventsCrawlClose.mock.invocationCallOrder[0] as number;
-		const eventsChunkOrder = queueEventsChunkClose.mock.invocationCallOrder[0] as number;
 		const redisOrder = redisQuit.mock.invocationCallOrder[0] as number;
 
-		const lastWorker = Math.max(workerExactOrder, workerCrawlOrder, workerChunkOrder);
+		const lastWorker = Math.max(workerExactOrder, workerCrawlOrder);
 		const firstQueueOrEvent = Math.min(
 			queueExactOrder,
 			queueCrawlOrder,
-			queueChunkOrder,
 			eventsExactOrder,
 			eventsCrawlOrder,
-			eventsChunkOrder,
 		);
 		const lastQueueOrEvent = Math.max(
 			queueExactOrder,
 			queueCrawlOrder,
-			queueChunkOrder,
 			eventsExactOrder,
 			eventsCrawlOrder,
-			eventsChunkOrder,
 		);
 
 		// Workers drain before queues/events
@@ -239,7 +208,7 @@ describe("Dependencies (TASK-010)", () => {
 		const dependencies = new Dependencies(baseConfig);
 		await dependencies.close();
 		expect(workerExactClose).toHaveBeenCalledTimes(1);
-		expect(workerChunkClose).toHaveBeenCalledTimes(1);
+		expect(workerCrawlClose).toHaveBeenCalledTimes(1);
 		expect(queueExactClose).toHaveBeenCalledTimes(1);
 		expect(redisQuit).toHaveBeenCalledTimes(1);
 	});

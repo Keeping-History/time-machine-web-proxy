@@ -1,4 +1,5 @@
 import {
+	discoverNavLinks,
 	type DiscoveredAsset,
 	parseWaybackPath,
 	rewriteCssUrls,
@@ -865,5 +866,57 @@ describe("rewriteCssUrls — lockTime", () => {
 		const r = rewriteCssUrls(css, "http://example.com/page", TIME, true);
 		expect(r).toContain("url('/web/http://example.com/img.png')");
 		expect(r).not.toContain(`/web/${TIME}/`);
+	});
+});
+
+describe("discoverNavLinks", () => {
+	const CNN = "www.cnn.com";
+	const PAGE = "http://www.cnn.com/";
+
+	it("collects same-host nav links (a/area href, form action, frame/iframe src)", () => {
+		const html = `<html><body>
+			<a href="/US/">US</a>
+			<area href="/SPORTS/">
+			<form action="/search"></form>
+			<iframe src="/embed/widget"></iframe>
+		</body></html>`;
+		expect(discoverNavLinks(html, PAGE, CNN)).toEqual([
+			"http://www.cnn.com/US/",
+			"http://www.cnn.com/SPORTS/",
+			"http://www.cnn.com/search",
+			"http://www.cnn.com/embed/widget",
+		]);
+	});
+
+	it("excludes external hosts, asset (img) URLs, and opaque schemes; de-dupes", () => {
+		const html = `<html><body>
+			<a href="http://other.com/x">external</a>
+			<img src="/logo.gif">
+			<a href="#frag">frag</a>
+			<a href="javascript:void(0)">js</a>
+			<a href="/US/">a</a>
+			<a href="/US/">dup</a>
+		</body></html>`;
+		expect(discoverNavLinks(html, PAGE, CNN)).toEqual(["http://www.cnn.com/US/"]);
+	});
+
+	it("resolves absolute same-host links and honors <base href>", () => {
+		const html = `<html><head><base href="http://www.cnn.com/section/"></head><body>
+			<a href="story.html">rel</a>
+			<a href="http://www.cnn.com/WORLD/">abs</a>
+		</body></html>`;
+		expect(discoverNavLinks(html, PAGE, CNN)).toEqual([
+			"http://www.cnn.com/section/story.html",
+			"http://www.cnn.com/WORLD/",
+		]);
+	});
+
+	it("unwraps /web/<ts>/<url> wrapped links to the original before host-filtering", () => {
+		const html = `<a href="/web/20010912000000/http://www.cnn.com/US/">x</a>`;
+		expect(discoverNavLinks(html, PAGE, CNN)).toEqual(["http://www.cnn.com/US/"]);
+	});
+
+	it("returns [] for unparseable or empty input", () => {
+		expect(discoverNavLinks("", PAGE, CNN)).toEqual([]);
 	});
 });

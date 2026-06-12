@@ -9,14 +9,7 @@ import type { DirectClientPort } from "../models/direct-client";
 import type { SystemStatus } from "../models/status";
 import type { UrlValidatorModule } from "../models/url-validator";
 import { attachQueueLogger, startArchiveWorkers } from "../queue/archive-worker";
-import {
-	type DomainCrawlChunkJob,
-	type DomainCrawlJob,
-	type ExactUrlJob,
-	QUEUE_CRAWL,
-	QUEUE_CRAWL_CHUNK,
-	QUEUE_EXACT,
-} from "../queue/jobs";
+import { type DomainCrawlJob, type ExactUrlJob, QUEUE_CRAWL, QUEUE_EXACT } from "../queue/jobs";
 import { CacheService } from "../services/cache";
 import { ProxyService } from "../services/proxy";
 import { createLogger } from "./logger";
@@ -68,11 +61,9 @@ export interface DependencyStore {
 	redis: IORedis;
 	exactQueue: Queue<ExactUrlJob>;
 	crawlQueue: Queue<DomainCrawlJob>;
-	chunkQueue: Queue<DomainCrawlChunkJob>;
 	exactEvents: QueueEvents;
 	crawlEvents: QueueEvents;
-	chunkEvents: QueueEvents;
-	workers: { exact: Worker; crawl: Worker; chunk: Worker };
+	workers: { exact: Worker; crawl: Worker };
 	cache: CacheService;
 	archiveJobClient: ArchiveJobClient;
 	proxy: ProxyService;
@@ -110,10 +101,6 @@ export class Dependencies {
 			connection: redis,
 			prefix: config.bullmqPrefix,
 		});
-		const chunkQueue = new Queue<DomainCrawlChunkJob>(QUEUE_CRAWL_CHUNK, {
-			connection: redis,
-			prefix: config.bullmqPrefix,
-		});
 		const exactEvents = new QueueEvents(QUEUE_EXACT, {
 			connection: redis,
 			prefix: config.bullmqPrefix,
@@ -122,13 +109,8 @@ export class Dependencies {
 			connection: redis,
 			prefix: config.bullmqPrefix,
 		});
-		const chunkEvents = new QueueEvents(QUEUE_CRAWL_CHUNK, {
-			connection: redis,
-			prefix: config.bullmqPrefix,
-		});
 		attachQueueLogger(QUEUE_EXACT, exactEvents, logger);
 		attachQueueLogger(QUEUE_CRAWL, crawlEvents, logger);
-		attachQueueLogger(QUEUE_CRAWL_CHUNK, chunkEvents, logger);
 
 		const cache = new CacheService(config, logger);
 
@@ -136,7 +118,6 @@ export class Dependencies {
 		const archiveJobClient = new ArchiveJobClient(
 			exactQueue,
 			crawlQueue,
-			chunkQueue,
 			exactEvents,
 			logger,
 			config.domainCrawlEnabled,
@@ -145,14 +126,14 @@ export class Dependencies {
 			connection: redis,
 			cache,
 			directClient,
-			enqueueExactJob: (url, time) => archiveJobClient.enqueueExact(url, time),
+			enqueueExactJob: (url, time, crawl) => archiveJobClient.enqueueExact(url, time, crawl),
 			logger,
 			bullmqPrefix: config.bullmqPrefix,
 			workerConcurrency: config.workerConcurrency,
 			workerRateLimitPerSec: config.workerRateLimitPerSec,
 			redis,
-			cdxCacheEnabled: config.cdxCacheEnabled,
-			crawlWindowDays: config.crawlWindowDays,
+			crawlMaxDepth: config.crawlMaxDepth,
+			crawlMaxPages: config.crawlMaxPages,
 		});
 		const proxy = new ProxyService(cache, archiveJobClient, logger, config, redis, directClient);
 		const validator: UrlValidatorModule = { validateTargetUrl, isHostWhitelisted };
@@ -163,10 +144,8 @@ export class Dependencies {
 			redis,
 			exactQueue,
 			crawlQueue,
-			chunkQueue,
 			exactEvents,
 			crawlEvents,
-			chunkEvents,
 			workers,
 			cache,
 			archiveJobClient,
@@ -185,11 +164,10 @@ export class Dependencies {
 	 * an unhealthy queue can't mask the rest of the report.
 	 */
 	async getStatus(): Promise<SystemStatus> {
-		const { redis, exactQueue, crawlQueue, chunkQueue, logger } = this.deps;
-		const [exactCounts, crawlCounts, chunkCounts] = await Promise.all([
+		const { redis, exactQueue, crawlQueue, logger } = this.deps;
+		const [exactCounts, crawlCounts] = await Promise.all([
 			safeJobCounts(exactQueue, logger),
 			safeJobCounts(crawlQueue, logger),
-			safeJobCounts(chunkQueue, logger),
 		]);
 		return {
 			redis: { status: (redis as IORedis & { status?: string }).status ?? "unknown" },
@@ -200,24 +178,20 @@ export class Dependencies {
 			queues: {
 				[QUEUE_EXACT]: exactCounts,
 				[QUEUE_CRAWL]: crawlCounts,
-				[QUEUE_CRAWL_CHUNK]: chunkCounts,
 			},
 		};
 	}
 
 	async close(): Promise<void> {
-		const { workers, exactQueue, crawlQueue, chunkQueue, exactEvents, crawlEvents, chunkEvents, redis, proxy } =
-			this.deps;
+		const { workers, exactQueue, crawlQueue, exactEvents, crawlEvents, redis, proxy } = this.deps;
 		// 1. Drain workers first so in-flight jobs complete
-		await Promise.all([workers.exact.close(), workers.crawl.close(), workers.chunk.close()]);
+		await Promise.all([workers.exact.close(), workers.crawl.close()]);
 		// 2. Close queues + events together
 		await Promise.all([
 			exactQueue.close(),
 			crawlQueue.close(),
-			chunkQueue.close(),
 			exactEvents.close(),
 			crawlEvents.close(),
-			chunkEvents.close(),
 		]);
 		// 3. Await any in-flight prewarm promises before closing Redis
 		await proxy.drainPrewarms();

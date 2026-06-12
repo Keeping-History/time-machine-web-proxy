@@ -3,54 +3,49 @@ import { type ConnectionOptions, type Job, type QueueEvents, Worker } from "bull
 import type IORedis from "ioredis";
 import type pino from "pino";
 import type { ResolvedResult } from "../clients/wayback-direct-client";
-import { cachedCdxFetch } from "../lib/cdx-cache";
-import { TIMESTAMP_RE, windowAround } from "../lib/archive-time";
+import { TIMESTAMP_RE } from "../lib/archive-time";
 import type { JobProgress, JobProgressQueue, JobProgressStage } from "../models/job-progress";
 import type { CachePort } from "../models/cache-port";
 import type { DirectClientPort } from "../models/direct-client";
 
 /** @deprecated Use DirectClientPort from models/direct-client instead. */
 export type ArchiveDirectClient = DirectClientPort;
-import { rewriteHtmlUrls, stripWaybackToolbar } from "../lib/url-rewriter";
-import {
-	assertDomainCrawlChunkJob,
-	assertDomainCrawlJob,
-	assertExactUrlJob,
-	QUEUE_CRAWL,
-	QUEUE_CRAWL_CHUNK,
-	QUEUE_EXACT,
-} from "./jobs";
-import { parseCdxPage, pickClosestPerUrl } from "./cdx-page";
+import { discoverNavLinks, stripWaybackToolbar } from "../lib/url-rewriter";
+import { assertDomainCrawlJob, assertExactUrlJob, type CrawlMeta, QUEUE_CRAWL, QUEUE_EXACT } from "./jobs";
 
 export interface StartArchiveWorkersOpts {
 	connection: ConnectionOptions;
 	cache: CachePort;
 	directClient: DirectClientPort;
 	/** Fire-and-forget callback to enqueue an archive-exact job for a discovered
-	 *  link. Keeps the crawl worker decoupled from BullMQ internals. */
-	enqueueExactJob: (url: string, time: string) => Promise<void>;
+	 *  link, optionally carrying crawl provenance so the exact worker recurses
+	 *  into same-host links. Keeps the crawl worker decoupled from BullMQ. */
+	enqueueExactJob: (url: string, time: string, crawl?: CrawlMeta) => Promise<void>;
 	logger: pino.Logger;
 	bullmqPrefix: string;
 	workerConcurrency: number;
 	workerRateLimitPerSec: number;
 	redis: IORedis | null;
-	cdxCacheEnabled: boolean;
-	crawlWindowDays: number;
+	/** Recursive-crawl link depth (seed homepage is depth 0). */
+	crawlMaxDepth: number;
+	/** Max HTML pages to recurse into per crawl run (caps archive.org load). */
+	crawlMaxPages: number;
 }
 
 export interface ArchiveWorkers {
 	exact: Worker;
 	crawl: Worker;
-	chunk: Worker;
 }
 
 const CRAWL_LOCK_DURATION_MS = 120_000;
+// A crawl run's Redis seen-set / page-budget keys expire after this long so a
+// later re-crawl of the same (host, time) starts fresh.
+const CRAWL_RUN_TTL_S = 6 * 60 * 60;
 // On a 429 from the direct fetch path we throttle the worker for one minute
 // before requeuing. Matches the Wayback cooldown documented in the original
 // downloader plan.
 const RATE_LIMIT_PAUSE_MS = 60_000;
 const RATE_LIMIT_RE = /429|rate.?limit/i;
-const CDX_TIMEOUT_MS = 30_000;
 
 async function emitProgress(
 	job: Job,
@@ -119,11 +114,56 @@ export function startArchiveWorkers(opts: StartArchiveWorkersOpts): ArchiveWorke
 		workerConcurrency,
 		workerRateLimitPerSec,
 		redis,
-		cdxCacheEnabled,
-		crawlWindowDays,
+		crawlMaxDepth,
+		crawlMaxPages,
 	} = opts;
 
 	const limiter = { max: workerRateLimitPerSec, duration: 1000 };
+
+	// Recursive-crawl step: a same-host HTML page has been fetched and cached.
+	// Discover its same-host navigation links and enqueue each unseen one as a
+	// crawl-flagged exact job at depth+1. Bounded by a per-run page budget so a
+	// large domain can't run away. Requires Redis for the seen-set + counter; a
+	// no-op without it (recursion simply stops, one level deep).
+	const recurseCrawl = async (
+		meta: CrawlMeta,
+		absPath: string,
+		pageUrl: string,
+		pageTime: string,
+	): Promise<void> => {
+		if (!redis) return;
+		const countKey = `${bullmqPrefix}-crawl:count:${meta.rootHost}:${meta.rootTime}`;
+		const pageCount = await redis.incr(countKey);
+		if (pageCount === 1) await redis.expire(countKey, CRAWL_RUN_TTL_S);
+		if (pageCount > crawlMaxPages) {
+			if (pageCount === crawlMaxPages + 1)
+				logger.info(
+					{ host: meta.rootHost, time: meta.rootTime, budget: crawlMaxPages },
+					"[worker:crawl] page budget reached — halting discovery",
+				);
+			return;
+		}
+		const html = (await fs.readFile(absPath)).toString("utf-8");
+		const links = discoverNavLinks(stripWaybackToolbar(html), pageUrl, meta.rootHost);
+		const seenKey = `${bullmqPrefix}-crawl:seen:${meta.rootHost}:${meta.rootTime}`;
+		let enqueued = 0;
+		for (const link of links) {
+			// SADD returns 1 only for a URL not seen this run — the BFS dedup.
+			if ((await redis.sadd(seenKey, link)) === 1) {
+				await enqueueExactJob(link, pageTime, {
+					rootHost: meta.rootHost,
+					rootTime: meta.rootTime,
+					depth: meta.depth + 1,
+				});
+				enqueued += 1;
+			}
+		}
+		if (enqueued > 0) await redis.expire(seenKey, CRAWL_RUN_TTL_S);
+		logger.info(
+			{ pageUrl, depth: meta.depth, found: links.length, enqueued, pageCount },
+			"[worker:crawl] recursed",
+		);
+	};
 
 	// `let exact!: Worker` lets the processor closure reference the worker
 	// itself for `worker.rateLimit(...)`. Same pattern for crawl below.
@@ -208,6 +248,16 @@ export function startArchiveWorkers(opts: StartArchiveWorkersOpts): ArchiveWorke
 				if (!hit) {
 					throw new Error(`Direct fetch produced no usable file for ${url} @ ${time}`);
 				}
+				// Recursive crawl: only HTML pages that are part of a crawl recurse.
+				// Assets (non-HTML) carry no crawl recursion, so the BFS terminates.
+				const crawlMeta = job.data.crawl;
+				if (
+					crawlMeta &&
+					crawlMeta.depth < crawlMaxDepth &&
+					hit.contentType.startsWith("text/html")
+				) {
+					await recurseCrawl(crawlMeta, hit.absPath, url, time);
+				}
 			} catch (e) {
 				const errMsg = e instanceof Error ? e.message : String(e);
 				await emitProgress(job, QUEUE_EXACT, "error", logger, { error: errMsg });
@@ -222,6 +272,9 @@ export function startArchiveWorkers(opts: StartArchiveWorkersOpts): ArchiveWorke
 		},
 	);
 
+	// Seeds the recursive (BFS) crawl. The actual page-graph walk happens in the
+	// exact worker (recurseCrawl), which fetches each page then enqueues its
+	// same-host links at depth+1. This job just kicks it off at the homepage.
 	const crawl = new Worker(
 		QUEUE_CRAWL,
 		async (job) => {
@@ -230,58 +283,16 @@ export function startArchiveWorkers(opts: StartArchiveWorkersOpts): ArchiveWorke
 				const { host, time } = job.data;
 				await emitProgress(job, QUEUE_CRAWL, "picked_up", logger, { host, time });
 
-				// Root may be http or https depending on when Wayback crawled it.
-				const rootCandidates = [`http://${host}/`, `https://${host}/`];
-				let rootHit: Awaited<ReturnType<typeof opts.cache.lookup>> = null;
-				let rootUrl = rootCandidates[0];
-				for (const candidate of rootCandidates) {
-					rootHit = await opts.cache.lookup(candidate, time);
-					if (rootHit) {
-						rootUrl = candidate;
-						break;
-					}
+				// Seed depth 0 with the homepage as a crawl-flagged exact job.
+				// Wayback's id_ endpoint resolves http vs https for us, so seed http.
+				const rootUrl = `http://${host}/`;
+				if (redis) {
+					const seenKey = `${bullmqPrefix}-crawl:seen:${host}:${time}`;
+					await redis.sadd(seenKey, rootUrl);
+					await redis.expire(seenKey, CRAWL_RUN_TTL_S);
 				}
-
-				if (!rootHit) {
-					// Root not cached yet — enqueue it and exit. The next crawl trigger
-					// after the root is served will find it cached and extract links.
-					logger.info({ host, time }, "[worker:crawl] root not cached — enqueuing exact job for root");
-					await enqueueExactJob(rootUrl, time);
-					await emitProgress(job, QUEUE_CRAWL, "download_done", logger, { host, time, filesSeen: 0 });
-					return;
-				}
-
-				await emitProgress(job, QUEUE_CRAWL, "download_start", logger, { host, time, filesSeen: 0 });
-
-				const raw = await fs.readFile(rootHit.absPath);
-				const { discoveredAssets } = rewriteHtmlUrls(
-					stripWaybackToolbar(raw.toString("utf-8")),
-					rootUrl,
-					time,
-					false,
-				);
-
-				const sameHostLinks = discoveredAssets.filter((a) => {
-					try {
-						return new URL(a.url).hostname === host;
-					} catch {
-						return false;
-					}
-				});
-
-				let filesSeen = 0;
-				for (const link of sameHostLinks) {
-					await enqueueExactJob(link.url, link.embeddedTs);
-					filesSeen += 1;
-					await emitProgress(job, QUEUE_CRAWL, "download_file", logger, {
-						host,
-						time,
-						file: link.url,
-						filesSeen,
-					});
-				}
-
-				await emitProgress(job, QUEUE_CRAWL, "download_done", logger, { host, time, filesSeen });
+				await enqueueExactJob(rootUrl, time, { rootHost: host, rootTime: time, depth: 0 });
+				await emitProgress(job, QUEUE_CRAWL, "download_done", logger, { host, time, filesSeen: 1 });
 			} catch (e) {
 				await emitProgress(job, QUEUE_CRAWL, "error", logger, {
 					error: e instanceof Error ? e.message : String(e),
@@ -300,61 +311,7 @@ export function startArchiveWorkers(opts: StartArchiveWorkersOpts): ArchiveWorke
 		},
 	);
 
-	// Trust boundary: whitelist check is done at the producer (ProxyService.maybeEnqueueDomainCrawl).
-	// The chunk worker does NOT re-check — jobs in this queue are pre-approved.
-	let chunk!: Worker;
-	chunk = new Worker(
-		QUEUE_CRAWL_CHUNK,
-		async (job) => {
-			try {
-				assertDomainCrawlChunkJob(job.data);
-				const { host, time, page } = job.data;
-				await emitProgress(job, QUEUE_CRAWL_CHUNK, "picked_up", logger, { host, time, page });
-
-				const { from, to } = windowAround(time, crawlWindowDays);
-				const cdxUrl =
-					`https://web.archive.org/cdx/search/cdx?url=${encodeURIComponent(`${host}/*`)}` +
-					`&from=${from}&to=${to}&output=json&page=${page}`;
-
-				const rows = await applyRateLimit(chunk, async () => {
-					const r = await cachedCdxFetch(
-						cdxUrl,
-						{ signal: AbortSignal.timeout(CDX_TIMEOUT_MS) },
-						{ redis, logger, enabled: cdxCacheEnabled, bullmqPrefix, validate: () => true },
-					);
-					if (!r.ok) throw new Error(`CDX fetch ${r.status}`);
-					return parseCdxPage(await r.json());
-				});
-
-				const captures = pickClosestPerUrl(rows, time);
-				for (const { url, timestamp } of captures) {
-					await enqueueExactJob(url, timestamp);
-				}
-				await emitProgress(job, QUEUE_CRAWL_CHUNK, "download_done", logger, {
-					host,
-					time,
-					page,
-					filesSeen: captures.length,
-				});
-			} catch (e) {
-				await emitProgress(job, QUEUE_CRAWL_CHUNK, "error", logger, {
-					error: e instanceof Error ? e.message : String(e),
-				});
-				throw e;
-			}
-		},
-		{
-			connection,
-			concurrency: workerConcurrency,
-			limiter,
-			prefix: bullmqPrefix,
-			lockDuration: CRAWL_LOCK_DURATION_MS,
-			stalledInterval: 30_000,
-			maxStalledCount: 2,
-		},
-	);
-
-	const attachFailedLogger = (w: Worker, name: "exact" | "crawl" | "chunk"): void => {
+	const attachFailedLogger = (w: Worker, name: "exact" | "crawl"): void => {
 		w.on("failed", (job, err) => {
 			logger.error(
 				{
@@ -369,9 +326,8 @@ export function startArchiveWorkers(opts: StartArchiveWorkersOpts): ArchiveWorke
 	};
 	attachFailedLogger(exact, "exact");
 	attachFailedLogger(crawl, "crawl");
-	attachFailedLogger(chunk, "chunk");
 
-	return { exact, crawl, chunk };
+	return { exact, crawl };
 }
 
 /**
