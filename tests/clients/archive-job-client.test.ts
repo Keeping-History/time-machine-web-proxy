@@ -77,7 +77,6 @@ function makeClient(
 	overrides: {
 		exactQueue?: FakeQueue;
 		crawlQueue?: FakeQueue;
-		chunkQueue?: FakeQueue;
 		domainCrawlEnabled?: boolean;
 		logger?: pino.Logger;
 	} = {},
@@ -85,13 +84,11 @@ function makeClient(
 	client: ArchiveJobClient;
 	exactQueue: FakeQueue;
 	crawlQueue: FakeQueue;
-	chunkQueue: FakeQueue;
 	exactEvents: FakeEvents;
 	logger: pino.Logger;
 } {
 	const exactQueue = overrides.exactQueue ?? makeFakeQueue();
 	const crawlQueue = overrides.crawlQueue ?? makeFakeQueue();
-	const chunkQueue = overrides.chunkQueue ?? makeFakeQueue();
 	const exactEvents = makeEvents();
 	const logger = overrides.logger ?? makeLogger();
 	const domainCrawlEnabled = overrides.domainCrawlEnabled ?? true;
@@ -100,12 +97,11 @@ function makeClient(
 		// methods the client touches.
 		exactQueue as unknown as ConstructorParameters<typeof ArchiveJobClient>[0],
 		crawlQueue as unknown as ConstructorParameters<typeof ArchiveJobClient>[1],
-		chunkQueue as unknown as ConstructorParameters<typeof ArchiveJobClient>[2],
-		exactEvents as unknown as ConstructorParameters<typeof ArchiveJobClient>[3],
+		exactEvents as unknown as ConstructorParameters<typeof ArchiveJobClient>[2],
 		logger,
 		domainCrawlEnabled,
 	);
-	return { client, exactQueue, crawlQueue, chunkQueue, exactEvents, logger };
+	return { client, exactQueue, crawlQueue, exactEvents, logger };
 }
 
 // The client accepts the ORIGINAL target URL (the worker in TASK-007 builds
@@ -400,68 +396,33 @@ describe("ArchiveJobClient.enqueueExact", () => {
 				url: TARGET_URL,
 				time: TIME,
 			}),
-			expect.stringContaining("crawl fan-out"),
+			expect.stringContaining("enqueued exact"),
 		);
 	});
 });
 
-// --- enqueueCrawlChunks -------------------------------------------------------
+// --- enqueueExact crawl meta --------------------------------------------------
 
-const expectedChunkJobId = (host: string, time: string, page: number): string =>
-	`cc-${createHash("sha256").update(`${host}|${time}|${page}`).digest("hex").slice(0, 16)}`;
-
-describe("ArchiveJobClient.enqueueCrawlChunks", () => {
-	it("adds one chunk job per page (pages 0..N-1) when totalPages=3", async () => {
-		const { client, chunkQueue } = makeClient();
-		await client.enqueueCrawlChunks("apple.com", TIME, 3, 1000);
-		expect(chunkQueue.addBulk!).toHaveBeenCalledTimes(1);
-		const jobs = chunkQueue.addBulk!.mock.calls[0][0] as Array<{ name: string; data: Record<string, unknown>; opts: Record<string, unknown> }>;
-		expect(jobs).toHaveLength(3);
-		for (let page = 0; page < 3; page++) {
-			expect(jobs[page].name).toBe("crawl-chunk");
-			expect(jobs[page].data).toMatchObject({ host: "apple.com", time: TIME, page });
-			expect(jobs[page].opts.jobId).toBe(expectedChunkJobId("apple.com", TIME, page));
-		}
+describe("ArchiveJobClient.enqueueExact (crawl meta)", () => {
+	it("includes crawl provenance in the job data when provided", async () => {
+		const { client, exactQueue } = makeClient();
+		await client.enqueueExact("https://example.com/US/", TIME, {
+			rootHost: "example.com",
+			rootTime: TIME,
+			depth: 2,
+		});
+		const data = exactQueue.add!.mock.calls[0][1] as Record<string, unknown>;
+		expect(data).toMatchObject({
+			url: "https://example.com/US/",
+			time: TIME,
+			crawl: { rootHost: "example.com", rootTime: TIME, depth: 2 },
+		});
 	});
 
-	it("uses deterministic jobId of form 'cc-' + sha256(host|time|page).slice(0,16)", async () => {
-		const { client, chunkQueue } = makeClient();
-		await client.enqueueCrawlChunks("apple.com", TIME, 1, 1000);
-		const jobs = chunkQueue.addBulk!.mock.calls[0][0] as Array<{ opts: Record<string, unknown> }>;
-		const jobId = jobs[0].opts.jobId as string;
-		expect(jobId).toMatch(/^cc-[0-9a-f]{16}$/);
-		expect(jobId).toBe(expectedChunkJobId("apple.com", TIME, 0));
-	});
-
-	it("clips to maxFanout when totalPages exceeds it", async () => {
-		const { client, chunkQueue } = makeClient();
-		await client.enqueueCrawlChunks("apple.com", TIME, 10, 3);
-		const jobs = chunkQueue.addBulk!.mock.calls[0][0] as unknown[];
-		expect(jobs).toHaveLength(3);
-	});
-
-	it("is a no-op when domainCrawlEnabled is false", async () => {
-		const { client, chunkQueue } = makeClient({ domainCrawlEnabled: false });
-		await expect(
-			client.enqueueCrawlChunks("apple.com", TIME, 5, 1000),
-		).resolves.toBeUndefined();
-		expect(chunkQueue.addBulk!).not.toHaveBeenCalled();
-	});
-
-	it("enqueues 0 jobs when totalPages is 0", async () => {
-		const { client, chunkQueue } = makeClient();
-		await client.enqueueCrawlChunks("apple.com", TIME, 0, 1000);
-		expect(chunkQueue.addBulk!).not.toHaveBeenCalled();
-	});
-
-	it("passes the CHUNK_JOB_OPTS: attempts/backoff/removeOnComplete/removeOnFail", async () => {
-		const { client, chunkQueue } = makeClient();
-		await client.enqueueCrawlChunks("apple.com", TIME, 1, 1000);
-		const jobs = chunkQueue.addBulk!.mock.calls[0][0] as Array<{ opts: Record<string, unknown> }>;
-		const opts = jobs[0].opts;
-		expect(opts.attempts).toBe(3);
-		expect(opts.backoff).toEqual({ type: "exponential", delay: 2000 });
-		expect(opts.removeOnComplete).toEqual({ count: 100, age: 3600 });
-		expect(opts.removeOnFail).toBe(1000);
+	it("omits the crawl field for a plain foreground fetch", async () => {
+		const { client, exactQueue } = makeClient();
+		await client.enqueueExact("https://example.com/US/", TIME);
+		const data = exactQueue.add!.mock.calls[0][1] as Record<string, unknown>;
+		expect(data.crawl).toBeUndefined();
 	});
 });

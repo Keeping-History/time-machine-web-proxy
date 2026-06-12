@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import type { Queue, QueueEvents } from "bullmq";
 import type pino from "pino";
 import { isJobProgress, type JobProgress } from "../models/job-progress";
-import type { DomainCrawlChunkJob, DomainCrawlJob, ExactUrlJob } from "../queue/jobs";
+import type { CrawlMeta, DomainCrawlJob, ExactUrlJob } from "../queue/jobs";
 
 /**
  * Deterministic job IDs for in-flight dedup. Two concurrent foreground
@@ -38,9 +38,6 @@ const BASE_JOB_OPTS = {
 	removeOnFail: 1000,
 } as const;
 
-const crawlChunkJobId = (host: string, time: string, page: number): string =>
-	`cc-${createHash("sha256").update(`${host}|${time}|${page}`).digest("hex").slice(0, 16)}`;
-
 /**
  * Wall-clock timeout for `waitUntilFinished`. Covers the worst-case retry
  * chain (see BASE_JOB_OPTS) with a 14s margin.
@@ -56,9 +53,8 @@ export type JobProgressListener = (progress: JobProgress) => void;
  */
 export interface ArchiveJobClientPort {
 	enqueueExactAndWait(url: string, time: string, onProgress?: JobProgressListener): Promise<void>;
-	enqueueExact(url: string, time: string): Promise<void>;
+	enqueueExact(url: string, time: string, crawl?: CrawlMeta): Promise<void>;
 	enqueueDomainCrawl(host: string, time: string): Promise<void>;
-	enqueueCrawlChunks(host: string, time: string, totalPages: number, maxFanout: number): Promise<void>;
 }
 
 /**
@@ -84,7 +80,6 @@ export class ArchiveJobClient implements ArchiveJobClientPort {
 	constructor(
 		private readonly exactQueue: Queue<ExactUrlJob>,
 		private readonly crawlQueue: Queue<DomainCrawlJob>,
-		private readonly chunkQueue: Queue<DomainCrawlChunkJob>,
 		private readonly exactEvents: QueueEvents,
 		private readonly logger: pino.Logger,
 		private readonly domainCrawlEnabled: boolean,
@@ -127,10 +122,14 @@ export class ArchiveJobClient implements ArchiveJobClientPort {
 		}
 	}
 
-	async enqueueExact(url: string, time: string): Promise<void> {
+	async enqueueExact(url: string, time: string, crawl?: CrawlMeta): Promise<void> {
 		const jobId = exactJobId(url, time);
-		await this.exactQueue.add("exact", { url, time }, { ...BASE_JOB_OPTS, jobId });
-		this.logger.debug({ jobId, url, time }, "[archive-job-client] enqueued exact (crawl fan-out)");
+		const data: ExactUrlJob = crawl ? { url, time, crawl } : { url, time };
+		await this.exactQueue.add("exact", data, { ...BASE_JOB_OPTS, jobId });
+		this.logger.debug(
+			{ jobId, url, time, crawlDepth: crawl?.depth },
+			"[archive-job-client] enqueued exact",
+		);
 	}
 
 	async enqueueDomainCrawl(host: string, time: string): Promise<void> {
@@ -138,28 +137,5 @@ export class ArchiveJobClient implements ArchiveJobClientPort {
 		const jobId = crawlJobId(host, time);
 		await this.crawlQueue.add("crawl", { host, time }, { ...BASE_JOB_OPTS, jobId });
 		this.logger.debug({ jobId, host, time }, "[archive-job-client] enqueued crawl");
-	}
-
-	async enqueueCrawlChunks(
-		host: string,
-		time: string,
-		totalPages: number,
-		maxFanout: number,
-	): Promise<void> {
-		if (!this.domainCrawlEnabled) return;
-		const limit = Math.min(totalPages, maxFanout);
-		const jobs = Array.from({ length: limit }, (_, page) => ({
-			name: "crawl-chunk" as const,
-			data: { host, time, page },
-			opts: { ...BASE_JOB_OPTS, jobId: crawlChunkJobId(host, time, page) },
-		}));
-		if (jobs.length === 0) return;
-		await this.chunkQueue.addBulk(jobs);
-		if (totalPages > maxFanout) {
-			this.logger.warn(
-				{ host, time, totalPages, enqueued: maxFanout },
-				"[archive-job-client] crawl fan-out clipped to CRAWL_MAX_CHUNK_FANOUT",
-			);
-		}
 	}
 }

@@ -1,4 +1,4 @@
-import type { QUEUE_CRAWL, QUEUE_CRAWL_CHUNK, QUEUE_EXACT } from "../queue/jobs";
+import type { QUEUE_CRAWL, QUEUE_EXACT } from "../queue/jobs";
 
 export type JobProgressStage =
 	| "picked_up"
@@ -10,7 +10,7 @@ export type JobProgressStage =
 	| "download_done"
 	| "error";
 
-export type JobProgressQueue = typeof QUEUE_EXACT | typeof QUEUE_CRAWL | typeof QUEUE_CRAWL_CHUNK;
+export type JobProgressQueue = typeof QUEUE_EXACT | typeof QUEUE_CRAWL;
 
 export interface JobProgress {
 	stage: JobProgressStage;

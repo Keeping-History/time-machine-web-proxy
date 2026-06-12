@@ -2,11 +2,9 @@ import { promises as fs } from "node:fs";
 import type IORedis from "ioredis";
 import type pino from "pino";
 import type { ArchiveJobClientPort, JobProgressListener } from "../clients/archive-job-client";
-import { windowAround } from "../lib/archive-time";
 import { candidateFallbackUrls } from "../lib/asset-fallbacks";
-import { cachedCdxFetch } from "../lib/cdx-cache";
 import type { DirectClient } from "../lib/dependencies";
-import { describeFetchError, errorHasStatus } from "../lib/errors";
+import { errorHasStatus } from "../lib/errors";
 import {
 	inlineCssLinksOnAst,
 	rewriteCssUrls,
@@ -18,10 +16,6 @@ import type { Config } from "../models/config";
 import type { ProxyResult } from "../models/proxy";
 import type { CacheService } from "./cache";
 
-// 30s — matches AVAILABILITY_TIMEOUT_MS in the worker. Production logs show
-// sporadic 10s connect timeouts against web.archive.org; widening here keeps
-// the size-preflight from misclassifying transient slowness as "skip crawl".
-const CDX_TIMEOUT_MS = 30_000;
 const HOST_BUDGET_TTL_S = 86_400;
 
 interface StatusError extends Error {
@@ -62,12 +56,8 @@ export class ProxyService {
 		private readonly config: Pick<
 			Config,
 			| "whitelistHosts"
-			| "crawlMaxCdxPages"
-			| "crawlWindowDays"
-			| "crawlMaxChunkFanout"
 			| "bullmqPrefix"
 			| "domainCrawlEnabled"
-			| "cdxCacheEnabled"
 			| "lockTime"
 			| "proxyBase"
 			| "prewarmEnabled"
@@ -345,20 +335,8 @@ export class ProxyService {
 				}
 			}
 
-			const pages = await this.cdxPageCount(host, time);
-			if (pages === 0) {
-				this.logger.debug({ host }, "[crawl-skip] 0 CDX pages in window");
-				return;
-			}
-			const cappedPages = Math.min(pages, this.config.crawlMaxCdxPages);
-			this.logger.info({ host, time, pages, cappedPages }, "[crawl] fan-out");
+			this.logger.info({ host, time }, "[crawl] seeding recursive crawl");
 			await this.archiveJobClient.enqueueDomainCrawl(host, time);
-			await this.archiveJobClient.enqueueCrawlChunks(
-				host,
-				time,
-				cappedPages,
-				this.config.crawlMaxChunkFanout,
-			);
 		} catch (e) {
 			this.logger.warn(
 				{ host, err: e instanceof Error ? e : new Error(String(e)) },
@@ -368,119 +346,26 @@ export class ProxyService {
 	}
 
 	/**
-	 * Explicit (admin-triggered) domain crawl. Unlike `maybeEnqueueDomainCrawl`,
-	 * this:
+	 * Explicit (admin-triggered) domain crawl. Seeds a recursive (BFS) link
+	 * crawl from the host homepage. Unlike `maybeEnqueueDomainCrawl` it:
 	 *   - Throws status errors instead of swallowing them — the caller is an
 	 *     HTTP endpoint that needs a concrete response code.
-	 *   - Bypasses the per-host 24h Redis budget. The budget exists to throttle
-	 *     fire-and-forget side-effects of foreground requests; an explicit admin
-	 *     action shouldn't inherit that throttle.
-	 *   - STILL enforces the whitelist — that's a security boundary, not a rate-limit.
-	 *   - STILL respects `DOMAIN_CRAWL_ENABLED` as the kill switch.
+	 *   - Bypasses the per-host 24h Redis budget (that throttle is for the
+	 *     fire-and-forget foreground path, not an explicit admin action).
+	 *   - STILL enforces the whitelist (a security boundary) and
+	 *     DOMAIN_CRAWL_ENABLED (the kill switch).
 	 *
-	 * `opts.skipPreflight` — when true, skips the CDX page-count cap check. Useful
-	 * when archive.org is rejecting/timing-out CDX requests from your egress IP
-	 * but the downloader path still works. Trade-off: you lose the runaway-crawl
-	 * guard, so the admin must know the target host's size or risk a multi-hour
-	 * download. Always opt-in; never on by default.
+	 * The crawl walk — same-host link discovery, depth and page-budget bounds —
+	 * lives in the exact worker (recurseCrawl). This only enqueues the seed.
 	 */
-	async triggerDomainCrawl(
-		host: string,
-		time: string,
-		opts: { skipPreflight?: boolean } = {},
-	): Promise<void> {
+	async triggerDomainCrawl(host: string, time: string): Promise<void> {
 		if (!this.config.domainCrawlEnabled) {
 			throw statusError("Domain crawl is disabled (DOMAIN_CRAWL_ENABLED=false)", 503);
 		}
 		if (!isHostnameWhitelisted(host, this.config.whitelistHosts)) {
 			throw statusError("Host not whitelisted", 403);
 		}
-		if (opts.skipPreflight) {
-			this.logger.warn(
-				{ host, time },
-				"[crawl] preflight SKIPPED by admin — runaway-crawl guard disabled for this request",
-			);
-			await this.archiveJobClient.enqueueDomainCrawl(host, time);
-			// Without a CDX page-count, fanout serves as both the total-pages
-			// estimate and the cap — Math.min(fanout, fanout) is intentional.
-			const fanout = this.config.crawlMaxChunkFanout;
-			await this.archiveJobClient.enqueueCrawlChunks(host, time, fanout, fanout);
-		} else {
-			const pages = await this.cdxPageCount(host, time);
-			if (pages === 0) {
-				throw statusError("No CDX captures in window (0 pages)", 422);
-			}
-			this.logger.info({ host, time, pages }, "[crawl] explicit enqueue (preflight ok)");
-			await this.archiveJobClient.enqueueDomainCrawl(host, time);
-			await this.archiveJobClient.enqueueCrawlChunks(
-				host,
-				time,
-				pages,
-				this.config.crawlMaxChunkFanout,
-			);
-		}
-	}
-
-	private async cdxPageCount(host: string, time: string): Promise<number> {
-		const { from, to } = windowAround(time, this.config.crawlWindowDays);
-		// output=json is required so showNumPages counts pages in the same
-		// pagination scheme the chunk worker uses. Without it, text-mode and
-		// JSON-mode use different page sizes, causing too many chunk jobs to be
-		// enqueued. CDX returns [["numpages"],["N"]] in this mode.
-		const u =
-			`https://web.archive.org/cdx/search/cdx?url=${encodeURIComponent(`${host}/*`)}` +
-			`&from=${from}&to=${to}&output=json&showNumPages=true`;
-		const parsePageCount = (body: string): number => {
-			const rows = JSON.parse(body) as unknown[][];
-			const n = Number.parseInt(String(rows[1]?.[0] ?? ""), 10);
-			if (Number.isNaN(n)) throw new Error("CDX page count is not a number");
-			return n;
-		};
-		const isValidPageCount = (body: string): boolean => {
-			try {
-				return Number.isFinite(parsePageCount(body));
-			} catch {
-				return false;
-			}
-		};
-		let r: Response;
-		try {
-			r = await cachedCdxFetch(
-				u,
-				{ signal: AbortSignal.timeout(CDX_TIMEOUT_MS) },
-				{
-					redis: this.redis,
-					logger: this.logger,
-					enabled: this.config.cdxCacheEnabled,
-					bullmqPrefix: this.config.bullmqPrefix,
-					validate: isValidPageCount,
-				},
-			);
-		} catch (e) {
-			// Node's fetch (undici) wraps the real failure in a generic
-			// `TypeError: fetch failed` whose `.cause` holds the actual error
-			// (DNS, ECONNREFUSED, TLS, AbortError on timeout, etc.). Surface it
-			// so the caller (and the JSON error body on POST /crawl) shows the
-			// reason, not just the wrapper.
-			throw new Error(`CDX preflight network error: ${describeFetchError(e)}`, {
-				cause: e,
-			});
-		}
-		if (!r.ok) throw new Error(`CDX preflight ${r.status}`);
-		const txt = (await r.text()).trim();
-		let n: number;
-		try {
-			n = parsePageCount(txt);
-		} catch {
-			n = Number.NaN;
-		}
-		if (!Number.isFinite(n)) {
-			this.logger.warn(
-				{ host, body: txt.slice(0, 80) },
-				"[proxy] CDX page-count parse failed — response was not an integer",
-			);
-			throw new Error(`CDX page count indeterminate: ${txt.slice(0, 80)}`);
-		}
-		return n;
+		this.logger.info({ host, time }, "[crawl] explicit recursive-crawl seed");
+		await this.archiveJobClient.enqueueDomainCrawl(host, time);
 	}
 }

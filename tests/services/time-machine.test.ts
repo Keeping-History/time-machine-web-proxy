@@ -30,7 +30,8 @@ const config: Config = {
 	domainCrawlEnabled: true,
 	workerConcurrency: 2,
 	workerRateLimitPerSec: 1,
-	crawlMaxCdxPages: 50,
+	crawlMaxDepth: 3,
+	crawlMaxPages: 1000,
 	outboundProxyUrls: [],
 	outboundProxyChooser: "sequential",
 	outboundProxyUsername: "",
@@ -52,8 +53,6 @@ const config: Config = {
 	notFoundTtlDays: 30,
 	cdxCacheEnabled: true,
 	lockTime: false,
-	crawlWindowDays: 30,
-	crawlMaxChunkFanout: 1000,
 	domainRemap: {},
 };
 
@@ -642,11 +641,8 @@ describe("TimeMachineService HTTP handler — POST /crawl (admin)", () => {
 			expect(body).toEqual({
 				host: "example.com",
 				time: "20010913000000",
-				preflightSkipped: false,
 			});
-			expect(proxy.triggerDomainCrawl).toHaveBeenCalledWith("example.com", "20010913000000", {
-				skipPreflight: false,
-			});
+			expect(proxy.triggerDomainCrawl).toHaveBeenCalledWith("example.com", "20010913000000");
 		} finally {
 			await svc.stop();
 		}
@@ -667,9 +663,7 @@ describe("TimeMachineService HTTP handler — POST /crawl (admin)", () => {
 				headers: { Authorization: `Bearer ${TOKEN}` },
 			});
 			expect(r.status).toBe(202);
-			expect(proxy.triggerDomainCrawl).toHaveBeenCalledWith("example.com", config.defaultTime, {
-				skipPreflight: false,
-			});
+			expect(proxy.triggerDomainCrawl).toHaveBeenCalledWith("example.com", config.defaultTime);
 		} finally {
 			await svc.stop();
 		}
@@ -769,116 +763,6 @@ describe("TimeMachineService HTTP handler — POST /crawl (admin)", () => {
 			});
 			expect(r3.status).toBe(503);
 			expect((await r3.json()).error).toMatch(/disabled/i);
-		} finally {
-			await svc.stop();
-		}
-	});
-
-	it("forwards skip_preflight=true as opts.skipPreflight to triggerDomainCrawl", async () => {
-		// HTTP query → service-call shape. Body must echo preflightSkipped:true
-		// so the caller sees the safety net was disabled (no silent bypass).
-		const trigger = jest.fn().mockResolvedValue(undefined);
-		const { svc, proxy } = makeService(undefined, {
-			triggerDomainCrawl: trigger,
-			config: { cacheClearToken: TOKEN },
-		});
-		const port = await startAndAwaitListening(svc);
-		try {
-			const r = await fetch(`http://127.0.0.1:${port}/crawl?host=example.com&skip_preflight=true`, {
-				method: "POST",
-				headers: { Authorization: `Bearer ${TOKEN}` },
-			});
-			expect(r.status).toBe(202);
-			const body = await r.json();
-			expect(body.preflightSkipped).toBe(true);
-			expect(proxy.triggerDomainCrawl).toHaveBeenCalledWith("example.com", config.defaultTime, {
-				skipPreflight: true,
-			});
-		} finally {
-			await svc.stop();
-		}
-	});
-
-	it("default (no skip_preflight param) sends skipPreflight:false", async () => {
-		// Default-safe: omitting the param keeps the size-cap guard ON.
-		const trigger = jest.fn().mockResolvedValue(undefined);
-		const { svc, proxy } = makeService(undefined, {
-			triggerDomainCrawl: trigger,
-			config: { cacheClearToken: TOKEN },
-		});
-		const port = await startAndAwaitListening(svc);
-		try {
-			const r = await fetch(`http://127.0.0.1:${port}/crawl?host=example.com`, {
-				method: "POST",
-				headers: { Authorization: `Bearer ${TOKEN}` },
-			});
-			expect(r.status).toBe(202);
-			const body = await r.json();
-			expect(body.preflightSkipped).toBe(false);
-			expect(proxy.triggerDomainCrawl).toHaveBeenCalledWith("example.com", config.defaultTime, {
-				skipPreflight: false,
-			});
-		} finally {
-			await svc.stop();
-		}
-	});
-
-	it("only the literal string 'true' opts in — typos like 'yes' / '1' / 'TRUE' (sic) do NOT", async () => {
-		// Safety-net bypass is high-impact; only an exact "true" (case-insensitive)
-		// counts. Anything else is treated as the safer default.
-		const trigger = jest.fn().mockResolvedValue(undefined);
-		const { svc, proxy } = makeService(undefined, {
-			triggerDomainCrawl: trigger,
-			config: { cacheClearToken: TOKEN },
-		});
-		const port = await startAndAwaitListening(svc);
-		try {
-			// "yes" → NOT opt-in
-			let r = await fetch(`http://127.0.0.1:${port}/crawl?host=example.com&skip_preflight=yes`, {
-				method: "POST",
-				headers: { Authorization: `Bearer ${TOKEN}` },
-			});
-			expect(r.status).toBe(202);
-			expect((await r.json()).preflightSkipped).toBe(false);
-
-			// "1" → NOT opt-in
-			r = await fetch(`http://127.0.0.1:${port}/crawl?host=example.com&skip_preflight=1`, {
-				method: "POST",
-				headers: { Authorization: `Bearer ${TOKEN}` },
-			});
-			expect((await r.json()).preflightSkipped).toBe(false);
-
-			// "TRUE" (uppercase) IS opt-in — case-insensitive
-			r = await fetch(`http://127.0.0.1:${port}/crawl?host=example.com&skip_preflight=TRUE`, {
-				method: "POST",
-				headers: { Authorization: `Bearer ${TOKEN}` },
-			});
-			expect((await r.json()).preflightSkipped).toBe(true);
-
-			expect(proxy.triggerDomainCrawl).toHaveBeenNthCalledWith(
-				1,
-				"example.com",
-				config.defaultTime,
-				{
-					skipPreflight: false,
-				},
-			);
-			expect(proxy.triggerDomainCrawl).toHaveBeenNthCalledWith(
-				2,
-				"example.com",
-				config.defaultTime,
-				{
-					skipPreflight: false,
-				},
-			);
-			expect(proxy.triggerDomainCrawl).toHaveBeenNthCalledWith(
-				3,
-				"example.com",
-				config.defaultTime,
-				{
-					skipPreflight: true,
-				},
-			);
 		} finally {
 			await svc.stop();
 		}

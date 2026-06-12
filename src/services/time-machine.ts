@@ -119,14 +119,10 @@ async function handleCrawlEnqueue(
 		logRequest(deps, req, 400, start);
 		return;
 	}
-	// Opt-in: skip the CDX size preflight. Only "true" (case-insensitive)
-	// counts as opt-in — typos like "yes"/"1" must NOT silently disable the
-	// safety net.
-	const skipPreflight = (u.searchParams.get("skip_preflight") ?? "").toLowerCase() === "true";
 	try {
-		await deps.proxy.triggerDomainCrawl(host, time, { skipPreflight });
+		await deps.proxy.triggerDomainCrawl(host, time);
 		res.setHeader("Content-Type", "application/json");
-		res.writeHead(202).end(JSON.stringify({ host, time, preflightSkipped: skipPreflight }));
+		res.writeHead(202).end(JSON.stringify({ host, time }));
 		logRequest(deps, req, 202, start, { host, time, crawl: true });
 	} catch (e) {
 		const status = errorHasStatus(e) ? e.status : 500;

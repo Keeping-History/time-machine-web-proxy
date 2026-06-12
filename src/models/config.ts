@@ -18,13 +18,12 @@ export interface Config {
 	domainCrawlEnabled: boolean;
 	workerConcurrency: number;
 	workerRateLimitPerSec: number;
-	crawlMaxCdxPages: number;
-	/** CDX time window around `time` for crawl-mode queries, in days.
-	 *  Env: CRAWL_WINDOW_DAYS (default 30, 1-3650). */
-	crawlWindowDays: number;
-	/** Max chunk jobs to fan out from a single crawl trigger.
-	 *  Env: CRAWL_MAX_CHUNK_FANOUT (default 1000, 1-10000). */
-	crawlMaxChunkFanout: number;
+	/** Recursive (BFS) crawl: max link depth to follow from the seed homepage
+	 *  (seed is depth 0). Env: CRAWL_MAX_DEPTH (default 3, 1-20). */
+	crawlMaxDepth: number;
+	/** Recursive (BFS) crawl: max HTML pages to recurse into per crawl run
+	 *  (caps load on archive.org). Env: CRAWL_MAX_PAGES (default 1000, 1-1000000). */
+	crawlMaxPages: number;
 	outboundProxyUrls: string[];
 	outboundProxyChooser: OutboundProxyChooser;
 	outboundProxyUsername: string;

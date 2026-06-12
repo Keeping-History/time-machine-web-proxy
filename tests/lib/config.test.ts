@@ -27,7 +27,8 @@ describe("loadConfig", () => {
 		delete process.env.DOMAIN_CRAWL_ENABLED;
 		delete process.env.WORKER_CONCURRENCY;
 		delete process.env.WORKER_RATE_LIMIT_PER_SEC;
-		delete process.env.CRAWL_MAX_CDX_PAGES;
+		delete process.env.CRAWL_MAX_DEPTH;
+		delete process.env.CRAWL_MAX_PAGES;
 		delete process.env.OUTBOUND_PROXY_URLS;
 		delete process.env.OUTBOUND_PROXY_USERNAME;
 		delete process.env.OUTBOUND_PROXY_PASSWORD;
@@ -48,7 +49,8 @@ describe("loadConfig", () => {
 		expect(config.domainCrawlEnabled).toBe(true);
 		expect(config.workerConcurrency).toBe(2);
 		expect(config.workerRateLimitPerSec).toBe(1);
-		expect(config.crawlMaxCdxPages).toBe(50);
+		expect(config.crawlMaxDepth).toBe(3);
+		expect(config.crawlMaxPages).toBe(1000);
 		expect(config.outboundProxyUrls).toEqual([]);
 		expect(config.outboundProxyUsername).toBe("");
 		expect(config.outboundProxyPassword).toBe("");
@@ -132,13 +134,13 @@ describe("loadConfig", () => {
 	it("reads worker integer env vars", () => {
 		process.env.WORKER_CONCURRENCY = "5";
 		process.env.WORKER_RATE_LIMIT_PER_SEC = "2";
-		process.env.CRAWL_MAX_CDX_PAGES = "100";
+		process.env.CRAWL_MAX_DEPTH = "6";
 
 		const config = loadConfig();
 
 		expect(config.workerConcurrency).toBe(5);
 		expect(config.workerRateLimitPerSec).toBe(2);
-		expect(config.crawlMaxCdxPages).toBe(100);
+		expect(config.crawlMaxDepth).toBe(6);
 	});
 
 	it("CDX_CACHE_ENABLED defaults to true when unset or empty", () => {
@@ -165,57 +167,44 @@ describe("loadConfig", () => {
 		expect(loadConfig().cdxCacheEnabled).toBe(true);
 	});
 
-	it("CRAWL_WINDOW_DAYS defaults to 30 when unset", () => {
-		delete process.env.CRAWL_WINDOW_DAYS;
-		expect(loadConfig().crawlWindowDays).toBe(30);
+	it("CRAWL_MAX_DEPTH defaults to 3 when unset", () => {
+		delete process.env.CRAWL_MAX_DEPTH;
+		expect(loadConfig().crawlMaxDepth).toBe(3);
 	});
 
-	it("CRAWL_WINDOW_DAYS=7 parses correctly", () => {
-		process.env.CRAWL_WINDOW_DAYS = "7";
-		expect(loadConfig().crawlWindowDays).toBe(7);
+	it("CRAWL_MAX_DEPTH=6 parses correctly", () => {
+		process.env.CRAWL_MAX_DEPTH = "6";
+		expect(loadConfig().crawlMaxDepth).toBe(6);
 	});
 
-	it("CRAWL_WINDOW_DAYS=0 is rejected (below min 1)", () => {
-		process.env.CRAWL_WINDOW_DAYS = "0";
-		expect(() => loadConfig()).toThrow(/CRAWL_WINDOW_DAYS/);
+	it("CRAWL_MAX_DEPTH=0 is rejected (below min 1)", () => {
+		process.env.CRAWL_MAX_DEPTH = "0";
+		expect(() => loadConfig()).toThrow(/CRAWL_MAX_DEPTH/);
 	});
 
-	it("CRAWL_WINDOW_DAYS=3651 is rejected (above max 3650)", () => {
-		process.env.CRAWL_WINDOW_DAYS = "3651";
-		expect(() => loadConfig()).toThrow(/CRAWL_WINDOW_DAYS/);
+	it("CRAWL_MAX_DEPTH=21 is rejected (above max 20)", () => {
+		process.env.CRAWL_MAX_DEPTH = "21";
+		expect(() => loadConfig()).toThrow(/CRAWL_MAX_DEPTH/);
 	});
 
-	it("CRAWL_WINDOW_DAYS non-integer is rejected", () => {
-		process.env.CRAWL_WINDOW_DAYS = "1.5";
-		expect(() => loadConfig()).toThrow(/CRAWL_WINDOW_DAYS/);
-
-		process.env.CRAWL_WINDOW_DAYS = "abc";
-		expect(() => loadConfig()).toThrow(/CRAWL_WINDOW_DAYS/);
+	it("CRAWL_MAX_PAGES defaults to 1000 when unset", () => {
+		delete process.env.CRAWL_MAX_PAGES;
+		expect(loadConfig().crawlMaxPages).toBe(1000);
 	});
 
-	it("CRAWL_MAX_CHUNK_FANOUT defaults to 1000 when unset", () => {
-		delete process.env.CRAWL_MAX_CHUNK_FANOUT;
-		expect(loadConfig().crawlMaxChunkFanout).toBe(1000);
+	it("CRAWL_MAX_PAGES=25000 parses correctly", () => {
+		process.env.CRAWL_MAX_PAGES = "25000";
+		expect(loadConfig().crawlMaxPages).toBe(25000);
 	});
 
-	it("CRAWL_MAX_CHUNK_FANOUT=500 parses correctly", () => {
-		process.env.CRAWL_MAX_CHUNK_FANOUT = "500";
-		expect(loadConfig().crawlMaxChunkFanout).toBe(500);
+	it("CRAWL_MAX_PAGES=0 is rejected (below min 1)", () => {
+		process.env.CRAWL_MAX_PAGES = "0";
+		expect(() => loadConfig()).toThrow(/CRAWL_MAX_PAGES/);
 	});
 
-	it("CRAWL_MAX_CHUNK_FANOUT=0 is rejected (below min 1)", () => {
-		process.env.CRAWL_MAX_CHUNK_FANOUT = "0";
-		expect(() => loadConfig()).toThrow(/CRAWL_MAX_CHUNK_FANOUT/);
-	});
-
-	it("CRAWL_MAX_CHUNK_FANOUT=10001 is rejected (above max 10000)", () => {
-		process.env.CRAWL_MAX_CHUNK_FANOUT = "10001";
-		expect(() => loadConfig()).toThrow(/CRAWL_MAX_CHUNK_FANOUT/);
-	});
-
-	it("CRAWL_MAX_CHUNK_FANOUT non-integer is rejected", () => {
-		process.env.CRAWL_MAX_CHUNK_FANOUT = "1.5";
-		expect(() => loadConfig()).toThrow(/CRAWL_MAX_CHUNK_FANOUT/);
+	it("CRAWL_MAX_PAGES non-integer is rejected", () => {
+		process.env.CRAWL_MAX_PAGES = "1.5";
+		expect(() => loadConfig()).toThrow(/CRAWL_MAX_PAGES/);
 	});
 
 	it("LOCK_TIME defaults to false when unset", () => {

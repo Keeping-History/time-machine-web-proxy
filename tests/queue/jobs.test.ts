@@ -1,9 +1,7 @@
 import {
-	assertDomainCrawlChunkJob,
 	assertDomainCrawlJob,
 	assertExactUrlJob,
 	QUEUE_CRAWL,
-	QUEUE_CRAWL_CHUNK,
 	QUEUE_EXACT,
 } from "../../src/queue/jobs";
 
@@ -18,14 +16,9 @@ describe("queue constants", () => {
 		expect(QUEUE_CRAWL).toBe("archive-crawl");
 	});
 
-	it("QUEUE_CRAWL_CHUNK is 'archive-crawl-chunk'", () => {
-		expect(QUEUE_CRAWL_CHUNK).toBe("archive-crawl-chunk");
-	});
-
 	it("queue names do not contain ':' (BullMQ constraint)", () => {
 		expect(QUEUE_EXACT).not.toContain(":");
 		expect(QUEUE_CRAWL).not.toContain(":");
-		expect(QUEUE_CRAWL_CHUNK).not.toContain(":");
 	});
 });
 
@@ -116,6 +109,28 @@ describe("assertExactUrlJob", () => {
 			}),
 		).toThrow("Invalid job.time");
 	});
+
+	it("accepts an optional valid crawl meta", () => {
+		expect(() =>
+			assertExactUrlJob({
+				url: "https://example.com/",
+				time: "20200101000000",
+				crawl: { rootHost: "example.com", rootTime: "20200101000000", depth: 0 },
+			}),
+		).not.toThrow();
+	});
+
+	it.each([
+		["non-object crawl", "nope"],
+		["missing rootHost", { rootTime: "20200101000000", depth: 0 }],
+		["bad rootTime", { rootHost: "example.com", rootTime: "2020", depth: 0 }],
+		["negative depth", { rootHost: "example.com", rootTime: "20200101000000", depth: -1 }],
+		["float depth", { rootHost: "example.com", rootTime: "20200101000000", depth: 1.5 }],
+	])("throws 'Invalid job.crawl…' for %s", (_label, crawl) => {
+		expect(() =>
+			assertExactUrlJob({ url: "https://example.com/", time: "20200101000000", crawl }),
+		).toThrow(/Invalid job\.crawl/);
+	});
 });
 
 describe("assertDomainCrawlJob", () => {
@@ -165,65 +180,3 @@ describe("assertDomainCrawlJob", () => {
 	});
 });
 
-describe("assertDomainCrawlChunkJob", () => {
-	it("accepts a valid host + 14-digit timestamp + non-negative page", () => {
-		expect(() =>
-			assertDomainCrawlChunkJob({ host: "apple.com", time: "19980101000000", page: 0 }),
-		).not.toThrow();
-
-		expect(() =>
-			assertDomainCrawlChunkJob({ host: "apple.com", time: "19980101000000", page: 42 }),
-		).not.toThrow();
-	});
-
-	it.each([
-		["null", null],
-		["undefined", undefined],
-		["string", "not-an-object"],
-		["array", []],
-	])("throws 'Invalid job: not object' for %s", (_label, value) => {
-		expect(() => assertDomainCrawlChunkJob(value)).toThrow("Invalid job: not object");
-	});
-
-	it("throws 'Invalid job.host' when host is empty", () => {
-		expect(() => assertDomainCrawlChunkJob({ host: "", time: "19980101000000", page: 0 })).toThrow(
-			"Invalid job.host",
-		);
-	});
-
-	it("throws 'Invalid job.host' when host is missing", () => {
-		expect(() => assertDomainCrawlChunkJob({ time: "19980101000000", page: 0 })).toThrow(
-			"Invalid job.host",
-		);
-	});
-
-	it("throws 'Invalid job.time' when time is malformed", () => {
-		expect(() =>
-			assertDomainCrawlChunkJob({ host: "apple.com", time: "1998-01-01", page: 0 }),
-		).toThrow("Invalid job.time");
-	});
-
-	it("throws 'Invalid job.time' when time is missing", () => {
-		expect(() => assertDomainCrawlChunkJob({ host: "apple.com", page: 0 })).toThrow(
-			"Invalid job.time",
-		);
-	});
-
-	it("throws 'Invalid job.page' when page is negative", () => {
-		expect(() =>
-			assertDomainCrawlChunkJob({ host: "apple.com", time: "19980101000000", page: -1 }),
-		).toThrow("Invalid job.page");
-	});
-
-	it("throws 'Invalid job.page' when page is a float", () => {
-		expect(() =>
-			assertDomainCrawlChunkJob({ host: "apple.com", time: "19980101000000", page: 1.5 }),
-		).toThrow("Invalid job.page");
-	});
-
-	it("throws 'Invalid job.page' when page is missing", () => {
-		expect(() =>
-			assertDomainCrawlChunkJob({ host: "apple.com", time: "19980101000000" }),
-		).toThrow("Invalid job.page");
-	});
-});
