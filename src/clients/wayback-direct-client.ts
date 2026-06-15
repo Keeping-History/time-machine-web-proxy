@@ -12,6 +12,42 @@ const DEFAULT_TIMEOUT_MS = 10_000;
 const DEFAULT_BREAKER_BASE_MS = 5_000;
 const DEFAULT_BREAKER_MAX_MS = 600_000;
 
+/**
+ * Convert a successful fetch Response into a Node Readable that can never crash
+ * the process.
+ *
+ * The request is made with `AbortSignal.timeout`, which stays armed until the
+ * body is fully read. If a downstream consumer abandons the body before reading
+ * it — e.g. `cache.writeStream` throws at `mkdir`/`rename` on a path collision
+ * before it pipes the stream — the timeout later fires and aborts the dangling
+ * stream. A Node Readable with no `error` listener turns that into an
+ * `uncaughtException`; since the HTTP server and the BullMQ workers share one
+ * process, it takes the whole server down (observed as CrashLoopBackOff once the
+ * recursive crawl produced collision-induced write failures at volume).
+ *
+ * A bound no-op `error` listener guarantees the event is always handled. Real
+ * consumers use `stream.pipeline`, which attaches its own handler and still
+ * observes/propagates the error for job-failure accounting — the no-op only
+ * absorbs the orphaned-stream case.
+ */
+function toCrashSafeBody(res: Response): Readable {
+	const body = res.body
+		? Readable.fromWeb(res.body as Parameters<typeof Readable.fromWeb>[0])
+		: Readable.from([]);
+	body.on("error", () => {});
+	return body;
+}
+
+/**
+ * Release a response body we are NOT going to hand to a consumer (the 4xx/5xx
+ * paths). Leaving it undrained keeps the AbortSignal.timeout armed against a
+ * dangling stream; cancelling tears it down now so nothing fires later. Errors
+ * are ignored — the stream may already be closed.
+ */
+function discardBody(res: Response): void {
+	void res.body?.cancel().catch(() => {});
+}
+
 export type DirectFetchOutcome = "ok" | "not_found" | "fallback";
 
 export interface ResolvedResult {
@@ -257,17 +293,19 @@ export class WaybackDirectClient {
 		this.log.info({ archiveUrl, status: res.status }, "[wayback-direct] response");
 
 		if (res.status === 404) {
+			discardBody(res);
 			return { outcome: "not_found" };
 		}
 
 		if (res.status === 200) {
 			return {
 				outcome: "ok",
-				body: res.body ? Readable.fromWeb(res.body as Parameters<typeof Readable.fromWeb>[0]) : Readable.from([]),
+				body: toCrashSafeBody(res),
 				contentType: res.headers.get("content-type") ?? undefined,
 			};
 		}
 
+		discardBody(res);
 		return { outcome: "fallback", reason: `http-${res.status}` };
 	}
 
@@ -322,6 +360,7 @@ export class WaybackDirectClient {
 		this.log.info({ archiveUrl, status: res.status }, "[wayback-direct] response");
 
 		if (res.status === 404) {
+			discardBody(res);
 			return { outcome: "not_found" };
 		}
 
@@ -330,12 +369,13 @@ export class WaybackDirectClient {
 			const resolvedTime = resolvedTimeMatch?.[1];
 			return {
 				outcome: "ok",
-				body: res.body ? Readable.fromWeb(res.body as Parameters<typeof Readable.fromWeb>[0]) : Readable.from([]),
+				body: toCrashSafeBody(res),
 				contentType: res.headers.get("content-type") ?? undefined,
 				resolvedTime,
 			};
 		}
 
+		discardBody(res);
 		return { outcome: "fallback", reason: `http-${res.status}` };
 	}
 }

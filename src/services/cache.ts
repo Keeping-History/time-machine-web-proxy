@@ -123,7 +123,14 @@ export class CacheService {
 			// re-fetches and overwrites it; the atomic rename is the only safe
 			// way to replace it, so we deliberately do NOT unlink here (a stale
 			// unlink could race ahead of a concurrent good rewrite and delete it).
-			if (stat.size === 0) {
+			if (stat.isDirectory?.()) {
+				// The slot is a directory because a child URL was cached first
+				// (e.g. `/a/b` arrived before the `/a` page). The page itself, if
+				// cached, lives at `<path>/index.html` — fall through to the
+				// directory-index probe below rather than returning a directory as
+				// if it were a file body (which would EISDIR on read).
+				this.logger.debug({ path: primaryAbs }, "[cache] primary path is a directory — trying index.html");
+			} else if (stat.size === 0) {
 				this.logger.warn({ path: primaryAbs }, "[cache] zero-byte entry — treating as miss");
 			} else {
 				const contentType = await this.resolveContentType(primaryAbs, url, time);
@@ -262,7 +269,22 @@ export class CacheService {
 			await fs.mkdir(dirname(dest), { recursive: true });
 			const tmp = `${dest}${TMP_SUFFIX}`;
 			await pipeline(readable, createWriteStream(tmp));
-			await fs.rename(tmp, dest);
+			try {
+				await fs.rename(tmp, dest);
+			} catch (e) {
+				// EISDIR: `dest` is already a directory because a child URL was
+				// cached first (e.g. `/a/b` before the `/a` page). The filesystem
+				// can't hold a file and a directory at the same name, so store the
+				// page at `<dest>/index.html` — the directory-index form that
+				// lookup() probes (and now prefers when the primary path is a
+				// directory). Best-effort: a failure here cleans up the tmp file.
+				if ((e as NodeJS.ErrnoException).code === "EISDIR") {
+					await fs.rename(tmp, join(dest, "index.html"));
+				} else {
+					await fs.unlink(tmp).catch(() => undefined);
+					throw e;
+				}
+			}
 		})();
 		this.writeInflight.set(dest, p);
 		try {

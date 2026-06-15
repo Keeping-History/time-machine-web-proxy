@@ -350,6 +350,20 @@ describe("CacheService.lookup (v2)", () => {
 		const result = await svc.lookup("https://example.com/nope", TIME);
 		expect(result).toBeNull();
 	});
+
+	// When a child URL (`/mac/os`) is cached before the `/mac` page, the slot at
+	// `<root>/mac` becomes a directory. lookup must not return the directory as a
+	// file body (which would EISDIR on read); it falls through to the
+	// directory-index probe, where the page lives at `<root>/mac/index.html`.
+	it("primary path is a directory → falls back to <root>/<path>/index.html", async () => {
+		(mockFs.stat as jest.Mock)
+			.mockResolvedValueOnce({ size: 4096, mtimeMs: Date.now(), isDirectory: () => true })
+			.mockResolvedValueOnce({ size: 11, mtimeMs: Date.now(), isDirectory: () => false });
+		const svc = makeService();
+		const result = await svc.lookup("https://example.com/mac", TIME);
+		expect(result?.absPath).toBe("/tmp/cache/v2/20200101000000/example.com/mac/index.html");
+		expect(result?.contentType).toBe("text/html");
+	});
 });
 
 describe("CacheService.writeNotFoundSentinel + sentinel-aware lookup", () => {
@@ -864,6 +878,40 @@ describe("CacheService.writeStream", () => {
 		const [renameSrc, renameDest] = (mockFs.rename as jest.Mock).mock.calls[0] as [string, string];
 		expect(renameSrc).toBe(`${dest}.tmp`);
 		expect(renameDest).toBe(dest);
+	});
+
+	it("EISDIR on rename (slot already a directory) → stores the page at <dest>/index.html", async () => {
+		// A child URL was cached first, so `dest` is now a directory. The rename
+		// of the tmp file onto `dest` fails EISDIR; the write retries onto the
+		// directory-index path, which lookup() prefers when the primary is a dir.
+		(mockFs.rename as jest.Mock)
+			.mockRejectedValueOnce(Object.assign(new Error("EISDIR"), { code: "EISDIR" }))
+			.mockResolvedValueOnce(undefined);
+		const svc = makeService();
+		const url = "https://example.com/education/dv";
+		const dest = svc.computeAbsPath(url, TIME);
+
+		await svc.writeStream(url, TIME, Readable.from([Buffer.from("<html>")]));
+
+		const calls = (mockFs.rename as jest.Mock).mock.calls as Array<[string, string]>;
+		expect(calls[0]).toEqual([`${dest}.tmp`, dest]);
+		expect(calls[1]).toEqual([`${dest}.tmp`, `${dest}/index.html`]);
+		expect(mockFs.unlink).not.toHaveBeenCalled();
+	});
+
+	it("non-EISDIR rename failure cleans up the tmp file and rethrows", async () => {
+		(mockFs.rename as jest.Mock).mockRejectedValue(
+			Object.assign(new Error("ENOSPC"), { code: "ENOSPC" }),
+		);
+		(mockFs.unlink as jest.Mock).mockResolvedValue(undefined);
+		const svc = makeService();
+		const url = "https://example.com/asset.bin";
+		const dest = svc.computeAbsPath(url, TIME);
+
+		await expect(
+			svc.writeStream(url, TIME, Readable.from([Buffer.from("x")])),
+		).rejects.toMatchObject({ code: "ENOSPC" });
+		expect(mockFs.unlink).toHaveBeenCalledWith(`${dest}.tmp`);
 	});
 
 	it("creates the parent directory before opening the write stream", async () => {

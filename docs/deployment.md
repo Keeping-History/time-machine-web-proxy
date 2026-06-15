@@ -1,194 +1,179 @@
-# Deployment Guide — Cloud Run + Memorystore + ProxyMesh
+# Deployment Guide — k3s + Argo CD + GHCR
 
 This guide covers the production deployment shape for `time-machine-web-proxy`.
-The service runs as a single Cloud Run container that hosts both the HTTP/WS
-handler and the in-process BullMQ worker. The worker requires Redis
-(Memorystore) and reaches it through a Serverless VPC Connector. Optional
-outbound HTTP proxying (ProxyMesh) routes Wayback fetches through a stable
-egress IP.
+The service runs as a single Deployment pod that hosts both the HTTP/WS handler
+and the in-process BullMQ worker. The worker needs Redis (an in-cluster
+Service) and a shared cache (a GCS bucket mounted via a `gcsfuse` sidecar).
+Optional outbound HTTP proxying (ProxyMesh) routes Wayback fetches through a
+stable egress IP.
 
-Approximate monthly cost for a single-region production deployment:
-
-| Component | Cost (USD / mo) |
-|---|---|
-| Memorystore for Redis (Basic 1GB) | ~$36 |
-| Serverless VPC Connector (smallest e2-micro) | ~$10 |
-| Cloud Run, 1 always-on instance (1 vCPU / 512 MiB) | ~$10 – $15 |
-| GCS bucket (cache) | usage-dependent, typically < $5 |
-| ProxyMesh (optional) | per ProxyMesh plan |
+Deployment is **GitOps**: this repo only builds and publishes the image.
+Rollout is driven by Argo CD reconciling manifests that live in the separate
+**`Keeping-History/infra`** repo. There is no manual deploy step here.
 
 ---
 
-## 1. Memorystore for Redis
-
-Provision a Basic-tier instance with AUTH enabled. Basic is sufficient — the
-worker tolerates restarts because jobs are persisted in Redis and BullMQ
-retries on failure.
-
-```bash
-gcloud redis instances create tm-redis \
-  --size=1 \
-  --region=us-central1 \
-  --redis-version=redis_7_0 \
-  --tier=basic \
-  --enable-auth \
-  --network=default
-```
-
-After provisioning, capture the host and AUTH string:
-
-```bash
-gcloud redis instances describe tm-redis --region=us-central1 \
-  --format='value(host)'
-# 10.x.y.z
-
-gcloud redis instances get-auth-string tm-redis --region=us-central1
-# <password>
-```
-
-Store the password in Secret Manager (see Section 4).
-
-The `REDIS_URL` env var injected into Cloud Run must be the fully-formed
-ioredis connection URL, with the AUTH password embedded:
+## Architecture
 
 ```
-redis://default:<password>@10.x.y.z:6379
+  push to main
+       │
+       ▼
+ GitHub Actions (.github/workflows/build.yml)
+       │  builds image, pushes tags {sha,latest}
+       ▼
+   GHCR  ghcr.io/keeping-history/time-machine-web-proxy
+       │
+       ▼  (Argo CD Image Updater watches the registry)
+ Argo CD ── reconciles ──▶ Keeping-History/infra : apps/time-machine/
+       │
+       ▼
+   k3s cluster (2 nodes, joined over Tailscale/WireGuard)
+       │
+       ├─ timemachine pod
+       │    ├─ app container        (envFrom: time-machine-config + time-machine-secrets)
+       │    └─ gcsfuse sidecar      (mounts GCS bucket at /app/cache)
+       ├─ redis Service             (BullMQ queue)
+       └─ Ingress                   (TLS/WSS termination → plain HTTP to pod)
 ```
 
-The application reads `REDIS_URL` verbatim — there is no `${REDIS_PASSWORD}`
-substitution in code. Two ways to inject it:
+The cluster is **self-hosted k3s**, not GKE — there is no Memorystore, no VPC
+Connector, and no Cloud Build/Cloud Run in the live path. The old GCP pipeline
+artifacts (`cloudbuild.yaml`, `deploy.sh`, `.gcloudignore`) remain in-tree for
+reference only.
 
-- **Recommended — store the full URL as its own Secret Manager secret** so the
-  password never lives on disk. Create a `redis-url` secret containing the
-  full `redis://default:<password>@host:port` value, then add
-  `REDIS_URL=redis-url:latest` to the `--set-secrets` flag in
-  `cloudbuild.yaml`. The `REDIS_PASSWORD` env injected separately is unused
-  by the app and can be dropped if you take this route.
-- **Quick path — inline the URL in `.env.prod`** (the file is gitignored, but
-  the password is in plaintext on disk and in the build environment).
+The Deployment is pinned to **`replicas: 1`** with the `Recreate` strategy.
+The BullMQ worker runs in the same process as the HTTP/WS handler and must stay
+scheduled (the Cloud Run analogue was `min-instances=1` + `--no-cpu-throttling`);
+scaling past one would require splitting the worker out and adding WebSocket
+session affinity, and would also double-mount the single cache FUSE volume.
 
 ---
 
-## 2. Serverless VPC Access Connector
+## 1. The k3s cluster
 
-Cloud Run instances do not have direct network access to Memorystore's private
-IP. A Serverless VPC Connector bridges the two.
+Production is a 2-node k3s cluster whose nodes are joined over a Tailscale
+(WireGuard) mesh rather than a flat L2 LAN.
 
-```bash
-gcloud compute networks vpc-access connectors create tm-connector \
-  --region=us-central1 \
-  --network=default \
-  --range=10.8.0.0/28 \
-  --min-instances=2 \
-  --max-instances=3 \
-  --machine-type=e2-micro
-```
-
-The `--range` must be a /28 block that does not overlap any existing subnet.
-The smallest connector (`e2-micro`, 2 instances) costs roughly $10/mo and is
-sufficient for moderate throughput (~200 Mbps).
-
-Pass the connector name to `cloudbuild.yaml`:
-
-```bash
-gcloud builds submit --config cloudbuild.yaml \
-  --substitutions=_VPC_CONNECTOR=tm-connector,COMMIT_SHA=$(git rev-parse --short HEAD)
-```
-
-Or update the default in `cloudbuild.yaml`:
-
-```yaml
-substitutions:
-  _VPC_CONNECTOR: tm-connector
-```
-
-The deploy step adds:
-
-- `--vpc-connector=$_VPC_CONNECTOR`
-- `--vpc-egress=private-ranges-only`
-
-`private-ranges-only` sends RFC1918 traffic (Memorystore) through the
-connector while leaving public traffic (Wayback, ProxyMesh) on the default
-egress path. The alternative — `all-traffic` — routes everything through the
-connector and tends to be slower and more expensive for public fetches.
+> **Pod MTU gotcha (important).** Because inter-node pod traffic and outbound
+> internet egress traverse the WireGuard tunnel, the pod `eth0` MTU must be
+> clamped to **1280**. WireGuard's encapsulation overhead means the default
+> 1500-byte (or 1450 flannel) MTU causes large TLS handshake packets to be
+> silently dropped — outbound HTTPS to `web.archive.org` black-holes and the
+> app surfaces `UND_ERR_CONNECT_TIMEOUT` on every fetch while small requests
+> appear to work. If you see connect timeouts only on TLS egress, check the
+> pod MTU first. This is a cluster/CNI-level setting (k3s flannel), not part of
+> this application or the `apps/time-machine/` manifests.
 
 ---
 
-## 3. Cloud Run flags
+## 2. Redis
 
-The `cloudbuild.yaml` deploy step sets these flags. They are documented here
-because they differ from typical request-only Cloud Run services.
+Redis runs as an in-cluster `redis:7-alpine` Deployment + Service (no AUTH
+needed inside the cluster network), with `--appendonly yes` backed by a
+`local-path` PVC (`redis-data`, 5Gi) so the queue survives Redis restarts. The
+Deployment uses the `Recreate` strategy because the single RWO volume can't be
+mounted by two pods at once. The app reaches it by Service DNS:
 
-| Flag | Why |
-|---|---|
-| `--min-instances=1` | The BullMQ worker runs in the same process as the HTTP handler. With `min-instances=0`, the service scales to zero and the worker disappears between requests, leaving queued jobs to stall. |
-| `--no-cpu-throttling` | Default Cloud Run throttles CPU when no HTTP request is active. Workers stall under throttling. `--no-cpu-throttling` keeps the CPU allocated, which combined with `--min-instances=1` gives the worker a continuous execution environment. This is the 2026 flag name; the older `--cpu-always-allocated` is deprecated. |
-| `--execution-environment=gen2` | Required for GCS volume mounts (the cache). |
-| `--session-affinity` | Keeps WebSocket connections on the same instance for their full lifetime. |
-| `--timeout=3600` | Maximum supported by Cloud Run; allows long-lived WebSocket connections. |
-| `--memory=512Mi` | Minimum for the worker. Increase if `wayback-machine-downloader` is concurrent on large pages. |
+```
+REDIS_URL=redis://redis:6379
+```
+
+`REDIS_URL` is set in the `time-machine-config` ConfigMap. The application
+reads it verbatim — there is no `${REDIS_PASSWORD}` substitution in code. If
+you point at an external/managed Redis with AUTH, embed the credentials in the
+URL (`redis://default:<password>@host:6379`) and move the value into the
+`time-machine-secrets` Secret so it is not stored in the public ConfigMap.
+
+BullMQ persists jobs in Redis and retries on failure, so a pod restart does not
+lose queued work.
 
 ---
 
-## 4. Secret Manager
+## 3. Shared cache (GCS FUSE)
 
-Create the secrets referenced by `cloudbuild.yaml` (`--set-secrets`):
+The response cache is a GCS bucket — `tm-cache-723408812472` — mounted into the
+pod at `/app/cache`, so it survives pod restarts. The v2 tree lives under
+`${CACHE_DIR}/v2/`.
 
-```bash
-# Full Redis connection URL (host + AUTH baked in). cloudbuild.yaml injects
-# this verbatim as REDIS_URL; the app reads it directly.
-REDIS_HOST=$(gcloud redis instances describe tm-redis --region=us-central1 --format='value(host)')
-REDIS_AUTH=$(gcloud redis instances get-auth-string tm-redis --region=us-central1 --format='value(authString)')
-printf '%s' "redis://default:${REDIS_AUTH}@${REDIS_HOST}:6379" \
-  | gcloud secrets create redis-url --replication-policy=automatic --data-file=-
+The mount is provided by a **native sidecar** (`apps/time-machine/app.yaml`):
+a `gcsfuse` container declared as an `initContainer` with
+`restartPolicy: Always` (k8s 1.29+). It runs before the app container, installs
+`gcsfuse` at runtime on top of `google/cloud-sdk`, and mounts the bucket onto a
+shared `emptyDir` with `mountPropagation: Bidirectional` so the app container
+(which mounts the same volume `HostToContainer`) sees the FUSE filesystem. The
+app container only starts once the sidecar's readiness probe
+(`mountpoint /app/cache`) passes. The sidecar also self-heals a stale FUSE
+mount left by an ungraceful previous exit (OOMKill/SIGKILL) before remounting.
 
-# Outbound proxy password (optional — only needed for Basic-auth proxies)
-gcloud secrets create outbound-proxy-password --replication-policy=automatic
-echo -n "<proxymesh-or-squid-password>" \
-  | gcloud secrets versions add outbound-proxy-password --data-file=-
-
-# Docker Hub token (already used by the build step)
-gcloud secrets create dockerhub-token --replication-policy=automatic
-echo -n "<docker-hub-pat>" \
-  | gcloud secrets versions add dockerhub-token --data-file=-
-```
-
-`infra-setup.sh` also writes a `redis-password` secret containing the AUTH
-string alone. That secret is unused by the Cloud Run deploy (which consumes
-`redis-url` instead) and can be left in place or deleted.
-
-Grant the Cloud Run service account access:
+Authentication to the bucket is a GCP service-account key in its **own**
+Kubernetes Secret named **`gcs-sa-key`** (key `key.json`), mounted read-only at
+`/secrets/gcs` and passed to gcsfuse via `--key-file`. This is a **separate
+Secret** from `time-machine-secrets` (Section 4). The bucket, the service
+account, and its IAM binding are provisioned out-of-band:
 
 ```bash
-PROJECT_NUMBER=$(gcloud projects describe "$PROJECT_ID" --format='value(projectNumber)')
-SA="${PROJECT_NUMBER}-compute@developer.gserviceaccount.com"
-
-for secret in redis-url outbound-proxy-password; do
-  gcloud secrets add-iam-policy-binding "$secret" \
-    --member="serviceAccount:${SA}" \
-    --role=roles/secretmanager.secretAccessor
-done
+kubectl create secret generic gcs-sa-key \
+  --namespace time-machine \
+  --from-file=key.json=/path/to/gcs-sa-key.json
 ```
 
-If you create a dedicated service account for the Cloud Run service, grant the
-role to that account instead.
+`CACHE_DIR` defaults to `/app/cache`; keep it aligned with the sidecar mount
+path. `CACHE_ENABLED=false` disables disk caching entirely (useful for
+debugging cache poisoning).
+
+---
+
+## 4. Config & secrets
+
+The app loads its environment via `envFrom` against two sources, both defined
+in the `infra` repo:
+
+| Source | Kind | Holds |
+|---|---|---|
+| `time-machine-config` | ConfigMap (`apps/time-machine/configmap.yaml`) | **non-secret** env: `ARCHIVE_TIME`, `PROXY_BASE_URL`, `LISTENER=0.0.0.0`, `REDIS_URL`, cache/worker knobs, `LOCK_TIME`, etc. Add new non-secret flags here. |
+| `time-machine-secrets` | Secret (created out-of-band with `kubectl`) | `OUTBOUND_PROXY_PASSWORD`, `CACHE_CLEAR_TOKEN`, etc. Loaded into the app via `envFrom`. |
+
+> The GCS service-account key is **not** in this Secret — it lives in its own
+> `gcs-sa-key` Secret consumed by the gcsfuse sidecar (Section 3).
+
+The `infra` repo is public, so secrets are **never** committed there — the
+`time-machine-secrets` Secret is created imperatively against the cluster:
+
+```bash
+kubectl create secret generic time-machine-secrets \
+  --namespace time-machine \
+  --from-literal=CACHE_CLEAR_TOKEN='<token>' \
+  --from-literal=OUTBOUND_PROXY_PASSWORD='<proxymesh-password>'
+```
+
+A config change rolls out automatically once it lands in `infra` and Argo CD
+reconciles; a Secret change requires the pod to restart to pick up new env.
 
 ---
 
 ## 5. ProxyMesh (optional outbound proxy)
 
+> **Current state: disabled.** In production `OUTBOUND_PROXY_URLS` is empty —
+> the node reaches Wayback directly from its own IP (ProxyMesh was flapping in
+> and out of rotation). `OUTBOUND_PROXY_PASSWORD` remains in
+> `time-machine-secrets` but is unused while the URL list is empty. The rest of
+> this section documents how to re-enable it.
+
 ProxyMesh is the simplest way to give Wayback a stable, well-behaved egress
-identity. It also avoids the periodic IP-block events that hit free Cloud Run
-egress addresses.
+identity, and avoids the periodic IP-block events that hit shared/residential
+egress addresses. This is **application-level** config (the same env vars work
+locally and in any cluster) — it is not tied to the deployment platform.
 
 Sign up at <https://proxymesh.com>, then choose an endpoint hostname from the
 dashboard (e.g. `us-wa-load-balancer.proxymesh.com`). Default port is `31280`.
 
 There are two authentication modes:
 
-1. **IP authentication** — whitelist the Cloud Run egress IPs (or NAT gateway
-   IP) in the ProxyMesh dashboard. Set only `OUTBOUND_PROXY_URLS`; leave
-   `OUTBOUND_PROXY_USERNAME` and `OUTBOUND_PROXY_PASSWORD` empty.
+1. **IP authentication** — whitelist your cluster's egress IP (the Tailscale
+   exit / NAT IP that Wayback sees) in the ProxyMesh dashboard. Set only
+   `OUTBOUND_PROXY_URLS`; leave `OUTBOUND_PROXY_USERNAME` and
+   `OUTBOUND_PROXY_PASSWORD` empty.
 
 2. **Basic authentication** — set `OUTBOUND_PROXY_URLS` plus the username and
    password env vars. The application URL-encodes the credentials and applies
@@ -200,7 +185,7 @@ selects the rotation strategy (`sequential` round-robin, the default, or
 `random`); values are case-insensitive. Ignored when only one URL is
 configured.
 
-Example IP-auth setup, single proxy:
+Example IP-auth setup, single proxy (in `time-machine-config`):
 
 ```
 OUTBOUND_PROXY_URLS=http://us-wa-load-balancer.proxymesh.com:31280
@@ -208,13 +193,13 @@ OUTBOUND_PROXY_USERNAME=
 OUTBOUND_PROXY_PASSWORD=
 ```
 
-Example Basic-auth setup with rotation (the password ships via Secret Manager):
+Example Basic-auth setup with rotation (the password ships via the Secret):
 
 ```
 OUTBOUND_PROXY_URLS=http://us-wa.proxymesh.com:31280,http://uk.proxymesh.com:31280,http://au.proxymesh.com:31280
 OUTBOUND_PROXY_CHOOSER=random
 OUTBOUND_PROXY_USERNAME=tm-prod
-OUTBOUND_PROXY_PASSWORD=<from-secret-manager>
+OUTBOUND_PROXY_PASSWORD=<from time-machine-secrets>
 ```
 
 When a single URL is set, the startup log emits:
@@ -248,66 +233,82 @@ currently in cooldown, dispatch throws `no healthy proxy`. Note that
 5xx-from-upstream forwarded by the proxy may produce false positives —
 tune the cooldown to limit blast radius from a single Wayback hiccup.
 
+> Reminder: when proxy egress is misbehaving, first rule out the
+> **pod MTU = 1280** issue from Section 1 — a too-large MTU produces the same
+> connect-timeout symptom as a dead proxy.
+
 ---
 
-## 6. GitHub Actions / Cloud Build
+## 6. Build & rollout (GHCR + Argo CD)
 
-`./deploy.sh` and the GitHub Actions workflow submit the build to Cloud Build:
+There is no `gcloud builds submit` and no `./deploy.sh` in the live path.
+
+**Build.** Pushing to `main` runs `.github/workflows/build.yml`, which builds
+the multi-stage image and pushes it to GHCR as both `:<sha>` and `:latest`.
+The workflow authenticates to GHCR with the run's `GITHUB_TOKEN` — there are
+no GCP keys or cluster credentials in this repo.
+
+**Rollout.** Argo CD (in the cluster) reconciles `apps/time-machine/` from the
+`Keeping-History/infra` repo. Argo CD Image Updater watches GHCR and updates
+the running image tag when a new build lands, so a merge to `main` flows to
+production with no human step.
+
+To deploy a code change:
 
 ```bash
-gcloud builds submit --config cloudbuild.yaml \
-  --substitutions=_VPC_CONNECTOR=tm-connector,COMMIT_SHA=$(git rev-parse --short HEAD)
+git push origin main
 ```
 
-The trigger and substitutions are documented in the header of
-`cloudbuild.yaml`. Required secrets and substitutions:
-
-| Name | Purpose |
-|---|---|
-| `dockerhub-token` (Secret Manager) | Docker Hub auth |
-| `redis-url` (Secret Manager) | Full Redis URL with Memorystore AUTH |
-| `outbound-proxy-password` (Secret Manager) | ProxyMesh / Squid auth |
-| `_VPC_CONNECTOR` (substitution) | VPC connector name |
-| `_CACHE_BUCKET` (substitution) | GCS bucket for FUSE cache |
+To change runtime config, edit `apps/time-machine/configmap.yaml` in the
+`infra` repo and let Argo CD reconcile (or `argocd app sync time-machine` to
+force it).
 
 ---
 
 ## 7. Smoke test
 
-After the first deploy:
+After a rollout, verify against the pod / Service:
 
 ```bash
-SERVICE_URL=$(gcloud run services describe time-machine-proxy \
-  --region=us-central1 --format='value(status.url)')
+NS=time-machine
 
-# Foreground exact-URL fetch
+# Pod is running and the latest image is live
+kubectl -n "$NS" get pods -l app=time-machine -o wide
+kubectl -n "$NS" get deploy time-machine \
+  -o jsonpath='{.spec.template.spec.containers[0].image}{"\n"}'
+
+# Foreground exact-URL fetch (port-forward to avoid Ingress in the test)
+kubectl -n "$NS" port-forward deploy/time-machine 8765:8765 &
 curl -sS -o /dev/null -w '%{http_code}\n' \
-  "${SERVICE_URL}/?url=https://example.com&time=19980101000000"
+  "http://localhost:8765/?url=https://example.com&time=19980101000000"
 
-# Verify outbound proxy install (look for the startup log)
-gcloud run services logs read time-machine-proxy --region=us-central1 \
-  --limit=50 | grep '\[outbound-proxy\] installed'
+# Verify outbound proxy install (when configured)
+kubectl -n "$NS" logs deploy/time-machine -c time-machine \
+  | grep '\[outbound-proxy\] installed'
 
-# Verify worker is dequeuing
-gcloud redis instances describe tm-redis --region=us-central1 \
-  --format='value(host,port)'
-# then from a VM inside the VPC:
-# redis-cli -h <host> -p 6379 -a <password> LLEN tm:archive-exact:wait
+# Verify the worker is dequeuing (exec into the redis pod)
+kubectl -n "$NS" exec deploy/redis -- redis-cli LLEN tm:archive-exact:wait
 ```
 
-Expected: first call returns within 60s (cold cache + Wayback latency).
-Subsequent calls for the same URL+time return within 100ms (cache HIT).
+Expected: first call returns within ~60s (cold cache + Wayback latency).
+Subsequent calls for the same URL+time return within ~100ms (cache HIT served
+from the GCS FUSE mount).
+
+If outbound fetches hang and time out (`UND_ERR_CONNECT_TIMEOUT`) while the pod
+is otherwise healthy, check the **pod MTU (Section 1)** and the **outbound
+proxy health (Section 5)** in that order.
 
 ---
 
 ## 8. Local development
 
-`docker-compose up` brings the application and a local Redis up together. The
+`docker compose up` brings the application and a local Redis up together (plus
+the vendored SigNoz observability stack — see `docs/observability.md`). The
 `redis` service uses `redis:7-alpine` with no AUTH (set
-`REDIS_URL=redis://localhost:6379` in `.env`).
+`REDIS_URL=redis://redis:6379` in `.env`).
 
 ```bash
-cp .env.example .env
+cp .env .env.local        # adjust values as needed
 docker compose up redis -d   # start only Redis
 pnpm install
 pnpm dev
@@ -316,9 +317,10 @@ pnpm dev
 Or run the whole stack inside Docker:
 
 ```bash
-cp .env.example .env
 docker compose up --build
 ```
 
 The local cache lives in the named Docker volume `timemachine-cache`. Override
-with `HOST_CACHE_DIR=/absolute/path` in `.env` to bind-mount.
+with `HOST_CACHE_DIR=/absolute/path` in `.env` to bind-mount. `.env` /
+`.env.prod` in this repo drive **local** runs only — production config comes
+from the `time-machine-config` ConfigMap in the `infra` repo.
