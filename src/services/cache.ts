@@ -97,6 +97,51 @@ export class CacheService {
 		return abs;
 	}
 
+	/**
+	 * Stat a candidate cache path and turn it into a CacheHit, or null when it
+	 * can't serve as a body: absent (ENOENT), an ancestor segment is a file
+	 * (ENOTDIR), a directory slot (a child was cached at this name), or a
+	 * zero-byte poison entry. `forcedType` skips content-type resolution for
+	 * callers that already know it (the directory-index fallback is always HTML).
+	 */
+	private async statHit(
+		abs: string,
+		url: string,
+		time: string,
+		hostname: string,
+		forcedType?: string,
+	): Promise<CacheHit | null> {
+		try {
+			const stat = await fs.stat(abs);
+			if (stat.isDirectory?.()) {
+				// The slot is a directory because a child URL was cached at this name
+				// (e.g. `/a/b` exists, so `/a` is a directory). The page body, if
+				// cached, is at `<path>/index.html`, not here.
+				this.logger.debug({ path: abs }, "[cache] path is a directory — treating as miss");
+				return null;
+			}
+			// Zero-byte body = poison entry (e.g. a writer that piped an empty or
+			// already-consumed stream then renamed it into place). Treat as a miss so
+			// the worker re-fetches; we deliberately do NOT unlink (a stale unlink
+			// could race ahead of a concurrent good rewrite).
+			if (stat.size === 0) {
+				this.logger.warn({ path: abs }, "[cache] zero-byte entry — treating as miss");
+				return null;
+			}
+			const contentType = forcedType ?? (await this.resolveContentType(abs, url, time));
+			const archiveTime = await this.readResolvedTime(time, hostname);
+			return { absPath: abs, contentType, archiveTime };
+		} catch (e) {
+			// ENOENT = absent; ENOTDIR = a parent path segment is a file — both are
+			// ordinary misses, not errors.
+			const code = (e as NodeJS.ErrnoException).code;
+			if (code !== "ENOENT" && code !== "ENOTDIR") {
+				this.logger.warn({ err: e, path: abs }, "[cache] unexpected stat error");
+			}
+			return null;
+		}
+	}
+
 	async lookup(url: string, time: string): Promise<CacheHit | null> {
 		if (!this.config.cacheEnabled) return null;
 		const u = new URL(url);
@@ -114,62 +159,25 @@ export class CacheService {
 			throw Object.assign(new Error("Malformed URL pathname"), { status: 400 });
 		}
 		const isDirStyle = decoded === "/" || decoded.endsWith("/");
-		try {
-			const stat = await fs.stat(primaryAbs);
-			// Zero-byte body = poison entry (e.g. a writer that piped an empty or
-			// already-consumed stream then atomically renamed it into place). It
-			// would otherwise serve as 200 + correct content-type + empty body —
-			// a permanently broken asset. Treat it as a miss so the worker
-			// re-fetches and overwrites it; the atomic rename is the only safe
-			// way to replace it, so we deliberately do NOT unlink here (a stale
-			// unlink could race ahead of a concurrent good rewrite and delete it).
-			if (stat.isDirectory?.()) {
-				// The slot is a directory because a child URL was cached first
-				// (e.g. `/a/b` arrived before the `/a` page). The page itself, if
-				// cached, lives at `<path>/index.html` — fall through to the
-				// directory-index probe below rather than returning a directory as
-				// if it were a file body (which would EISDIR on read).
-				this.logger.debug({ path: primaryAbs }, "[cache] primary path is a directory — trying index.html");
-			} else if (stat.size === 0) {
-				this.logger.warn({ path: primaryAbs }, "[cache] zero-byte entry — treating as miss");
-			} else {
-				const contentType = await this.resolveContentType(primaryAbs, url, time);
-				const archiveTime = await this.readResolvedTime(time, u.hostname);
-				return { absPath: primaryAbs, contentType, archiveTime };
-			}
-		} catch (e) {
-			// ENOENT = absent; ENOTDIR = a parent path segment is a file (so this
-			// path can't be cached here) — both are ordinary misses, not errors.
-			const code = (e as NodeJS.ErrnoException).code;
-			if (code !== "ENOENT" && code !== "ENOTDIR") {
-				this.logger.warn({ err: e, path: primaryAbs }, "[cache] unexpected stat error");
-			}
-			/* fall through to directory-index fallback */
-		}
-		// Directory-index fallback: the Wayback downloader saves `http://host/mac`
-		// as `<root>/mac/index.html`. Without this probe, a request for `/mac`
-		// (no trailing slash) would miss even when the page is cached.
+
+		// Primary probe at the computed path. statHit treats a directory slot as a
+		// miss: when a child URL was cached first (e.g. `/a/b`), `<root>/a` is a
+		// directory, and the `/a` page — if cached — lives at `<root>/a/index.html`
+		// (written by writeStream's EISDIR fallback), found via the probe below.
+		const primaryHit = await this.statHit(primaryAbs, url, time, u.hostname);
+		if (primaryHit) return primaryHit;
+
+		// Directory-index fallback: the Wayback downloader (and writeStream's
+		// collision fallback) save `http://host/mac` as `<root>/mac/index.html`.
+		// Without this probe, a request for `/mac` (no trailing slash) would miss
+		// even when the page is cached.
 		if (!isDirStyle) {
 			const fallbackAbs = resolve(root, `.${decoded}/index.html`);
 			if (fallbackAbs !== root && !fallbackAbs.startsWith(root + sep)) {
 				throw Object.assign(new Error("Path traversal rejected"), { status: 400 });
 			}
-			try {
-				const stat = await fs.stat(fallbackAbs);
-				// Same zero-byte poison guard as the primary path above.
-				if (stat.size === 0) {
-					this.logger.warn({ path: fallbackAbs }, "[cache] zero-byte entry — treating as miss");
-				} else {
-					const archiveTime = await this.readResolvedTime(time, u.hostname);
-					return { absPath: fallbackAbs, contentType: "text/html", archiveTime };
-				}
-			} catch (e) {
-				const code = (e as NodeJS.ErrnoException).code;
-				if (code !== "ENOENT" && code !== "ENOTDIR") {
-					this.logger.warn({ err: e, path: fallbackAbs }, "[cache] unexpected stat error");
-				}
-				/* fall through to sentinel check */
-			}
+			const fbHit = await this.statHit(fallbackAbs, url, time, u.hostname, "text/html");
+			if (fbHit) return fbHit;
 		}
 		// Pre-compute both sentinel paths from a single URL parse + hash so the
 		// per-URL subpath is computed once regardless of which branch is taken.
@@ -266,7 +274,23 @@ export class CacheService {
 			return existing;
 		}
 		const p = (async () => {
-			await fs.mkdir(dirname(dest), { recursive: true });
+			try {
+				await fs.mkdir(dirname(dest), { recursive: true });
+			} catch (e) {
+				// ENOTDIR: a legacy bare-file ancestor (cached before pages were
+				// canonicalized to `<path>/index.html`) occupies a path segment we
+				// now need as a directory. We can't nest under it, so skip caching
+				// this entry — it's served live on demand, and re-caching the
+				// ancestor page or clearing the host removes the blocker. Destroy the
+				// readable so the orphaned fetch stream is torn down rather than left
+				// dangling with its abort timer armed.
+				if ((e as NodeJS.ErrnoException).code === "ENOTDIR") {
+					readable.destroy();
+					this.logger.debug({ dest }, "[cache] legacy file ancestor blocks write — skipping");
+					return;
+				}
+				throw e;
+			}
 			const tmp = `${dest}${TMP_SUFFIX}`;
 			await pipeline(readable, createWriteStream(tmp));
 			try {

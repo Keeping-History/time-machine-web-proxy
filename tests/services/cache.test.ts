@@ -914,6 +914,27 @@ describe("CacheService.writeStream", () => {
 		expect(mockFs.unlink).toHaveBeenCalledWith(`${dest}.tmp`);
 	});
 
+	it("ENOTDIR on mkdir (legacy file ancestor) → skips the write and destroys the body", async () => {
+		// A pre-existing bare-file ancestor (e.g. `/a` cached as a file) blocks
+		// creating `/a/b`'s parent directory. The write must skip gracefully —
+		// no throw, no tmp file — and tear down the orphaned fetch body so its
+		// abort timer can't later crash the process.
+		(mockFs.mkdir as jest.Mock).mockRejectedValueOnce(
+			Object.assign(new Error("ENOTDIR"), { code: "ENOTDIR" }),
+		);
+		const svc = makeService();
+		const body = Readable.from([Buffer.from("<html>")]);
+		const destroySpy = jest.spyOn(body, "destroy");
+
+		await expect(
+			svc.writeStream("https://example.com/a/b", TIME, body),
+		).resolves.toBeUndefined();
+
+		expect(destroySpy).toHaveBeenCalled();
+		expect(mockCreateWriteStream).not.toHaveBeenCalled();
+		expect(mockFs.rename).not.toHaveBeenCalled();
+	});
+
 	it("creates the parent directory before opening the write stream", async () => {
 		const order: string[] = [];
 		(mockFs.mkdir as jest.Mock).mockImplementation(async () => {
