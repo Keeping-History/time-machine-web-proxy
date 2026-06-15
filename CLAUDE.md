@@ -2,7 +2,7 @@
 
 ## Project overview
 
-A Node.js proxy server that fetches archived pages from the Wayback Machine and serves them locally with the toolbar stripped and URLs rewritten. The image is built and published to GHCR by GitHub Actions; deployment is GitOps via Argo CD on Kubernetes (manifests live in the separate `Keeping-History/infra` repo).
+A Node.js proxy server that fetches archived pages from the Wayback Machine and serves them locally with the toolbar stripped and URLs rewritten. The image is built and published to GHCR by GitHub Actions; deployment is GitOps via Argo CD onto a **self-hosted k3s cluster** (2 nodes joined over Tailscale/WireGuard, local to this machine — not GKE). Manifests live in the separate `Keeping-History/infra` repo.
 
 ## Stack
 
@@ -14,7 +14,7 @@ A Node.js proxy server that fetches archived pages from the Wayback Machine and 
 - **Container:** Docker, multi-stage build (`node:22-bookworm` → `node:22-bookworm-slim`); built with pnpm; `CMD ["node", "timemachine.js"]`, port 8765
 - **Image registry:** GHCR — `ghcr.io/keeping-history/time-machine-web-proxy:{sha,latest}`
 - **CI:** `.github/workflows/build.yml` — on push to `main` (and PRs) builds the image and pushes to GHCR. No deploy, no cluster credentials, touches no manifests.
-- **Deployment:** Kubernetes via Argo CD (GitOps). Argo CD Image Updater watches GHCR and rolls out new images; manifests live in `Keeping-History/infra` under `apps/time-machine/`.
+- **Deployment:** self-hosted k3s (2-node, over Tailscale/WireGuard) via Argo CD (GitOps). Argo CD Image Updater watches GHCR and rolls out new images; manifests live in `Keeping-History/infra` under `apps/time-machine/`. **Pod MTU must be 1280** — WireGuard overhead otherwise black-holes large TLS egress packets (outbound Wayback fetches fail with `UND_ERR_CONNECT_TIMEOUT`). See `docs/deployment.md` §1.
 
 ## Key files
 

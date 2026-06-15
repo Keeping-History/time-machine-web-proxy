@@ -20,9 +20,9 @@ Supports both HTTP and WebSocket interfaces.
 - SSRF protection: blocks private/internal IPs and non-HTTP protocols
 - Optional host whitelist
 - Bearer token protection on the cache management API
-- Docker support with Google Cloud Run deployment
+- Containerized; deployed on Kubernetes (k3s) via Argo CD GitOps
 
-See [docs/deployment.md](docs/deployment.md) for production deployment (Memorystore, VPC Connector, outbound proxy).
+See [docs/deployment.md](docs/deployment.md) for production deployment (k3s, Argo CD, Redis, GCS FUSE cache, outbound proxy).
 
 ---
 
@@ -43,7 +43,7 @@ The proxy listens on port `8765` by default.
 |---|---|---|
 | `TIMEMACHINE_PORT` | `8765` | Port the server listens on |
 | `LISTENER` | `0.0.0.0` | Bind address |
-| `PROXY_BASE_URL` | _(derived from `LISTENER:PORT`)_ | Public base URL used when rewriting proxied links. Required when running behind a reverse proxy or on Cloud Run (e.g. `https://your-service.run.app`) |
+| `PROXY_BASE_URL` | _(derived from `LISTENER:PORT`)_ | Public base URL used when rewriting proxied links. Required when running behind a reverse proxy or Ingress (e.g. `https://timemachine.example.com`) |
 | `ARCHIVE_TIME` | `19980101000000` | Default Wayback timestamp (`YYYYMMDDHHmmss`) |
 | `PROXY_PREFIX` | _(empty)_ | Optional path prefix appended between timestamp and URL |
 | `CACHE_DIR` | `/app/cache` | Root directory for cached responses. The v2 tree lives under `${CACHE_DIR}/v2/`. |
@@ -249,35 +249,31 @@ The source lives under `src/` and is bundled by `esbuild` into `dist/`. The Dock
 
 ---
 
-## Deployment (Google Cloud Run)
+## Deployment (Kubernetes / k3s + Argo CD)
 
-TLS and WSS termination are handled by Cloud Run — the container receives plain HTTP.
+Production runs on a **local k3s cluster** (2 nodes, joined over Tailscale/WireGuard). Deployment is **GitOps**: there is no manual deploy step from this repo.
 
-**One-time setup:**
+The pipeline has three independent layers:
+
+1. **Build** — pushing to `main` triggers `.github/workflows/build.yml`, which builds the image and pushes it to **GHCR**: `ghcr.io/keeping-history/time-machine-web-proxy:{sha,latest}`. The workflow touches no cluster credentials and no manifests.
+2. **Rollout** — **Argo CD** runs in the cluster and reconciles the manifests in the separate **`Keeping-History/infra`** repo (`apps/time-machine/`). Argo CD Image Updater watches GHCR and rolls out new image tags automatically.
+3. **Runtime** — the app runs as a single-replica Deployment (the in-process BullMQ worker must stay scheduled) alongside a `gcsfuse` native sidecar that mounts the GCS cache bucket at `/app/cache`, plus an in-cluster Redis Service for the BullMQ queue. TLS/WSS is terminated at the Ingress; the container receives plain HTTP.
+
+**To ship a change:**
 
 ```bash
-./setup2.sh   # creates GCP service account and IAM bindings for GitHub Actions
+git push origin main   # GitHub Actions builds + pushes to GHCR; Argo CD rolls it out
 ```
 
-**Deploy:**
+Config changes (non-secret env) land in `Keeping-History/infra` (`apps/time-machine/configmap.yaml`) and are reconciled by Argo CD the same way. Secrets live in the out-of-band `time-machine-secrets` Kubernetes Secret.
 
-```bash
-./deploy.sh         # deploys using .env
-./deploy.sh prod    # deploys using .env.prod
-```
+**GitHub secrets required:** none for deploy — `build.yml` authenticates to GHCR with the workflow's `GITHUB_TOKEN`. There are no GCP service-account keys or cluster credentials in this repo.
 
-Or push to `main` — the GitHub Actions workflow triggers automatically.
+The cache is the GCS bucket `tm-cache-723408812472` mounted at `/app/cache` via GCS FUSE, so cached responses survive pod restarts.
 
-**GitHub secrets required:**
+> The legacy Cloud Build → Cloud Run pipeline (`cloudbuild.yaml`, `deploy.sh`, `.gcloudignore`) is retained in-tree for reference only and is **not** used by the current deploy.
 
-| Secret | Description |
-|---|---|
-| `GCP_SA_KEY` | Service account JSON key |
-| `GCP_PROJECT_ID` | GCP project ID |
-| `GCP_CACHE_BUCKET` | GCS bucket name for shared cache |
-| `ENV_PROD` | Full contents of `.env.prod` |
-
-The shared cache is a GCS bucket mounted at `/app/cache` via GCS FUSE, so all Cloud Run instances share cached responses across restarts and scale-out events.
+See [docs/deployment.md](docs/deployment.md) for the full production setup and [docs/post-deploy.md](docs/post-deploy.md) for the live verification checklist.
 
 ---
 
