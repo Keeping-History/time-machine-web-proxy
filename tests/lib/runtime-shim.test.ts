@@ -824,19 +824,19 @@ describe("rewrite() — path-form /web/<ts>/<url> input is pass-through (no doub
 	});
 });
 
-// ─── proxyBase: absolute proxy URL idempotency ───────────────────────────────
+// ─── proxyBase: runtime-built URLs are emitted ABSOLUTE ───────────────────────
 //
-// When the server-side url-rewriter has proxyBase set (e.g. https://dev.keepinghistory.org),
-// it emits absolute hrefs like https://dev.keepinghistory.org/web/<ts>/<url>.
-// Without this fix, the shim treats those as external URLs and double-wraps them:
-//   /web/<ts>im_/https://dev.keepinghistory.org/web/<ts>/<url>
-// With the fix, the shim strips the proxyBase prefix to get the root-relative
-// path form, which is the already-proxied idempotent guard.
+// The server-side url-rewriter emits absolute hrefs (https://proxy.example.com/
+// web/<ts>/<url>) when proxyBase is set, so that pages embedded cross-origin (or
+// reached via a secondary box DNS like dev.keepinghistory.org) resolve correctly.
+// The shim MUST match: every URL it builds at runtime is also prefixed with
+// proxyBase. A root-relative /web/... path would otherwise resolve against the
+// embedding/browsing host, leaking the wrong hostname.
 
 const PROXY_BASE = "https://proxy.example.com";
 
-describe("rewrite() — proxyBase absolute URL is not double-wrapped", () => {
-	it("strips proxyBase prefix from an absolute proxy URL via window.fetch", async () => {
+describe("rewrite() — proxyBase: runtime URLs are emitted absolute", () => {
+	it("prefixes proxyBase onto a relative URL via window.fetch (the core fix)", async () => {
 		const captured: string[] = [];
 
 		const realFetch = window.fetch;
@@ -846,17 +846,17 @@ describe("rewrite() — proxyBase absolute URL is not double-wrapped", () => {
 		};
 		installShim(TS, ORIG_URL, PROXY_BASE);
 
-		await window.fetch(`${PROXY_BASE}/web/${TS}/http://www.apple.com/`);
+		await window.fetch("/api/data.json");
 
 		installShim(); // restore default (no proxyBase)
 		window.fetch = realFetch;
 
-		// Must be stripped to path form — NOT double-wrapped as /web/<ts>im_/<proxyBase>/web/...
-		expect(captured[0]).toBe(`/web/${TS}/http://www.apple.com/`);
-		expect(captured[0]).not.toContain(PROXY_BASE);
+		// Absolute, pinned to proxyBase — NOT a bare /web/... that would resolve
+		// against the embedding host.
+		expect(captured[0]).toBe(`${PROXY_BASE}/web/${TS}im_/http://www.example.com/api/data.json`);
 	});
 
-	it("strips proxyBase prefix with a timestamp modifier in the inner path", async () => {
+	it("keeps an already-absolute proxy URL untouched (no double-wrap, no demotion)", async () => {
 		const captured: string[] = [];
 
 		const realFetch = window.fetch;
@@ -866,16 +866,37 @@ describe("rewrite() — proxyBase absolute URL is not double-wrapped", () => {
 		};
 		installShim(TS, ORIG_URL, PROXY_BASE);
 
-		await window.fetch(`${PROXY_BASE}/web/${INNER_TS}/http://cdn.example.com/img.gif`);
+		const already = `${PROXY_BASE}/web/${TS}/http://www.apple.com/`;
+		await window.fetch(already);
+
+		installShim(); // restore default (no proxyBase)
+		window.fetch = realFetch;
+
+		// Idempotent: already canonical absolute form — left exactly as-is. Must
+		// NOT be double-wrapped (/web/<ts>im_/<proxyBase>/web/...) nor demoted to a
+		// root-relative path (which would re-introduce the cross-origin leak).
+		expect(captured[0]).toBe(already);
+	});
+
+	it("upgrades a root-relative proxy path to absolute when proxyBase is set", async () => {
+		const captured: string[] = [];
+
+		const realFetch = window.fetch;
+		window.fetch = (input: RequestInfo | URL): Promise<Response> => {
+			captured.push(typeof input === "string" ? input : (input as Request).url);
+			return Promise.resolve({ ok: true } as Response);
+		};
+		installShim(TS, ORIG_URL, PROXY_BASE);
+
+		await window.fetch(`/web/${INNER_TS}/http://cdn.example.com/img.gif`);
 
 		installShim();
 		window.fetch = realFetch;
 
-		expect(captured[0]).toBe(`/web/${INNER_TS}/http://cdn.example.com/img.gif`);
-		expect(captured[0]).not.toContain(PROXY_BASE);
+		expect(captured[0]).toBe(`${PROXY_BASE}/web/${INNER_TS}/http://cdn.example.com/img.gif`);
 	});
 
-	it("does not affect URLs on a different host when proxyBase is set", async () => {
+	it("wraps an external-host URL absolute under proxyBase", async () => {
 		const captured: string[] = [];
 
 		const realFetch = window.fetch;
@@ -890,7 +911,6 @@ describe("rewrite() — proxyBase absolute URL is not double-wrapped", () => {
 		installShim();
 		window.fetch = realFetch;
 
-		// External URL should still be wrapped, not stripped
-		expect(captured[0]).toBe(`/web/${TS}im_/http://other.com/page.html`);
+		expect(captured[0]).toBe(`${PROXY_BASE}/web/${TS}im_/http://other.com/page.html`);
 	});
 });
