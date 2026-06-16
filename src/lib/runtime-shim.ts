@@ -54,6 +54,17 @@ export const generateShimScript = (
     return false;
   }
 
+  // Prepend the configured proxyBase so emitted URLs are ABSOLUTE, mirroring the
+  // server-side url-rewriter's buildProxyUrl. When pages are embedded cross-origin
+  // (e.g. inside beta.911realtime.org or reached via the box DNS dev.keepinghistory.org),
+  // a root-relative /web/... path resolves against the embedding/browsing host
+  // instead of the canonical proxy host. Absolute output pins every runtime-built
+  // URL to proxyBase. When proxyBase is unset, output stays root-relative (the
+  // backward-compatible direct-proxy default).
+  function proxify(path) {
+    return _base ? _base + path : path;
+  }
+
   function rewrite(url, isLink) {
     if (!url || typeof url !== 'string') return url;
     var trimmed = url.trim();
@@ -62,16 +73,18 @@ export const generateShimScript = (
     if (SKIP_RE.test(trimmed)) return url;
     var lock = _lock && !!isLink;
     // Wayback-wrapped (absolute or protocol-relative): unwrap to the embedded
-    // (ts, url) and emit a clean path-form URL the proxy understands.
+    // (ts, url) and emit a clean proxy URL the proxy understands.
     var wm = trimmed.match(WAYBACK_ABS_RE);
-    if (wm) return lock ? '/web/' + wm[2] : '/web/' + wm[1] + '/' + wm[2];
-    // Absolute URL pointing at the proxy's own origin (emitted by the server-side
-    // url-rewriter when proxyBase is set): strip the base so the result is a
-    // root-relative /web/... path. Without this, the URL falls through to the
-    // new URL() branch below and gets double-wrapped as /web/<ts>im_/<proxyBase>/web/...
-    if (_base && trimmed.indexOf(_base + '/web/') === 0) return trimmed.slice(_base.length);
-    // Already proxied (root-relative path): idempotent pass-through.
-    if (trimmed.indexOf('/web/') === 0) return url;
+    if (wm) return proxify(lock ? '/web/' + wm[2] : '/web/' + wm[1] + '/' + wm[2]);
+    // Already an absolute proxy URL pointing at proxyBase (emitted by the
+    // server-side url-rewriter, or by a previous pass of this shim): leave it
+    // untouched. It is already in canonical absolute form — stripping it back to
+    // a root-relative path would re-introduce the cross-origin leak, and
+    // re-wrapping it would double-wrap as /web/<ts>im_/<proxyBase>/web/...
+    if (_base && trimmed.indexOf(_base + '/web/') === 0) return url;
+    // Root-relative proxy path: idempotent, but upgrade to absolute when
+    // proxyBase is set so it resolves against the proxy host, not the embedder.
+    if (trimmed.indexOf('/web/') === 0) return _base ? _base + trimmed : url;
     // Resolve relative URLs against the original page URL.
     var absolute;
     try {
@@ -81,7 +94,7 @@ export const generateShimScript = (
     }
     // Only rewrite http/https.
     if (absolute.indexOf('http://') !== 0 && absolute.indexOf('https://') !== 0) return url;
-    return lock ? '/web/' + absolute : '/web/' + _ts + 'im_/' + absolute;
+    return proxify(lock ? '/web/' + absolute : '/web/' + _ts + 'im_/' + absolute);
   }
 
   // --- window.fetch ---
