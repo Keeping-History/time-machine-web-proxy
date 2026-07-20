@@ -404,6 +404,11 @@ export async function httpHandler(
 		const status = errorHasStatus(e) ? e.status : 500;
 		if (status === 404) {
 			res.writeHead(404).end("Not found in archive");
+		} else if (status === 451) {
+			// Operator blocklist (config.json at the cache-bucket root). The
+			// message carries the blocked hostname; "Archive returned 451" would
+			// wrongly attribute the block to Wayback.
+			res.writeHead(451).end(e instanceof Error ? e.message : "Domain blocked");
 		} else if (status >= 400 && status < 500) {
 			res.writeHead(status).end(`Archive returned ${status}`);
 		} else {

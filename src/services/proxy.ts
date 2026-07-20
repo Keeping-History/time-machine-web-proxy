@@ -3,6 +3,7 @@ import type IORedis from "ioredis";
 import type pino from "pino";
 import type { ArchiveJobClientPort, JobProgressListener } from "../clients/archive-job-client";
 import { candidateFallbackUrls } from "../lib/asset-fallbacks";
+import type { BlocklistService } from "../lib/blocklist";
 import type { DirectClient } from "../lib/dependencies";
 import { errorHasStatus } from "../lib/errors";
 import {
@@ -65,7 +66,20 @@ export class ProxyService {
 		>,
 		private readonly redis: IORedis | null = null,
 		private readonly directClient: DirectClient | null = null,
+		private readonly blocklist: BlocklistService | null = null,
 	) {}
+
+	/**
+	 * Throws 451 when the operator blocklist (config.json at the cache-bucket
+	 * root) matches the host. Checked before the cache lookup so a blocked
+	 * domain is neither retrieved, cached, nor served from an existing cache
+	 * entry.
+	 */
+	private async assertNotBlocked(hostname: string): Promise<void> {
+		if (this.blocklist && (await this.blocklist.isBlocked(hostname))) {
+			throw statusError(`Domain blocked: ${hostname}`, 451);
+		}
+	}
 
 	async drainPrewarms(): Promise<void> {
 		await Promise.allSettled([...this.activePrewarms]);
@@ -108,6 +122,7 @@ export class ProxyService {
 		onProgress?: JobProgressListener,
 	): Promise<ProxyResult> {
 		const u = new URL(targetUrl);
+		await this.assertNotBlocked(u.hostname);
 		let hit = await this.cache.lookup(targetUrl, time);
 		let cacheStatus: "HIT" | "MISS_DIRECT" | "MISS_WORKER" = "HIT";
 
@@ -216,32 +231,38 @@ export class ProxyService {
 			// Tier 1 (prewarm): fire-and-forget prefetch of discovered assets.
 			// Errors are swallowed so prewarm failures never affect the foreground response.
 			if (this.config.prewarmEnabled && this.directClient && discoveredAssets.length > 0) {
+				const directClient = this.directClient;
 				const assetsToPrewarm = discoveredAssets.slice(0, this.config.prewarmMaxAssetsPerPage);
 				for (const asset of assetsToPrewarm) {
-					const p = this.directClient
-						.fetchAtResolvedTime(asset.url, asset.embeddedTs)
-						.then(async (result) => {
-							if (result.outcome === "ok" && result.body) {
-								await this.cache.writeStream(asset.url, asset.embeddedTs, result.body);
-								if (result.contentType) {
-									await this.cache.writeContentTypeSidecar(
-										asset.url,
-										asset.embeddedTs,
-										result.contentType,
-									);
-								}
+					const p = (async () => {
+						// A page on an allowed host can embed assets from a blocked one
+						// (trackers, ad servers) — those must not be fetched or cached.
+						const assetHost = new URL(asset.url).hostname;
+						if (this.blocklist && (await this.blocklist.isBlocked(assetHost))) {
+							this.logger.debug({ url: asset.url }, "[prewarm] skipping blocked domain");
+							return;
+						}
+						const result = await directClient.fetchAtResolvedTime(asset.url, asset.embeddedTs);
+						if (result.outcome === "ok" && result.body) {
+							await this.cache.writeStream(asset.url, asset.embeddedTs, result.body);
+							if (result.contentType) {
+								await this.cache.writeContentTypeSidecar(
+									asset.url,
+									asset.embeddedTs,
+									result.contentType,
+								);
 							}
-						})
-						.catch((err: unknown) => {
-							this.logger.warn(
-								{
-									url: asset.url,
-									ts: asset.embeddedTs,
-									error: err instanceof Error ? err.message : String(err),
-								},
-								"[prewarm] asset prefetch error",
-							);
-						});
+						}
+					})().catch((err: unknown) => {
+						this.logger.warn(
+							{
+								url: asset.url,
+								ts: asset.embeddedTs,
+								error: err instanceof Error ? err.message : String(err),
+							},
+							"[prewarm] asset prefetch error",
+						);
+					});
 					this.activePrewarms.add(p);
 					void p.finally(() => this.activePrewarms.delete(p));
 				}
@@ -365,6 +386,7 @@ export class ProxyService {
 		if (!isHostnameWhitelisted(host, this.config.whitelistHosts)) {
 			throw statusError("Host not whitelisted", 403);
 		}
+		await this.assertNotBlocked(host);
 		this.logger.info({ host, time }, "[crawl] explicit recursive-crawl seed");
 		await this.archiveJobClient.enqueueDomainCrawl(host, time);
 	}
