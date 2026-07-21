@@ -285,6 +285,45 @@ const rewriteMetaRefresh = (
 	return `${prefix}${quote}${rewriteOneUrl(url, targetUrl, time, lockTime, collect, assets, proxyBase)}${quote}`;
 };
 
+/**
+ * Resolve a meta-refresh `content` value to the destination's ORIGINAL
+ * (un-proxied) absolute URL plus the timestamp to fetch it at, or null when
+ * the tag is not a navigation (self-reload with no `url=`, or a non-http
+ * scheme). Mirrors `rewriteOneUrl`'s resolution but returns the origin URL
+ * rather than a proxy path — the handler re-validates and re-fetches it.
+ */
+export const resolveMetaRefreshTarget = (
+	content: string,
+	targetUrl: string,
+	fallbackTime: string,
+): { url: string; time: string } | null => {
+	const m = content.match(META_REFRESH_RE);
+	if (!m) return null;
+	let url = m[2].trim();
+	if (
+		(url.startsWith('"') && url.endsWith('"')) ||
+		(url.startsWith("'") && url.endsWith("'"))
+	) {
+		url = url.slice(1, -1);
+	}
+	if (!url) return null;
+
+	const archive = url.match(RE_ARCHIVE_URL);
+	if (archive) {
+		const [, ts, originalUrl] = archive;
+		return { url: originalUrl, time: /^\d{14}$/.test(ts) ? ts : fallbackTime };
+	}
+
+	try {
+		const unwrapped = unwrapRedirectUrl(url);
+		const resolved = new URL(unwrapped, targetUrl);
+		if (resolved.protocol !== "http:" && resolved.protocol !== "https:") return null;
+		return { url: resolved.toString(), time: fallbackTime };
+	} catch {
+		return null;
+	}
+};
+
 const isElement = (node: Node): node is Element =>
 	typeof (node as Partial<Element>).tagName === "string";
 

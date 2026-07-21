@@ -1,7 +1,11 @@
+/**
+ * @jest-environment jsdom
+ */
 import {
 	discoverNavLinks,
 	type DiscoveredAsset,
 	parseWaybackPath,
+	resolveMetaRefreshTarget,
 	rewriteCssUrls,
 	rewriteHtmlUrls,
 	sanitizeTimeParam,
@@ -918,5 +922,54 @@ describe("discoverNavLinks", () => {
 
 	it("returns [] for unparseable or empty input", () => {
 		expect(discoverNavLinks("", PAGE, CNN)).toEqual([]);
+	});
+});
+
+describe("resolveMetaRefreshTarget", () => {
+	const TGT = "http://www.example.com/dir/page.html";
+
+	it("resolves an absolute http url", () => {
+		expect(resolveMetaRefreshTarget("0; url=http://other.com/x", TGT, TIME)).toEqual({
+			url: "http://other.com/x",
+			time: TIME,
+		});
+	});
+
+	it("resolves a relative url against the page url", () => {
+		expect(resolveMetaRefreshTarget("0;url=next.html", TGT, TIME)).toEqual({
+			url: "http://www.example.com/dir/next.html",
+			time: TIME,
+		});
+	});
+
+	it("unwraps a wayback-wrapped url and keeps its embedded timestamp", () => {
+		expect(
+			resolveMetaRefreshTarget(
+				"0;url=/web/20010912010101/http://other.com/x",
+				TGT,
+				TIME,
+			),
+		).toEqual({ url: "http://other.com/x", time: "20010912010101" });
+	});
+
+	it("strips surrounding quotes from the url", () => {
+		expect(resolveMetaRefreshTarget("5; url='http://other.com/x'", TGT, TIME)).toEqual({
+			url: "http://other.com/x",
+			time: TIME,
+		});
+	});
+
+	it("ignores the delay value (any N is immediate)", () => {
+		expect(resolveMetaRefreshTarget("600;url=http://other.com/x", TGT, TIME)?.url).toBe(
+			"http://other.com/x",
+		);
+	});
+
+	it("returns null for a self-reload with no url", () => {
+		expect(resolveMetaRefreshTarget("30", TGT, TIME)).toBeNull();
+	});
+
+	it("returns null for a non-http scheme", () => {
+		expect(resolveMetaRefreshTarget("0;url=javascript:alert(1)", TGT, TIME)).toBeNull();
 	});
 });
