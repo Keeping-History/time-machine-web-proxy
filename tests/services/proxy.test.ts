@@ -1168,7 +1168,7 @@ describe("ProxyService.fetch — blocked domains", () => {
 
 describe("ProxyService meta-refresh redirect", () => {
 	const META_HTML =
-		'<html><head><meta http-equiv="refresh" content="0;url=http://dest.com/final"></head></html>';
+		'<html><head><meta http-equiv="refresh" content="0;url=http://dest.com/final"></head><body><img src="/web/20200101000000/http://example.com/img.png"></body></html>';
 
 	const makeHtmlHit = () =>
 		jest.fn().mockResolvedValue({
