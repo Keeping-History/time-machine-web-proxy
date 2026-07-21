@@ -58,6 +58,7 @@ The proxy listens on port `8765` by default.
 | `WORKER_RATE_LIMIT_PER_SEC` | `1` | Outbound request ceiling. `1`/sec → 60 req/min, which stays under Wayback's sustained-IP-block threshold. |
 | `DOWNLOADER_THREADS_COUNT` | `3` | `wayback-machine-downloader` internal threads per job |
 | `CRAWL_MAX_CDX_PAGES` | `50` | CDX preflight cap. At default (50 pages × ~3000 URLs/page) ≈ 150k URLs per crawl. |
+| `CRAWL_JOB_PRIORITY` | `10` | BullMQ priority for crawl-derived jobs (lower = higher priority). Foreground exact requests stay at `1`, so crawls never starve live traffic. Valid range `2`–`2097152`. |
 | `SNAPSHOT_WINDOW_DAYS` | `30,365,3650,0` | Widening search windows (in days) for finding the closest Wayback snapshot around the requested time. Tried in order; `0` = unbounded. CSV of non-negative integers. |
 | `ALLOW_LATER_FALLBACK` | `false` | Bidirectional ("closest snapshot in either direction") resolution for **direct/top-level URLs** (the URL the user typed). Default `false` = strict at-or-before: a user who asked for a specific time should see the page state at that time, not a drifted later capture. |
 | `ASSET_LATER_FALLBACK` | `true` | Bidirectional resolution for **asset URLs** (images, CSS, JS, fonts, media — classified by file extension). Default `true` because asset captures rarely align with the page's exact requested timestamp; strict at-or-before would 404 sub-resources that exist a few hours/days later. Mirrors web.archive.org's own sub-resource behavior. |
