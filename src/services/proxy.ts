@@ -191,6 +191,7 @@ export class ProxyService {
 			this.logger.info({ targetUrl, time }, "[CACHE HIT]");
 		}
 
+		let redirect: { url: string; time: string } | undefined;
 		const isHtml = hit.contentType.startsWith("text/html");
 		const isCss = hit.contentType.startsWith("text/css");
 
@@ -210,13 +211,14 @@ export class ProxyService {
 
 		if (isHtml) {
 			const stripped = stripWaybackToolbar(raw.toString("utf-8"));
-			const { document, discoveredAssets } = rewriteHtmlUrlsToAst(
+			const { document, discoveredAssets, metaRefresh } = rewriteHtmlUrlsToAst(
 				stripped,
 				targetUrl,
 				time,
 				this.config.lockTime,
 				this.config.proxyBase,
 			);
+			redirect = metaRefresh;
 			body = await inlineCssLinksOnAst(
 				document,
 				this.buildCssFetcher(),
@@ -228,48 +230,52 @@ export class ProxyService {
 			);
 			this.logger.debug({ targetUrl, time }, "[inline-css] stylesheet inlining complete");
 
-			// Tier 1 (prewarm): fire-and-forget prefetch of discovered assets.
-			// Errors are swallowed so prewarm failures never affect the foreground response.
-			if (this.config.prewarmEnabled && this.directClient && discoveredAssets.length > 0) {
-				const directClient = this.directClient;
-				const assetsToPrewarm = discoveredAssets.slice(0, this.config.prewarmMaxAssetsPerPage);
-				for (const asset of assetsToPrewarm) {
-					const p = (async () => {
-						// A page on an allowed host can embed assets from a blocked one
-						// (trackers, ad servers) — those must not be fetched or cached.
-						const assetHost = new URL(asset.url).hostname;
-						if (this.blocklist && (await this.blocklist.isBlocked(assetHost))) {
-							this.logger.debug({ url: asset.url }, "[prewarm] skipping blocked domain");
-							return;
-						}
-						const result = await directClient.fetchAtResolvedTime(asset.url, asset.embeddedTs);
-						if (result.outcome === "ok" && result.body) {
-							await this.cache.writeStream(asset.url, asset.embeddedTs, result.body);
-							if (result.contentType) {
-								await this.cache.writeContentTypeSidecar(
-									asset.url,
-									asset.embeddedTs,
-									result.contentType,
-								);
+			// A redirect stub is thrown away by the handler once followed — don't
+			// prewarm its assets or seed a crawl from it.
+			if (!redirect) {
+				// Tier 1 (prewarm): fire-and-forget prefetch of discovered assets.
+				// Errors are swallowed so prewarm failures never affect the foreground response.
+				if (this.config.prewarmEnabled && this.directClient && discoveredAssets.length > 0) {
+					const directClient = this.directClient;
+					const assetsToPrewarm = discoveredAssets.slice(0, this.config.prewarmMaxAssetsPerPage);
+					for (const asset of assetsToPrewarm) {
+						const p = (async () => {
+							// A page on an allowed host can embed assets from a blocked one
+							// (trackers, ad servers) — those must not be fetched or cached.
+							const assetHost = new URL(asset.url).hostname;
+							if (this.blocklist && (await this.blocklist.isBlocked(assetHost))) {
+								this.logger.debug({ url: asset.url }, "[prewarm] skipping blocked domain");
+								return;
 							}
-						}
-					})().catch((err: unknown) => {
-						this.logger.warn(
-							{
-								url: asset.url,
-								ts: asset.embeddedTs,
-								error: err instanceof Error ? err.message : String(err),
-							},
-							"[prewarm] asset prefetch error",
-						);
-					});
-					this.activePrewarms.add(p);
-					void p.finally(() => this.activePrewarms.delete(p));
+							const result = await directClient.fetchAtResolvedTime(asset.url, asset.embeddedTs);
+							if (result.outcome === "ok" && result.body) {
+								await this.cache.writeStream(asset.url, asset.embeddedTs, result.body);
+								if (result.contentType) {
+									await this.cache.writeContentTypeSidecar(
+										asset.url,
+										asset.embeddedTs,
+										result.contentType,
+									);
+								}
+							}
+						})().catch((err: unknown) => {
+							this.logger.warn(
+								{
+									url: asset.url,
+									ts: asset.embeddedTs,
+									error: err instanceof Error ? err.message : String(err),
+								},
+								"[prewarm] asset prefetch error",
+							);
+						});
+						this.activePrewarms.add(p);
+						void p.finally(() => this.activePrewarms.delete(p));
+					}
 				}
-			}
 
-			if (cacheStatus !== "HIT") {
-				void this.maybeEnqueueDomainCrawl(u.hostname, time);
+				if (cacheStatus !== "HIT") {
+					void this.maybeEnqueueDomainCrawl(u.hostname, time);
+				}
 			}
 		} else if (isCss) {
 			body = rewriteCssUrls(
@@ -291,6 +297,7 @@ export class ProxyService {
 			archiveTime: hit.archiveTime ?? time,
 			body,
 			cache: cacheStatus,
+			...(redirect ? { redirect } : {}),
 		};
 	}
 

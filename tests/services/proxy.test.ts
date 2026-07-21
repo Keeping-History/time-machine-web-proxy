@@ -1165,3 +1165,31 @@ describe("ProxyService.fetch — blocked domains", () => {
 		expect(client.enqueueDomainCrawl).not.toHaveBeenCalled();
 	});
 });
+
+describe("ProxyService meta-refresh redirect", () => {
+	const META_HTML =
+		'<html><head><meta http-equiv="refresh" content="0;url=http://dest.com/final"></head></html>';
+
+	const makeHtmlHit = () =>
+		jest.fn().mockResolvedValue({
+			absPath: "/tmp/x.html",
+			contentType: "text/html; charset=utf-8",
+			archiveTime: TIME,
+		} as CacheHit);
+
+	it("sets result.redirect and skips prewarm for a meta-refresh page", async () => {
+		(fs.readFile as jest.Mock).mockResolvedValue(Buffer.from(META_HTML));
+		const cache = makeCache(makeHtmlHit());
+		const client = makeClient();
+		const directClient = {
+			fetchAtRequestedTime: jest.fn(),
+			fetchAtResolvedTime: jest.fn(),
+		} as unknown as DirectClient;
+		const proxy = new ProxyService(cache, client, logger, baseConfig, null, directClient);
+
+		const result = await proxy.fetch(TARGET_HTML_URL, TIME);
+
+		expect(result.redirect).toEqual({ url: "http://dest.com/final", time: TIME });
+		expect(directClient.fetchAtResolvedTime).not.toHaveBeenCalled();
+	});
+});
