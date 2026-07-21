@@ -12,6 +12,7 @@ import { attachQueueLogger, startArchiveWorkers } from "../queue/archive-worker"
 import { type DomainCrawlJob, type ExactUrlJob, QUEUE_CRAWL, QUEUE_EXACT } from "../queue/jobs";
 import { CacheService } from "../services/cache";
 import { ProxyService } from "../services/proxy";
+import { BlocklistService } from "./blocklist";
 import { createLogger } from "./logger";
 import type { RotatingProxyDispatcher } from "./outbound-proxy";
 import { createRedis } from "./redis";
@@ -135,7 +136,16 @@ export class Dependencies {
 			crawlMaxDepth: config.crawlMaxDepth,
 			crawlMaxPages: config.crawlMaxPages,
 		});
-		const proxy = new ProxyService(cache, archiveJobClient, logger, config, redis, directClient);
+		const blocklist = new BlocklistService(config.cacheDir, logger);
+		const proxy = new ProxyService(
+			cache,
+			archiveJobClient,
+			logger,
+			config,
+			redis,
+			directClient,
+			blocklist,
+		);
 		const validator: UrlValidatorModule = { validateTargetUrl, isHostWhitelisted };
 
 		this.deps = {

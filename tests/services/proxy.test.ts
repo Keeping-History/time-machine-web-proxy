@@ -1073,3 +1073,95 @@ describe("ProxyService.fetch — CSS inlining", () => {
 		expect(directClient.fetchAtRequestedTime).toHaveBeenCalledWith(INLINE_CSS_URL, CSS_TS);
 	});
 });
+
+// --- Operator blocklist (config.json at the cache-bucket root) --------------
+
+describe("ProxyService.fetch — blocked domains", () => {
+	const makeBlocklist = (blockedHosts: string[]) =>
+		({
+			isBlocked: jest.fn(async (host: string) => blockedHosts.includes(host)),
+		}) as unknown as import("../../src/lib/blocklist").BlocklistService;
+
+	it("throws 451 before touching the cache, direct client, or worker queue", async () => {
+		const cache = makeCache();
+		const client = makeClient();
+		const directClient = makeDirectClient();
+		const blocklist = makeBlocklist(["example.com"]);
+		const svc = new ProxyService(cache, client, logger, baseConfig, null, directClient, blocklist);
+
+		await expect(svc.fetch(TARGET_HTML_URL, TIME)).rejects.toMatchObject({
+			status: 451,
+			message: "Domain blocked: example.com",
+		});
+		expect(cache.lookup).not.toHaveBeenCalled();
+		expect(directClient.fetchAtRequestedTime).not.toHaveBeenCalled();
+		expect(client.enqueueExactAndWait).not.toHaveBeenCalled();
+	});
+
+	it("451 is not swallowed by the CDN-fallback retry loop", async () => {
+		const cache = makeCache();
+		const client = makeClient();
+		const blocklist = makeBlocklist(["example.com"]);
+		const svc = new ProxyService(cache, client, logger, baseConfig, null, null, blocklist);
+
+		// A CDN-shaped URL would produce fallback candidates on 404 — a 451 must
+		// propagate as-is instead of entering that loop.
+		await expect(svc.fetch("http://example.com/img.png", TIME)).rejects.toMatchObject({
+			status: 451,
+		});
+	});
+
+	it("serves normally when the blocklist does not match", async () => {
+		const cache = makeCache(jest.fn().mockResolvedValue(htmlHit));
+		const client = makeClient();
+		const blocklist = makeBlocklist(["other.com"]);
+		mockedReadFile.mockResolvedValue(Buffer.from(PLAIN_HTML_BODY));
+		const svc = new ProxyService(cache, client, logger, baseConfig, null, null, blocklist);
+
+		const result = await svc.fetch(TARGET_HTML_URL, TIME);
+		expect(result.cache).toBe("HIT");
+	});
+
+	it("prewarm skips assets on blocked domains but fetches the rest", async () => {
+		// Page host is allowed; HTML embeds one asset on a blocked host and one
+		// on an allowed host.
+		const pageUrl = "http://ok.com/page";
+		const html =
+			'<html><body><img src="/web/20200101000000/http://blocked.com/pixel.gif">' +
+			'<img src="/web/20200101000000/http://ok.com/logo.png"></body></html>';
+		const cache = makeCache(jest.fn().mockResolvedValue(htmlHit));
+		const client = makeClient();
+		const directClient = makeDirectClient();
+		const blocklist = makeBlocklist(["blocked.com"]);
+		mockedReadFile.mockResolvedValue(Buffer.from(html));
+		const svc = new ProxyService(cache, client, logger, baseConfig, null, directClient, blocklist);
+
+		const result = await svc.fetch(pageUrl, TIME);
+		expect(result.cache).toBe("HIT");
+		await svc.drainPrewarms();
+
+		const prewarmedUrls = directClient.fetchAtResolvedTime.mock.calls.map((c) => c[0]);
+		expect(prewarmedUrls).toContain("http://ok.com/logo.png");
+		expect(prewarmedUrls).not.toContain("http://blocked.com/pixel.gif");
+	});
+
+	it("triggerDomainCrawl rejects a blocked host with 451", async () => {
+		const cache = makeCache();
+		const client = makeClient();
+		const blocklist = makeBlocklist(["example.com"]);
+		const svc = new ProxyService(
+			cache,
+			client,
+			logger,
+			{ ...baseConfig, domainCrawlEnabled: true },
+			null,
+			null,
+			blocklist,
+		);
+
+		await expect(svc.triggerDomainCrawl("example.com", TIME)).rejects.toMatchObject({
+			status: 451,
+		});
+		expect(client.enqueueDomainCrawl).not.toHaveBeenCalled();
+	});
+});

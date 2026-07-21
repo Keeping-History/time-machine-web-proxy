@@ -105,7 +105,18 @@ This asymmetric default means a user who navigates to a 2001-09-13 page sees the
 | `400` | Missing or invalid `url`/`time` parameter |
 | `403` | Private/internal host, disallowed protocol, or host not whitelisted |
 | `404` | No snapshot found in archive |
+| `451` | Domain is on the operator blocklist (see **Blocked domains** below) |
 | `500` | Upstream fetch failed |
+
+**Blocked domains.** An optional `config.json` at the root of the cache bucket (i.e. `<CACHE_DIR>/config.json` — the bucket is FUSE-mounted at `CACHE_DIR`) lists domains the proxy must never retrieve, cache, or serve:
+
+```json
+{
+  "blocked_domains": ["doubleclick.net", "*.ads.example.com"]
+}
+```
+
+`*.host` matches every subdomain plus the apex (same semantics as `WHITELIST_HOSTS`). Requests for a blocked domain fail with `451 Domain blocked: <host>` (an `error` frame with `status: 451` on the SSE/WebSocket paths), and prewarm skips blocked asset hosts embedded in allowed pages. The file is re-read at most once per minute, so edits take effect without a restart; a missing file simply means no blocklist.
 
 ---
 
