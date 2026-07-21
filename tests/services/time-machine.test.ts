@@ -1210,4 +1210,29 @@ describe("resolveFollowingRedirects", () => {
 		expect(result.redirect).toBeDefined();
 		expect(fetchImpl).toHaveBeenCalledTimes(1);
 	});
+
+	it("degrades to the stub when a followed hop's fetch throws", async () => {
+		const fetchImpl = jest
+			.fn()
+			.mockResolvedValueOnce(redirectTo("http://a.com/", "http://b.com/final"))
+			.mockRejectedValueOnce(Object.assign(new Error("Not in archive"), { status: 404 }));
+		const deps = makeDeps(fetchImpl);
+
+		const result = await resolveFollowingRedirects(deps, "http://a.com/", "20010912000000");
+
+		expect(result.redirect).toEqual({ url: "http://b.com/final", time: "20010912000000" });
+		expect(fetchImpl).toHaveBeenCalledTimes(2);
+	});
+
+	it("propagates an error from the initial (hop 0) fetch", async () => {
+		const fetchImpl = jest
+			.fn()
+			.mockRejectedValueOnce(Object.assign(new Error("Not in archive"), { status: 404 }));
+		const deps = makeDeps(fetchImpl);
+
+		await expect(
+			resolveFollowingRedirects(deps, "http://a.com/", "20010912000000"),
+		).rejects.toThrow("Not in archive");
+		expect(fetchImpl).toHaveBeenCalledTimes(1);
+	});
 });

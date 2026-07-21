@@ -82,9 +82,26 @@ export async function resolveFollowingRedirects(
 	let currentUrl = url;
 	let currentTime = time;
 	const seen = new Set<string>([normalizeForLoop(url)]);
+	// The stub we most recently chose to follow past. If a FOLLOWED hop's fetch
+	// throws (e.g. the destination isn't archived), degrade to this stub rather
+	// than surfacing a 5xx — the user sees the redirect page they'd have seen
+	// before this feature. The initial fetch (lastStub still null) propagates.
+	let lastStub: ProxyResult | null = null;
 
 	for (let hop = 0; ; hop++) {
-		const result = await deps.proxy.fetch(currentUrl, currentTime, onProgress);
+		let result: ProxyResult;
+		try {
+			result = await deps.proxy.fetch(currentUrl, currentTime, onProgress);
+		} catch (e) {
+			if (lastStub) {
+				deps.logger.warn(
+					{ from: currentUrl, err: e instanceof Error ? e.message : String(e) },
+					"[meta-refresh] followed-hop fetch failed; serving stub",
+				);
+				return lastStub;
+			}
+			throw e;
+		}
 		if (!result.redirect) return result;
 
 		if (hop >= MAX_REDIRECT_HOPS) {
@@ -115,6 +132,7 @@ export async function resolveFollowingRedirects(
 			return result;
 		}
 		seen.add(key);
+		lastStub = result;
 		currentUrl = dest;
 		currentTime = result.redirect.time;
 	}

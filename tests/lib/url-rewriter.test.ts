@@ -1,6 +1,3 @@
-/**
- * @jest-environment jsdom
- */
 import {
 	discoverNavLinks,
 	type DiscoveredAsset,
