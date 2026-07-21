@@ -375,6 +375,10 @@ const isMetaRefresh = (el: Element): boolean => {
 	return httpEquiv?.value.toLowerCase() === "refresh";
 };
 
+interface RefreshCapture {
+	target: { url: string; time: string } | null;
+}
+
 const visit = (
 	node: Node,
 	targetUrl: string,
@@ -383,6 +387,7 @@ const visit = (
 	collect: Set<string>,
 	assets: DiscoveredAsset[],
 	proxyBase = "",
+	refresh: RefreshCapture,
 ): void => {
 	if (isElement(node)) {
 		const tag = node.tagName.toLowerCase();
@@ -398,7 +403,13 @@ const visit = (
 					? rewriteSrcsetValue(attr.value, targetUrl, time, attrLock, collect, assets, proxyBase)
 					: rewriteOneUrl(attr.value, targetUrl, time, attrLock, collect, assets, proxyBase);
 			} else if (metaRefresh && attr.name === "content") {
-				// meta-refresh navigates the document → honor lockTime.
+				// meta-refresh navigates the document → honor lockTime for the
+				// rewritten (inert) tag, and capture the ORIGINAL target once so
+				// the handler can follow it server-side.
+				if (refresh.target === null) {
+					const t = resolveMetaRefreshTarget(attr.value, targetUrl, time);
+					if (t) refresh.target = t;
+				}
 				attr.value = rewriteMetaRefresh(attr.value, targetUrl, time, lockTime, collect, assets, proxyBase);
 			} else if (attr.name === "style") {
 				// Inline CSS references assets → always keep the timestamp.
@@ -414,18 +425,20 @@ const visit = (
 		}
 	}
 	if (hasChildNodes(node)) {
-		for (const child of node.childNodes) visit(child, targetUrl, time, lockTime, collect, assets, proxyBase);
+		for (const child of node.childNodes) visit(child, targetUrl, time, lockTime, collect, assets, proxyBase, refresh);
 	}
 };
 
 export interface RewriteHtmlResult {
 	html: string;
 	discoveredAssets: DiscoveredAsset[];
+	metaRefresh?: { url: string; time: string };
 }
 
 export interface RewriteHtmlAstResult {
 	document: Document;
 	discoveredAssets: DiscoveredAsset[];
+	metaRefresh?: { url: string; time: string };
 }
 
 // Walk the tree depth-first to find the first element with the given tag name.
@@ -492,12 +505,13 @@ export const rewriteHtmlUrls = (
 ): RewriteHtmlResult => {
 	const collect = new Set<string>();
 	const assets: DiscoveredAsset[] = [];
+	const refresh: RefreshCapture = { target: null };
 	const doc = parse(html);
 	// <base href> handling first so its effective base is used during visit().
 	const effectiveBase = consumeBaseTag(doc, targetUrl);
-	visit(doc, effectiveBase, time, lockTime, collect, assets, proxyBase);
+	visit(doc, effectiveBase, time, lockTime, collect, assets, proxyBase, refresh);
 	injectShim(doc, targetUrl, time, lockTime, proxyBase);
-	return { html: serialize(doc), discoveredAssets: assets };
+	return { html: serialize(doc), discoveredAssets: assets, metaRefresh: refresh.target ?? undefined };
 };
 
 export const rewriteHtmlUrlsToAst = (
@@ -509,12 +523,13 @@ export const rewriteHtmlUrlsToAst = (
 ): RewriteHtmlAstResult => {
 	const collect = new Set<string>();
 	const assets: DiscoveredAsset[] = [];
+	const refresh: RefreshCapture = { target: null };
 	const doc = parse(html);
 	// <base href> handling first so its effective base is used during visit().
 	const effectiveBase = consumeBaseTag(doc, targetUrl);
-	visit(doc, effectiveBase, time, lockTime, collect, assets, proxyBase);
+	visit(doc, effectiveBase, time, lockTime, collect, assets, proxyBase, refresh);
 	injectShim(doc, targetUrl, time, lockTime, proxyBase);
-	return { document: doc, discoveredAssets: assets };
+	return { document: doc, discoveredAssets: assets, metaRefresh: refresh.target ?? undefined };
 };
 
 /**

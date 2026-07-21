@@ -8,6 +8,7 @@ import {
 	resolveMetaRefreshTarget,
 	rewriteCssUrls,
 	rewriteHtmlUrls,
+	rewriteHtmlUrlsToAst,
 	sanitizeTimeParam,
 	stripWaybackToolbar,
 	unwrapNestedProxyUrl,
@@ -971,5 +972,26 @@ describe("resolveMetaRefreshTarget", () => {
 
 	it("returns null for a non-http scheme", () => {
 		expect(resolveMetaRefreshTarget("0;url=javascript:alert(1)", TGT, TIME)).toBeNull();
+	});
+});
+
+describe("rewriteHtmlUrlsToAst metaRefresh capture", () => {
+	const T = "http://www.example.com/page";
+
+	it("captures the first meta-refresh target", () => {
+		const html =
+			'<html><head><meta http-equiv="refresh" content="0;url=http://other.com/x"></head><body></body></html>';
+		const { metaRefresh } = rewriteHtmlUrlsToAst(html, T, TIME);
+		expect(metaRefresh).toEqual({ url: "http://other.com/x", time: TIME });
+	});
+
+	it("omits metaRefresh for a normal page", () => {
+		const html = "<html><head><title>hi</title></head><body><p>x</p></body></html>";
+		expect(rewriteHtmlUrlsToAst(html, T, TIME).metaRefresh).toBeUndefined();
+	});
+
+	it("omits metaRefresh for a self-reload (no url)", () => {
+		const html = '<html><head><meta http-equiv="refresh" content="30"></head></html>';
+		expect(rewriteHtmlUrlsToAst(html, T, TIME).metaRefresh).toBeUndefined();
 	});
 });
