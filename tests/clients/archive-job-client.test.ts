@@ -14,7 +14,9 @@ import { ArchiveJobClient } from "../../src/clients/archive-job-client";
 
 interface FakeJob {
 	id: string | undefined;
+	priority: number;
 	waitUntilFinished: jest.Mock;
+	changePriority: jest.Mock;
 }
 
 interface FakeQueue {
@@ -24,17 +26,20 @@ interface FakeQueue {
 
 type AddArgs = [string, Record<string, unknown>, Record<string, unknown>];
 
-function makeFakeJob(id?: string): FakeJob {
+function makeFakeJob(id?: string, priority = 0): FakeJob {
 	return {
 		id,
+		priority,
 		waitUntilFinished: jest.fn().mockResolvedValue(undefined),
+		changePriority: jest.fn().mockResolvedValue(undefined),
 	};
 }
 
 function makeFakeQueue(): FakeQueue {
 	return {
-		add: jest.fn(async (_name: string, _data: unknown, opts: { jobId?: string }) =>
-			makeFakeJob(opts?.jobId),
+		// Mirror BullMQ: the returned job carries the priority this add passed.
+		add: jest.fn(async (_name: string, _data: unknown, opts: { jobId?: string; priority?: number }) =>
+			makeFakeJob(opts?.jobId, opts?.priority ?? 0),
 		),
 		addBulk: jest.fn().mockResolvedValue([]),
 	};
@@ -73,11 +78,16 @@ function makeEvents(): FakeEvents {
 	return events;
 }
 
+// Default crawl priority used by makeClient unless a test overrides it. The
+// production default is 10; the value only needs to be > FOREGROUND_PRIORITY (1).
+const CRAWL_PRIORITY = 10;
+
 function makeClient(
 	overrides: {
 		exactQueue?: FakeQueue;
 		crawlQueue?: FakeQueue;
 		domainCrawlEnabled?: boolean;
+		crawlJobPriority?: number;
 		logger?: pino.Logger;
 	} = {},
 ): {
@@ -92,6 +102,7 @@ function makeClient(
 	const exactEvents = makeEvents();
 	const logger = overrides.logger ?? makeLogger();
 	const domainCrawlEnabled = overrides.domainCrawlEnabled ?? true;
+	const crawlJobPriority = overrides.crawlJobPriority ?? CRAWL_PRIORITY;
 	const client = new ArchiveJobClient(
 		// Cast to the bullmq types — fakes intentionally implement only the
 		// methods the client touches.
@@ -100,6 +111,7 @@ function makeClient(
 		exactEvents as unknown as ConstructorParameters<typeof ArchiveJobClient>[2],
 		logger,
 		domainCrawlEnabled,
+		crawlJobPriority,
 	);
 	return { client, exactQueue, crawlQueue, exactEvents, logger };
 }
@@ -177,7 +189,9 @@ describe("ArchiveJobClient.enqueueExactAndWait", () => {
 	it("propagates failures by rejecting when waitUntilFinished rejects", async () => {
 		const failingJob: FakeJob = {
 			id: "e-abc",
+			priority: 0,
 			waitUntilFinished: jest.fn().mockRejectedValue(new Error("job failed")),
+			changePriority: jest.fn().mockResolvedValue(undefined),
 		};
 		const exactQueue: FakeQueue = {
 			add: jest.fn().mockResolvedValue(failingJob),
@@ -275,7 +289,9 @@ describe("ArchiveJobClient.enqueueExactAndWait", () => {
 		const expectedId = expectedExactJobId(TARGET_URL, TIME);
 		const job: FakeJob = {
 			id: expectedId,
+			priority: 0,
 			waitUntilFinished: jest.fn().mockRejectedValue(new Error("boom")),
+			changePriority: jest.fn().mockResolvedValue(undefined),
 		};
 		const exactQueue: FakeQueue = { add: jest.fn().mockResolvedValue(job) };
 		const { client, exactEvents } = makeClient({ exactQueue });
@@ -424,5 +440,69 @@ describe("ArchiveJobClient.enqueueExact (crawl meta)", () => {
 		await client.enqueueExact("https://example.com/US/", TIME);
 		const data = exactQueue.add!.mock.calls[0][1] as Record<string, unknown>;
 		expect(data.crawl).toBeUndefined();
+	});
+});
+
+// --- priority ordering: crawl-derived vs real-time ---------------------------
+//
+// Real-time (foreground) exact jobs must outrank exact jobs created as part of
+// a domain crawl, so a backlog of crawl-discovered links can't starve a live
+// request. BullMQ uses lower-number = higher priority, so foreground jobs get
+// priority 1 (top) and crawl-derived jobs get the configured (higher) value.
+
+describe("ArchiveJobClient priority (crawl-derived vs real-time)", () => {
+	it("tags a crawl-derived exact job with the configured low crawl priority", async () => {
+		const { client, exactQueue } = makeClient({ crawlJobPriority: 10 });
+		await client.enqueueExact("https://example.com/US/", TIME, {
+			rootHost: "example.com",
+			rootTime: TIME,
+			depth: 1,
+		});
+		const [, , opts] = exactQueue.add.mock.calls[0] as AddArgs;
+		expect(opts.priority).toBe(10);
+	});
+
+	it("honors a different configured crawl priority", async () => {
+		const { client, exactQueue } = makeClient({ crawlJobPriority: 50 });
+		await client.enqueueExact("https://example.com/US/", TIME, {
+			rootHost: "example.com",
+			rootTime: TIME,
+			depth: 1,
+		});
+		const [, , opts] = exactQueue.add.mock.calls[0] as AddArgs;
+		expect(opts.priority).toBe(50);
+	});
+
+	it("does NOT assign a crawl priority to a fire-and-forget exact without crawl meta", async () => {
+		const { client, exactQueue } = makeClient();
+		await client.enqueueExact(TARGET_URL, TIME);
+		const [, , opts] = exactQueue.add.mock.calls[0] as AddArgs;
+		expect(opts.priority).toBeUndefined();
+	});
+
+	it("adds a real-time (enqueueExactAndWait) job at the top priority (1)", async () => {
+		const { client, exactQueue } = makeClient();
+		await client.enqueueExactAndWait(TARGET_URL, TIME);
+		const [, , opts] = exactQueue.add.mock.calls[0] as AddArgs;
+		expect(opts.priority).toBe(1);
+	});
+
+	it("promotes the job to top priority via changePriority (covers dedup onto a queued low-priority crawl job)", async () => {
+		// Simulate the collision: the jobId already exists as a crawl job at
+		// priority 10, so add() returns that existing job unchanged.
+		const existing = makeFakeJob(expectedExactJobId(TARGET_URL, TIME), 10);
+		const exactQueue: FakeQueue = { add: jest.fn().mockResolvedValue(existing) };
+		const { client } = makeClient({ exactQueue });
+		await client.enqueueExactAndWait(TARGET_URL, TIME);
+		expect(existing.changePriority).toHaveBeenCalledWith({ priority: 1 });
+	});
+
+	it("still resolves when changePriority throws (e.g. job already active)", async () => {
+		const active = makeFakeJob(expectedExactJobId(TARGET_URL, TIME), 10);
+		active.changePriority.mockRejectedValue(new Error("not in a priority state"));
+		const exactQueue: FakeQueue = { add: jest.fn().mockResolvedValue(active) };
+		const { client } = makeClient({ exactQueue });
+		await expect(client.enqueueExactAndWait(TARGET_URL, TIME)).resolves.toBeUndefined();
+		expect(active.waitUntilFinished).toHaveBeenCalledTimes(1);
 	});
 });

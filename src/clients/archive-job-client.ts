@@ -44,6 +44,14 @@ const BASE_JOB_OPTS = {
  */
 const WAIT_TIMEOUT_MS = 200_000;
 
+/**
+ * Top priority for real-time (foreground) exact jobs. BullMQ orders by
+ * lower-number-first, so 1 is the highest assignable priority. Crawl-derived
+ * exact jobs get a configurable, numerically-higher (lower) priority so a
+ * crawl backlog cannot starve live requests.
+ */
+const FOREGROUND_PRIORITY = 1;
+
 export type JobProgressListener = (progress: JobProgress) => void;
 
 /**
@@ -83,6 +91,7 @@ export class ArchiveJobClient implements ArchiveJobClientPort {
 		private readonly exactEvents: QueueEvents,
 		private readonly logger: pino.Logger,
 		private readonly domainCrawlEnabled: boolean,
+		private readonly crawlJobPriority: number,
 	) {}
 
 	async enqueueExactAndWait(
@@ -91,7 +100,12 @@ export class ArchiveJobClient implements ArchiveJobClientPort {
 		onProgress?: JobProgressListener,
 	): Promise<void> {
 		const jobId = exactJobId(url, time);
-		const job = await this.exactQueue.add("exact", { url, time }, { ...BASE_JOB_OPTS, jobId });
+		const job = await this.exactQueue.add(
+			"exact",
+			{ url, time },
+			{ ...BASE_JOB_OPTS, jobId, priority: FOREGROUND_PRIORITY },
+		);
+
 		this.logger.debug(
 			{ jobId: job.id, url, time },
 			"[archive-job-client] enqueued exact, awaiting",
@@ -114,7 +128,24 @@ export class ArchiveJobClient implements ArchiveJobClientPort {
 				);
 			}
 		};
+		// Subscribe BEFORE the promotion below so an early progress event from a
+		// crawl job already in-flight (the dedup case) isn't missed.
 		if (onProgress) this.exactEvents.on("progress", progressHandler);
+
+		// Promote to the foreground priority. The deterministic jobId means this
+		// add may have deduped onto a job already queued by a domain crawl at a
+		// lower (numerically higher) priority; `add` returns that existing job
+		// WITHOUT overwriting its priority, so re-assert it explicitly. Issued
+		// fire-and-forget: blocking the foreground wait on the reorder buys
+		// nothing, and changePriority rejects harmlessly if the job has already
+		// moved to active/completed (nothing left to reorder).
+		job.changePriority({ priority: FOREGROUND_PRIORITY }).catch((e) => {
+			this.logger.debug(
+				{ jobId: job.id, err: e instanceof Error ? e.message : String(e) },
+				"[archive-job-client] changePriority skipped (job not in a reprioritizable state)",
+			);
+		});
+
 		try {
 			await job.waitUntilFinished(this.exactEvents, WAIT_TIMEOUT_MS);
 		} finally {
@@ -125,9 +156,15 @@ export class ArchiveJobClient implements ArchiveJobClientPort {
 	async enqueueExact(url: string, time: string, crawl?: CrawlMeta): Promise<void> {
 		const jobId = exactJobId(url, time);
 		const data: ExactUrlJob = crawl ? { url, time, crawl } : { url, time };
-		await this.exactQueue.add("exact", data, { ...BASE_JOB_OPTS, jobId });
+		// Crawl-derived exact jobs run at a lower priority so a large crawl
+		// backlog cannot starve real-time (foreground) requests. A plain
+		// fire-and-forget exact (no crawl provenance) stays unprioritized.
+		const opts = crawl
+			? { ...BASE_JOB_OPTS, jobId, priority: this.crawlJobPriority }
+			: { ...BASE_JOB_OPTS, jobId };
+		await this.exactQueue.add("exact", data, opts);
 		this.logger.debug(
-			{ jobId, url, time, crawlDepth: crawl?.depth },
+			{ jobId, url, time, crawlDepth: crawl?.depth, priority: crawl ? this.crawlJobPriority : undefined },
 			"[archive-job-client] enqueued exact",
 		);
 	}

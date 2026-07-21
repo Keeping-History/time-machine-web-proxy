@@ -24,6 +24,11 @@ export interface Config {
 	/** Recursive (BFS) crawl: max HTML pages to recurse into per crawl run
 	 *  (caps load on archive.org). Env: CRAWL_MAX_PAGES (default 1000, 1-1000000). */
 	crawlMaxPages: number;
+	/** BullMQ priority assigned to exact jobs created by a domain crawl, so a
+	 *  crawl backlog can't starve real-time requests (which run at top priority
+	 *  1). Lower number = higher priority, so this must be > 1.
+	 *  Env: CRAWL_JOB_PRIORITY (default 10, 2-2097152). */
+	crawlJobPriority: number;
 	outboundProxyUrls: string[];
 	outboundProxyChooser: OutboundProxyChooser;
 	outboundProxyUsername: string;

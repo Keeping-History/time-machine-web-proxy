@@ -29,6 +29,7 @@ describe("loadConfig", () => {
 		delete process.env.WORKER_RATE_LIMIT_PER_SEC;
 		delete process.env.CRAWL_MAX_DEPTH;
 		delete process.env.CRAWL_MAX_PAGES;
+		delete process.env.CRAWL_JOB_PRIORITY;
 		delete process.env.OUTBOUND_PROXY_URLS;
 		delete process.env.OUTBOUND_PROXY_USERNAME;
 		delete process.env.OUTBOUND_PROXY_PASSWORD;
@@ -51,6 +52,7 @@ describe("loadConfig", () => {
 		expect(config.workerRateLimitPerSec).toBe(1);
 		expect(config.crawlMaxDepth).toBe(3);
 		expect(config.crawlMaxPages).toBe(1000);
+		expect(config.crawlJobPriority).toBe(10);
 		expect(config.outboundProxyUrls).toEqual([]);
 		expect(config.outboundProxyUsername).toBe("");
 		expect(config.outboundProxyPassword).toBe("");
@@ -185,6 +187,26 @@ describe("loadConfig", () => {
 	it("CRAWL_MAX_DEPTH=21 is rejected (above max 20)", () => {
 		process.env.CRAWL_MAX_DEPTH = "21";
 		expect(() => loadConfig()).toThrow(/CRAWL_MAX_DEPTH/);
+	});
+
+	it("CRAWL_JOB_PRIORITY defaults to 10 when unset", () => {
+		delete process.env.CRAWL_JOB_PRIORITY;
+		expect(loadConfig().crawlJobPriority).toBe(10);
+	});
+
+	it("CRAWL_JOB_PRIORITY=25 parses correctly", () => {
+		process.env.CRAWL_JOB_PRIORITY = "25";
+		expect(loadConfig().crawlJobPriority).toBe(25);
+	});
+
+	it("CRAWL_JOB_PRIORITY=1 is rejected (must rank below foreground priority 1)", () => {
+		process.env.CRAWL_JOB_PRIORITY = "1";
+		expect(() => loadConfig()).toThrow(/CRAWL_JOB_PRIORITY/);
+	});
+
+	it("CRAWL_JOB_PRIORITY=2097153 is rejected (above BullMQ max 2097152)", () => {
+		process.env.CRAWL_JOB_PRIORITY = "2097153";
+		expect(() => loadConfig()).toThrow(/CRAWL_JOB_PRIORITY/);
 	});
 
 	it("CRAWL_MAX_PAGES defaults to 1000 when unset", () => {
