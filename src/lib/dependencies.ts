@@ -122,6 +122,7 @@ export class Dependencies {
 			exactEvents,
 			logger,
 			config.domainCrawlEnabled,
+			config.crawlJobPriority,
 		);
 		const workers = startArchiveWorkers({
 			connection: redis,

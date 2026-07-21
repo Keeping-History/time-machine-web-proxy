@@ -87,6 +87,7 @@ const baseConfig: Config = {
 	workerRateLimitPerSec: 1,
 	crawlMaxDepth: 3,
 	crawlMaxPages: 1000,
+	crawlJobPriority: 10,
 	outboundProxyUrls: [],
 	outboundProxyChooser: "sequential",
 	outboundProxyUsername: "",

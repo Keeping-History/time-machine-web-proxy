@@ -94,6 +94,13 @@ export function loadConfig(): Config {
 			1,
 			1_000_000,
 		),
+		crawlJobPriority: parseIntInRange(
+			process.env.CRAWL_JOB_PRIORITY,
+			"CRAWL_JOB_PRIORITY",
+			10,
+			2,
+			2_097_152,
+		),
 		outboundProxyUrls: parseOutboundProxyUrls(process.env.OUTBOUND_PROXY_URLS),
 		outboundProxyChooser: parseOutboundProxyChooser(process.env.OUTBOUND_PROXY_CHOOSER),
 		outboundProxyUsername: process.env.OUTBOUND_PROXY_USERNAME ?? "",
