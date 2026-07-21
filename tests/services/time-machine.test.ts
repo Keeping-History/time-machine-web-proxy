@@ -9,7 +9,9 @@ import type { Config } from "../../src/models/config";
 import type { CacheService } from "../../src/services/cache";
 import type { SystemStatus } from "../../src/models/status";
 import type { ProxyService } from "../../src/services/proxy";
-import { TimeMachineService } from "../../src/services/time-machine";
+import { resolveFollowingRedirects, TimeMachineService } from "../../src/services/time-machine";
+import type { HandlerDeps } from "../../src/services/time-machine";
+import type { ProxyResult } from "../../src/models/proxy";
 
 const logger = pino({ level: "silent" });
 
@@ -148,7 +150,7 @@ describe("TimeMachineService HTTP handler — path-based /web/{ts}/{url} input",
 		try {
 			const r = await fetch(`http://127.0.0.1:${port}/web/20020401000000/http://example.com/page`);
 			expect(r.status).toBe(200);
-			expect(proxy.fetch).toHaveBeenCalledWith("http://example.com/page", "20020401000000");
+			expect(proxy.fetch).toHaveBeenCalledWith("http://example.com/page", "20020401000000", undefined);
 		} finally {
 			await svc.stop();
 		}
@@ -170,7 +172,7 @@ describe("TimeMachineService HTTP handler — path-based /web/{ts}/{url} input",
 				`http://127.0.0.1:${port}/web/20020401000000im_/http://example.com/logo.png`,
 			);
 			expect(r.status).toBe(200);
-			expect(proxy.fetch).toHaveBeenCalledWith("http://example.com/logo.png", "20020401000000");
+			expect(proxy.fetch).toHaveBeenCalledWith("http://example.com/logo.png", "20020401000000", undefined);
 		} finally {
 			await svc.stop();
 		}
@@ -194,6 +196,7 @@ describe("TimeMachineService HTTP handler — path-based /web/{ts}/{url} input",
 			expect(proxy.fetch).toHaveBeenCalledWith(
 				"http://example.com/page?foo=bar&baz=qux",
 				"20020401000000",
+				undefined,
 			);
 		} finally {
 			await svc.stop();
@@ -209,7 +212,7 @@ describe("TimeMachineService HTTP handler — path-based /web/{ts}/{url} input",
 			const enc = encodeURIComponent("http://example.com/page");
 			const r = await fetch(`http://127.0.0.1:${port}/?url=${enc}&time=20020401000000`);
 			expect(r.status).toBe(200);
-			expect(proxy.fetch).toHaveBeenCalledWith("http://example.com/page", "20020401000000");
+			expect(proxy.fetch).toHaveBeenCalledWith("http://example.com/page", "20020401000000", undefined);
 		} finally {
 			await svc.stop();
 		}
@@ -237,7 +240,7 @@ describe("TimeMachineService HTTP handler — path-based /web/{ts}/{url} input",
 		try {
 			const r = await fetch(`http://127.0.0.1:${port}/web/http://example.com/page`);
 			expect(r.status).toBe(200);
-			expect(proxy.fetch).toHaveBeenCalledWith("http://example.com/page", config.defaultTime);
+			expect(proxy.fetch).toHaveBeenCalledWith("http://example.com/page", config.defaultTime, undefined);
 		} finally {
 			await svc.stop();
 		}
@@ -1122,5 +1125,89 @@ describe("TimeMachineService WebSocket handler — /ws", () => {
 			ws.close();
 			await svc.stop();
 		}
+	});
+});
+
+describe("resolveFollowingRedirects", () => {
+	const nonRedirect = (url: string): ProxyResult => ({
+		contentType: "text/html",
+		archiveUrl: url,
+		originalUrl: url,
+		archiveTime: "20010912000000",
+		body: `<html>${url}</html>`,
+		cache: "HIT",
+	});
+	const redirectTo = (url: string, dest: string): ProxyResult => ({
+		...nonRedirect(url),
+		redirect: { url: dest, time: "20010912000000" },
+	});
+
+	const makeDeps = (
+		fetchImpl: jest.Mock,
+		validator?: Partial<HandlerDeps["validator"]>,
+	): HandlerDeps =>
+		({
+			config: { whitelistHosts: ["*"] } as Config,
+			proxy: { fetch: fetchImpl } as unknown as ProxyService,
+			cache: {} as CacheService,
+			validator: {
+				validateTargetUrl: validator?.validateTargetUrl ?? ((u: string) => u),
+				isHostWhitelisted: validator?.isHostWhitelisted ?? (() => true),
+			},
+			logger,
+		}) as HandlerDeps;
+
+	it("returns the destination result after following one hop", async () => {
+		const fetchImpl = jest
+			.fn()
+			.mockResolvedValueOnce(redirectTo("http://a.com/", "http://b.com/final"))
+			.mockResolvedValueOnce(nonRedirect("http://b.com/final"));
+		const deps = makeDeps(fetchImpl);
+
+		const result = await resolveFollowingRedirects(deps, "http://a.com/", "20010912000000");
+
+		expect(result.redirect).toBeUndefined();
+		expect(result.originalUrl).toBe("http://b.com/final");
+		expect(fetchImpl).toHaveBeenNthCalledWith(2, "http://b.com/final", "20010912000000", undefined);
+	});
+
+	it("stops at MAX_REDIRECT_HOPS and returns the last stub", async () => {
+		// Always redirects to a fresh URL so the loop is bounded only by hop count.
+		let n = 0;
+		const fetchImpl = jest.fn().mockImplementation(() =>
+			Promise.resolve(redirectTo(`http://a.com/${n}`, `http://a.com/${++n}`)),
+		);
+		const deps = makeDeps(fetchImpl);
+
+		const result = await resolveFollowingRedirects(deps, "http://a.com/0", "20010912000000");
+
+		expect(result.redirect).toBeDefined();
+		// 1 initial + MAX_REDIRECT_HOPS follows = 6 fetches.
+		expect(fetchImpl).toHaveBeenCalledTimes(6);
+	});
+
+	it("stops on a redirect loop and returns the stub", async () => {
+		const fetchImpl = jest
+			.fn()
+			.mockResolvedValueOnce(redirectTo("http://a.com/", "http://b.com/"))
+			.mockResolvedValueOnce(redirectTo("http://b.com/", "http://a.com/"));
+		const deps = makeDeps(fetchImpl);
+
+		const result = await resolveFollowingRedirects(deps, "http://a.com/", "20010912000000");
+
+		expect(result.redirect).toEqual({ url: "http://a.com/", time: "20010912000000" });
+		expect(fetchImpl).toHaveBeenCalledTimes(2);
+	});
+
+	it("does not follow a non-whitelisted target", async () => {
+		const fetchImpl = jest
+			.fn()
+			.mockResolvedValueOnce(redirectTo("http://a.com/", "http://evil.com/"));
+		const deps = makeDeps(fetchImpl, { isHostWhitelisted: () => false });
+
+		const result = await resolveFollowingRedirects(deps, "http://a.com/", "20010912000000");
+
+		expect(result.redirect).toBeDefined();
+		expect(fetchImpl).toHaveBeenCalledTimes(1);
 	});
 });

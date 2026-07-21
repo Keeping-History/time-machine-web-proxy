@@ -13,6 +13,8 @@ import type { JobProgress } from "../models/job-progress";
 import type { SystemStatus } from "../models/status";
 import { isWsRequest, type WsRequest, type WsResponse } from "../models/websocket";
 import type { UrlValidatorModule } from "../models/url-validator";
+import type { JobProgressListener } from "../clients/archive-job-client";
+import type { ProxyResult } from "../models/proxy";
 import type { CacheService } from "./cache";
 import type { ProxyService } from "./proxy";
 
@@ -47,6 +49,75 @@ export interface HandlerDeps {
 	readonly validator: UrlValidatorModule;
 	readonly logger: pino.Logger;
 	readonly getStatus?: () => Promise<SystemStatus>;
+}
+
+/** Max meta-refresh hops followed server-side before serving the stub as-is. */
+const MAX_REDIRECT_HOPS = 5;
+
+/** Origin + path + query, host lower-cased and one trailing slash trimmed —
+ * a loose key for loop detection, not a security decision. */
+function normalizeForLoop(url: string): string {
+	try {
+		const u = new URL(url);
+		return `${u.protocol}//${u.hostname.toLowerCase()}${u.pathname.replace(/\/$/, "")}${u.search}`;
+	} catch {
+		return url;
+	}
+}
+
+/**
+ * Fetch `url`, and while the proxy reports a meta-refresh redirect, re-validate
+ * the destination (SSRF + whitelist — the same boundary the handlers enforce on
+ * the initial URL) and re-fetch it. Bounded by MAX_REDIRECT_HOPS and a visited
+ * set (kills A→B→A loops and self-refresh). On hop-limit, revisit, or a
+ * destination that fails validation/whitelist, returns the last (fully
+ * rewritten) stub result so the client degrades to today's behavior.
+ */
+export async function resolveFollowingRedirects(
+	deps: HandlerDeps,
+	url: string,
+	time: string,
+	onProgress?: JobProgressListener,
+): Promise<ProxyResult> {
+	let currentUrl = url;
+	let currentTime = time;
+	const seen = new Set<string>([normalizeForLoop(url)]);
+
+	for (let hop = 0; ; hop++) {
+		const result = await deps.proxy.fetch(currentUrl, currentTime, onProgress);
+		if (!result.redirect) return result;
+
+		if (hop >= MAX_REDIRECT_HOPS) {
+			deps.logger.warn(
+				{ from: currentUrl, to: result.redirect.url, hop },
+				"[meta-refresh] hop limit reached; serving stub",
+			);
+			return result;
+		}
+
+		let dest: string;
+		try {
+			dest = deps.validator.validateTargetUrl(result.redirect.url);
+		} catch (e) {
+			deps.logger.warn(
+				{ to: result.redirect.url, err: e instanceof Error ? e.message : String(e) },
+				"[meta-refresh] target failed validation; serving stub",
+			);
+			return result;
+		}
+		if (!deps.validator.isHostWhitelisted(dest, deps.config.whitelistHosts)) {
+			deps.logger.warn({ to: dest }, "[meta-refresh] target not whitelisted; serving stub");
+			return result;
+		}
+		const key = normalizeForLoop(dest);
+		if (seen.has(key)) {
+			deps.logger.warn({ to: dest }, "[meta-refresh] redirect loop detected; serving stub");
+			return result;
+		}
+		seen.add(key);
+		currentUrl = dest;
+		currentTime = result.redirect.time;
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -167,7 +238,7 @@ async function sseHandler(
 	const onProgress = (p: JobProgress): void => writeEvent("progress", p);
 
 	try {
-		const result = await deps.proxy.fetch(targetUrl, time, onProgress);
+		const result = await resolveFollowingRedirects(deps, targetUrl, time, onProgress);
 		const bodyBytes = result.bodyPath
 			? await fsPromises.readFile(result.bodyPath)
 			: result.body;
@@ -379,7 +450,7 @@ export async function httpHandler(
 	}
 
 	try {
-		const result = await deps.proxy.fetch(targetUrl, time);
+		const result = await resolveFollowingRedirects(deps, targetUrl, time);
 		res.setHeader("Content-Type", result.contentType);
 		res.setHeader("X-Archive-Url", result.archiveUrl);
 		res.setHeader("X-Original-Url", result.originalUrl);
@@ -532,8 +603,7 @@ export async function wsHandler(
 			);
 		};
 
-		deps.proxy
-			.fetch(targetUrl, time, onProgress)
+		resolveFollowingRedirects(deps, targetUrl, time, onProgress)
 			.then(async (result) => {
 				if (ws.readyState !== ws.OPEN) return;
 				const bodyBytes = result.bodyPath
